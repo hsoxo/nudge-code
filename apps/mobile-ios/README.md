@@ -22,13 +22,13 @@ Current scaffold:
 - terminal preview rendered through `WKWebView`, ready to replace with xterm.js assets.
 - phone/computer width segmented control.
 - pairing URL parser and pending binding screen.
-- first-pass relay claim client.
+- Keychain-backed phone signing identity.
+- first-pass relay claim client using the phone public key.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 
 Still open:
 
 - camera QR scanner.
-- Keychain-backed phone identity key.
 - signed relay authentication.
 - websocket session sync.
 - E2E encrypted terminal/control stream.

@@ -1,15 +1,17 @@
 import Foundation
 
 protocol RelayClient: Sendable {
-    func claimBinding(code: String, relayURL: URL, phonePublicKey: String) async throws
+    func claimBinding(code: String, relayURL: URL) async throws
     func connect(machine: Machine) async throws
 }
 
 struct HTTPRelayClient: RelayClient {
     var urlSession: URLSession = .shared
+    var identityStore: any PhoneIdentityStore = KeychainPhoneIdentityStore()
 
-    func claimBinding(code: String, relayURL: URL, phonePublicKey: String) async throws {
-        let device = try await registerPhone(relayURL: relayURL, phonePublicKey: phonePublicKey)
+    func claimBinding(code: String, relayURL: URL) async throws {
+        let identity = try identityStore.loadOrCreate()
+        let device = try await registerPhone(relayURL: relayURL, phonePublicKey: identity.publicKey)
         var request = URLRequest(url: relayURL.appending(path: "/api/bind/claim"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
