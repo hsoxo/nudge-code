@@ -19,6 +19,7 @@ targets:
         CFBundleDisplayName: Nudge
         UILaunchScreen:
           UIColorName: ""
+        NSCameraUsageDescription: Nudge scans the computer pairing QR code to bind this phone.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:

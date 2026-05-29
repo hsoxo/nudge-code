@@ -13,6 +13,7 @@
 		47EF55C59B330A80EA627F65 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07C32F7596AC4204FE7DB41B /* AppModel.swift */; };
 		4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8105D658D50E1B394E3AB00A /* RootView.swift */; };
 		4EB286295CD8654DB306ED98 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70813C9517C8F1A1F13E1C14 /* Models.swift */; };
+		54FF5080CE2C76FF5C623369 /* QRCodeScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */; };
 		612BE89E5B908A40931AA2B8 /* PhoneIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC367395E42690D0611FD4F /* PhoneIdentity.swift */; };
 		67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */; };
 		6FD47E14D5279F536578AE24 /* TerminalWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */; };
@@ -21,6 +22,7 @@
 		A61EC7D01A6A54CD5C25BD4D /* KeyboardProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 477437F016264FB106BE4DD6 /* KeyboardProfile.swift */; };
 		C4B0DFA4033C2778AA93F38E /* NudgeMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */; };
 		D6067C999B0ABAA0140521C7 /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */; };
+		DE490C12270A810549FF7DD5 /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6981535CC9741519F80F820 /* QRCodeScannerView.swift */; };
 		EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5176396EFFD6E84B7038953C /* BindingDraftTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -49,6 +51,8 @@
 		76FC0F6746DA7E92153CCFE2 /* NudgeMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NudgeMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8105D658D50E1B394E3AB00A /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		89B5F92116FB1677274807C0 /* RelayClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClientTests.swift; sourceTree = "<group>"; };
+		A6981535CC9741519F80F820 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
+		B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerTests.swift; sourceTree = "<group>"; };
 		BFC367395E42690D0611FD4F /* PhoneIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneIdentity.swift; sourceTree = "<group>"; };
 		C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWorkspaceView.swift; sourceTree = "<group>"; };
 		D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClient.swift; sourceTree = "<group>"; };
@@ -72,6 +76,7 @@
 				5176396EFFD6E84B7038953C /* BindingDraftTests.swift */,
 				70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */,
 				72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */,
+				B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */,
 				89B5F92116FB1677274807C0 /* RelayClientTests.swift */,
 			);
 			name = NudgeMobileTests;
@@ -97,6 +102,7 @@
 				70813C9517C8F1A1F13E1C14 /* Models.swift */,
 				11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */,
 				BFC367395E42690D0611FD4F /* PhoneIdentity.swift */,
+				A6981535CC9741519F80F820 /* QRCodeScannerView.swift */,
 				D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */,
 				8105D658D50E1B394E3AB00A /* RootView.swift */,
 				7527BD8E3C859A4111FD7906 /* ShortcutKeyboardView.swift */,
@@ -184,6 +190,7 @@
 				EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */,
 				67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */,
 				9E24FCC57E5E2A9AA8445119 /* PhoneIdentityTests.swift in Sources */,
+				54FF5080CE2C76FF5C623369 /* QRCodeScannerTests.swift in Sources */,
 				3298BA15E16197662BBB6001 /* RelayClientTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -198,6 +205,7 @@
 				4EB286295CD8654DB306ED98 /* Models.swift in Sources */,
 				C4B0DFA4033C2778AA93F38E /* NudgeMobileApp.swift in Sources */,
 				612BE89E5B908A40931AA2B8 /* PhoneIdentity.swift in Sources */,
+				DE490C12270A810549FF7DD5 /* QRCodeScannerView.swift in Sources */,
 				D6067C999B0ABAA0140521C7 /* RelayClient.swift in Sources */,
 				4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */,
 				431C277655C016FB209A197B /* ShortcutKeyboardView.swift in Sources */,

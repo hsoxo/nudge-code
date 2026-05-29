@@ -20,6 +20,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Nudge scans the computer pairing QR code to bind this phone.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

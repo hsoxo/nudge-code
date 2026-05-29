@@ -22,6 +22,7 @@ Current scaffold:
 - terminal preview rendered through `WKWebView`, ready to replace with xterm.js assets.
 - phone/computer width segmented control.
 - pairing URL parser and pending binding screen.
+- camera QR scanner for pairing URLs.
 - Keychain-backed phone signing identity.
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
@@ -33,7 +34,6 @@ Current scaffold:
 
 Still open:
 
-- camera QR scanner.
 - signed relay authentication.
 - continuous websocket session sync.
 - E2E encrypted terminal/control stream.

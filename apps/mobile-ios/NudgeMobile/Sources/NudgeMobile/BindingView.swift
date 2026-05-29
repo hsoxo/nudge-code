@@ -4,6 +4,7 @@ struct BindingView: View {
     @Environment(AppModel.self) private var model
     @State private var pairingURLText = ""
     @State private var parseError: String?
+    @State private var isShowingScanner = false
 
     var body: some View {
         @Bindable var model = model
@@ -21,6 +22,11 @@ struct BindingView: View {
                     }
                 } label: {
                     Label("Read Pairing URL", systemImage: "qrcode")
+                }
+                Button {
+                    isShowingScanner = true
+                } label: {
+                    Label("Scan QR Code", systemImage: "qrcode.viewfinder")
                 }
                 if let parseError {
                     Text(parseError)
@@ -59,5 +65,31 @@ struct BindingView: View {
             }
         }
         .navigationTitle("Bind")
+        .sheet(isPresented: $isShowingScanner) {
+            NavigationStack {
+                QRCodeScannerView { value in
+                    pairingURLText = value
+                    if model.parsePairingURL(value) {
+                        parseError = nil
+                        isShowingScanner = false
+                    } else {
+                        parseError = "Invalid pairing QR code"
+                    }
+                } onError: { error in
+                    parseError = error.message
+                    isShowingScanner = false
+                }
+                .ignoresSafeArea()
+                .navigationTitle("Scan Pairing Code")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Cancel") {
+                            isShowingScanner = false
+                        }
+                    }
+                }
+            }
+        }
     }
 }
