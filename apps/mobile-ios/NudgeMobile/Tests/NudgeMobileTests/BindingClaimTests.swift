@@ -241,6 +241,59 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 24, cols: 80))
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ date")
     }
+
+    @Test func appModelSyncsSelectedMachineThroughOpenRelaySession() async throws {
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://nudgecode.dev")!,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .active,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+        let remoteTab = TerminalTab(
+            id: "default",
+            title: "Claude",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .claude, state: .needsApproval, confidence: 0.82, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 24, cols: 80),
+                text: "Claude asks for approval"
+            ))
+        ])
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+
+        await model.syncSelectedMachineSession()
+
+        #expect(client.openSessionRequests == [machine])
+        #expect(session.sessionStateRequestCount == 1)
+        #expect(session.snapshotRequests == ["default"])
+        #expect(session.closed)
+        #expect(model.machines.first?.connectionState == .offline)
+        #expect(model.machines.first?.lastSeenText == "relay session disconnected")
+        #expect(model.selectedTabID == "default")
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "Claude asks for approval")
+        #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 24, cols: 80))
+    }
 }
 
 private struct RelayClaim: Equatable {
@@ -269,11 +322,13 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var claims: [RelayClaim] = []
     var statusRequests: [BindingStatusRequest] = []
     var sessionRequests: [Machine] = []
+    var openSessionRequests: [Machine] = []
     var inputRequests: [TerminalInputRequest] = []
     var snapshotRequests: [TerminalSnapshotRequest] = []
     var statusClaim: BindingClaim
     var sessionState: RemoteSessionState
     var snapshots: [String: TerminalSnapshot]
+    var session: RecordingRelaySession
     var error: Error?
 
     init(
@@ -286,11 +341,13 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         ),
         sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
         snapshots: [String: TerminalSnapshot] = [:],
+        session: RecordingRelaySession = RecordingRelaySession(),
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
         self.sessionState = sessionState
         self.snapshots = snapshots
+        self.session = session
         self.error = error
     }
 
@@ -343,7 +400,62 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         inputRequests.append(TerminalInputRequest(machine: machine, tabID: tabID, text: text, enter: enter))
     }
 
+    func openSession(machine: Machine) async throws -> any RelaySession {
+        if let error {
+            throw error
+        }
+        openSessionRequests.append(machine)
+        return session
+    }
+
     func connect(machine: Machine) async throws {
         _ = machine
+    }
+}
+
+private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
+    var events: [RelaySessionEvent]
+    var sessionStateRequestCount = 0
+    var snapshotRequests: [String] = []
+    var inputRequests: [TerminalInputRequest] = []
+    var closed = false
+
+    init(events: [RelaySessionEvent] = []) {
+        self.events = events
+    }
+
+    func requestSessionState() async throws {
+        sessionStateRequestCount += 1
+    }
+
+    func requestTerminalSnapshot(tabID: String) async throws {
+        snapshotRequests.append(tabID)
+    }
+
+    func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws {
+        inputRequests.append(TerminalInputRequest(
+            machine: Machine(
+                id: "session",
+                name: "session",
+                relayURL: URL(string: "https://nudgecode.dev")!,
+                connectionState: .online,
+                lastSeenText: "",
+                binding: nil
+            ),
+            tabID: tabID,
+            text: text,
+            enter: enter
+        ))
+    }
+
+    func receiveEvent() async throws -> RelaySessionEvent {
+        if events.isEmpty {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return events.removeFirst()
+    }
+
+    func close() {
+        closed = true
     }
 }

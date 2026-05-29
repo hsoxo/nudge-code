@@ -35,7 +35,7 @@ struct TerminalWorkspaceView: View {
         }
         .task(id: model.selectedMachineID) {
             await model.refreshSelectedMachineBinding()
-            await model.attachSelectedMachineSession()
+            await model.syncSelectedMachineSession()
         }
     }
 }

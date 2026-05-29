@@ -34,7 +34,7 @@ Current scaffold:
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
 - one-shot relay binding status refresh when opening a pending machine.
-- first `/ws/mobile` attach path that requests daemon session state.
+- long-lived `/ws/mobile` session for state, snapshot, and input-response sync.
 - terminal snapshot fetch into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
@@ -42,6 +42,7 @@ Current scaffold:
 Still open:
 
 - signed relay authentication.
-- continuous websocket session sync.
+- automatic websocket reconnect and stale-state UI.
+- daemon-pushed live terminal stream updates.
 - E2E encrypted terminal/control stream.
 - real xterm.js integration.

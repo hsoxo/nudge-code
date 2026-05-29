@@ -160,6 +160,50 @@ struct RelayClientTests {
         #expect(socket.closed)
     }
 
+    @Test func openSessionReusesMobileSocketForMultipleRequests() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"session-1","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48,"agentStatus":{"kind":"claude","state":"needs_approval","confidence":0.82,"source":"screen"}}]}}}}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"snapshot-1","ok":true,"data":{"tabId":"default","rows":24,"cols":80,"text":"Claude ready"}}}}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"input-1","ok":true,"data":{"accepted":true}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let requestIDs = RequestIDSequence(["session-1", "snapshot-1", "input-1"])
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { requestIDs.next() }
+        )
+
+        let session = try await client.openSession(machine: activeMachine)
+        try await session.requestSessionState()
+        let stateEvent = try await session.receiveEvent()
+        try await session.requestTerminalSnapshot(tabID: "default")
+        let snapshotEvent = try await session.receiveEvent()
+        try await session.sendTerminalInput(tabID: "default", text: "echo hi", enter: true)
+        let inputEvent = try await session.receiveEvent()
+        session.close()
+
+        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        #expect(socket.sent.count == 3)
+        #expect(socket.sent[0].contains(#""type":"get_state""#))
+        #expect(socket.sent[1].contains(#""type":"terminal_snapshot""#))
+        #expect(socket.sent[2].contains(#""type":"terminal_input""#))
+        #expect(socket.closed)
+        guard case .sessionState(let state) = stateEvent else {
+            Issue.record("Expected session state event")
+            return
+        }
+        #expect(state.tabs.first?.id == "default")
+        #expect(snapshotEvent == .terminalSnapshot(TerminalSnapshot(
+            tabID: "default",
+            profile: TerminalProfile(rows: 24, cols: 80),
+            text: "Claude ready"
+        )))
+        #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
+    }
+
     private var activeMachine: Machine {
         Machine(
             id: "mac",
@@ -210,6 +254,21 @@ private final class RecordingWebSocketFactory: RelayWebSocketFactory, @unchecked
     func webSocket(for url: URL) throws -> any RelayWebSocketTransport {
         urls.append(url)
         return socket
+    }
+}
+
+private final class RequestIDSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String]
+
+    init(_ values: [String]) {
+        self.values = values
+    }
+
+    func next() -> String {
+        lock.withLock {
+            values.removeFirst()
+        }
     }
 }
 

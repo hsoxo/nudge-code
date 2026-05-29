@@ -13,6 +13,8 @@ final class AppModel {
     var phoneProfile: TerminalProfile
     var commandComposer = ""
     private let relayClient: any RelayClient
+    private var relaySession: (any RelaySession)?
+    private var relaySessionMachineID: String?
 
     init(
         machines: [Machine] = [],
@@ -104,6 +106,37 @@ final class AppModel {
         }
     }
 
+    func syncSelectedMachineSession() async {
+        guard let machineID = selectedMachineID,
+              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              machines[machineIndex].binding?.status == .active
+        else {
+            closeRelaySession()
+            return
+        }
+        closeRelaySession()
+        do {
+            let session = try await relayClient.openSession(machine: machines[machineIndex])
+            relaySession = session
+            relaySessionMachineID = machineID
+            machines[machineIndex].connectionState = .online
+            machines[machineIndex].lastSeenText = "relay session connected"
+            try await session.requestSessionState()
+            while !Task.isCancelled {
+                let event = try await session.receiveEvent()
+                try await applyRelaySessionEvent(event, machineID: machineID, session: session)
+            }
+        } catch is CancellationError {
+            closeRelaySession()
+        } catch {
+            closeRelaySession()
+            if let index = machines.firstIndex(where: { $0.id == machineID }) {
+                machines[index].connectionState = .offline
+                machines[index].lastSeenText = "relay session disconnected"
+            }
+        }
+    }
+
     func sendSelectedTabInput(_ text: String, enter: Bool) async {
         guard !text.isEmpty,
               let machine = selectedMachine,
@@ -112,8 +145,12 @@ final class AppModel {
             return
         }
         do {
-            try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
-            await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
+            if let relaySession, relaySessionMachineID == machine.id {
+                try await relaySession.sendTerminalInput(tabID: tab.id, text: text, enter: enter)
+            } else {
+                try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
+                await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
+            }
         } catch {
             if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
                 machines[machineIndex].lastSeenText = "Unable to send input"
@@ -125,6 +162,14 @@ final class AppModel {
         guard let machine = selectedMachine,
               let tab = selectedTab
         else {
+            return
+        }
+        if let relaySession, relaySessionMachineID == machine.id {
+            do {
+                try await relaySession.requestTerminalSnapshot(tabID: tab.id)
+            } catch {
+                await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
+            }
             return
         }
         await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
@@ -197,8 +242,7 @@ final class AppModel {
     private func attachMachineSession(at index: Int) async throws {
         let state = try await relayClient.fetchSessionState(machine: machines[index])
         let machineID = machines[index].id
-        tabsByMachine[machineID] = state.tabs
-        selectedTabID = state.tabs.first?.id
+        applyRemoteSessionState(state, machineID: machineID)
         machines[index].connectionState = .online
         machines[index].lastSeenText = "relay session attached"
         if let tabID = state.tabs.first?.id {
@@ -206,19 +250,70 @@ final class AppModel {
         }
     }
 
+    private func closeRelaySession() {
+        relaySession?.close()
+        relaySession = nil
+        relaySessionMachineID = nil
+    }
+
+    private func applyRelaySessionEvent(
+        _ event: RelaySessionEvent,
+        machineID: String,
+        session: any RelaySession
+    ) async throws {
+        switch event {
+        case .sessionState(let state):
+            applyRemoteSessionState(state, machineID: machineID)
+            if let index = machines.firstIndex(where: { $0.id == machineID }) {
+                machines[index].connectionState = .online
+                machines[index].lastSeenText = "relay session synced"
+            }
+            for tab in state.tabs {
+                try await session.requestTerminalSnapshot(tabID: tab.id)
+            }
+        case .terminalSnapshot(let snapshot):
+            applyTerminalSnapshot(snapshot, machineID: machineID)
+        case .terminalInputAccepted(let tabID):
+            if let tabID {
+                try await session.requestTerminalSnapshot(tabID: tabID)
+            }
+        }
+    }
+
+    private func applyRemoteSessionState(_ state: RemoteSessionState, machineID: String) {
+        let previousSelectedTabID = selectedTabID
+        tabsByMachine[machineID] = state.tabs
+        if let previousSelectedTabID,
+           state.tabs.contains(where: { $0.id == previousSelectedTabID }) {
+            selectedTabID = previousSelectedTabID
+        } else {
+            selectedTabID = state.tabs.first?.id
+        }
+    }
+
     private func refreshTabSnapshot(machineID: String, tabID: String) async {
         guard let machine = machines.first(where: { $0.id == machineID }),
-              let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID })
+              tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID }) != nil
         else {
             return
         }
         do {
             let snapshot = try await relayClient.fetchTerminalSnapshot(machine: machine, tabID: tabID)
-            tabsByMachine[machineID]?[tabIndex].profile = snapshot.profile
-            tabsByMachine[machineID]?[tabIndex].previewText = snapshot.text
+            applyTerminalSnapshot(snapshot, machineID: machineID)
         } catch {
+            guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID }) else {
+                return
+            }
             tabsByMachine[machineID]?[tabIndex].previewText = "Unable to refresh terminal snapshot"
         }
+    }
+
+    private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
+        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == snapshot.tabID }) else {
+            return
+        }
+        tabsByMachine[machineID]?[tabIndex].profile = snapshot.profile
+        tabsByMachine[machineID]?[tabIndex].previewText = snapshot.text
     }
 
     static func preview() -> AppModel {

@@ -6,6 +6,7 @@ protocol RelayClient: Sendable {
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
+    func openSession(machine: Machine) async throws -> any RelaySession
     func connect(machine: Machine) async throws
 }
 
@@ -43,6 +44,24 @@ struct HTTPRelayClient: RelayClient {
 
     func connect(machine: Machine) async throws {
         _ = machine
+    }
+
+    func openSession(machine: Machine) async throws -> any RelaySession {
+        guard let binding = machine.binding else {
+            throw RelayClientError.missingBinding
+        }
+        let socket = try webSocketFactory.webSocket(for: relayWebSocketURL(relayURL: machine.relayURL, binding: binding))
+        do {
+            try await waitForConnected(socket: socket, binding: binding)
+        } catch {
+            socket.close()
+            throw error
+        }
+        return HTTPRelaySession(
+            socket: socket,
+            daemonDeviceID: binding.daemonDeviceID,
+            requestIDGenerator: requestIDGenerator
+        )
     }
 
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState {
@@ -232,6 +251,20 @@ struct TerminalSnapshot: Equatable, Sendable {
     var text: String
 }
 
+enum RelaySessionEvent: Equatable, Sendable {
+    case sessionState(RemoteSessionState)
+    case terminalSnapshot(TerminalSnapshot)
+    case terminalInputAccepted(tabID: String?)
+}
+
+protocol RelaySession: Sendable {
+    func requestSessionState() async throws
+    func requestTerminalSnapshot(tabID: String) async throws
+    func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
+    func receiveEvent() async throws -> RelaySessionEvent
+    func close()
+}
+
 protocol RelayWebSocketTransport: Sendable {
     func sendString(_ value: String) async throws
     func receiveString() async throws -> String
@@ -276,6 +309,163 @@ struct URLSessionRelayWebSocketTransport: RelayWebSocketTransport, @unchecked Se
 
     func close() {
         task.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
+private enum RelaySessionRequestKind: Sendable {
+    case sessionState
+    case terminalSnapshot
+    case terminalInput(tabID: String)
+}
+
+private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
+    private let socket: any RelayWebSocketTransport
+    private let daemonDeviceID: String
+    private let requestIDGenerator: @Sendable () -> String
+    private let lock = NSLock()
+    private var requestKinds: [String: RelaySessionRequestKind] = [:]
+
+    init(
+        socket: any RelayWebSocketTransport,
+        daemonDeviceID: String,
+        requestIDGenerator: @escaping @Sendable () -> String
+    ) {
+        self.socket = socket
+        self.daemonDeviceID = daemonDeviceID
+        self.requestIDGenerator = requestIDGenerator
+    }
+
+    func requestSessionState() async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelayGetStatePayload(requestId: requestID)
+        )
+    }
+
+    func requestTerminalSnapshot(tabID: String) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .terminalSnapshot,
+            requestID: requestID,
+            payload: RelayTerminalSnapshotPayload(requestId: requestID, tabId: tabID)
+        )
+    }
+
+    func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .terminalInput(tabID: tabID),
+            requestID: requestID,
+            payload: RelayTerminalInputPayload(
+                requestId: requestID,
+                tabId: tabID,
+                text: text,
+                enter: enter
+            )
+        )
+    }
+
+    func receiveEvent() async throws -> RelaySessionEvent {
+        while true {
+            let text = try await socket.receiveString()
+            let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
+            if message.type == "error" {
+                throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
+            }
+            guard message.type == "message",
+                  let payload = message.message?.payload,
+                  payload.type == "daemon_response"
+            else {
+                continue
+            }
+            guard payload.ok else {
+                throw RelayClientError.daemonRejected(payload.data?.error ?? "daemon rejected request")
+            }
+            let requestKind = payload.requestId.flatMap(takeRequestKind)
+            return try event(from: payload, requestKind: requestKind)
+        }
+    }
+
+    func close() {
+        socket.close()
+    }
+
+    private func rememberAndSend<Payload: Encodable>(
+        kind: RelaySessionRequestKind,
+        requestID: String,
+        payload: Payload
+    ) async throws {
+        lock.withLock {
+            requestKinds[requestID] = kind
+        }
+        let request = RelaySocketRequest(
+            toDeviceId: daemonDeviceID,
+            payload: payload
+        )
+        let data = try JSONEncoder().encode(request)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        do {
+            try await socket.sendString(text)
+        } catch {
+            _ = takeRequestKind(requestID: requestID)
+            throw error
+        }
+    }
+
+    private func takeRequestKind(requestID: String) -> RelaySessionRequestKind? {
+        lock.withLock {
+            requestKinds.removeValue(forKey: requestID)
+        }
+    }
+
+    private func event(
+        from payload: RelayDaemonPayload,
+        requestKind: RelaySessionRequestKind?
+    ) throws -> RelaySessionEvent {
+        switch requestKind {
+        case .sessionState:
+            guard let data = payload.data else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            return try .sessionState(data.toRemoteSessionState())
+        case .terminalSnapshot:
+            guard let snapshot = payload.data?.snapshot else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            return .terminalSnapshot(TerminalSnapshot(
+                tabID: snapshot.tabId,
+                profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
+                text: snapshot.text
+            ))
+        case .terminalInput(let tabID):
+            return .terminalInputAccepted(tabID: tabID)
+        case nil:
+            return try fallbackEvent(from: payload)
+        }
+    }
+
+    private func fallbackEvent(from payload: RelayDaemonPayload) throws -> RelaySessionEvent {
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        if data.tabs != nil {
+            return try .sessionState(data.toRemoteSessionState())
+        }
+        if let snapshot = data.snapshot {
+            return .terminalSnapshot(TerminalSnapshot(
+                tabID: snapshot.tabId,
+                profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
+                text: snapshot.text
+            ))
+        }
+        if data.accepted == true {
+            return .terminalInputAccepted(tabID: nil)
+        }
+        throw RelayClientError.invalidWebSocketMessage
     }
 }
 
@@ -358,6 +548,7 @@ private struct RelayDaemonDataResponse: Decodable {
     var rows: Int?
     var cols: Int?
     var text: String?
+    var accepted: Bool?
     var error: String?
 
     func toRemoteSessionState() throws -> RemoteSessionState {
