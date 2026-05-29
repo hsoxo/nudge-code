@@ -43,7 +43,8 @@ Current scaffold:
 - relay-issued signed mobile websocket challenges with the Keychain-backed phone identity.
 - relay revocation handling that marks the machine binding revoked and stops reconnecting.
 - SwiftProtobuf-generated E2E handshake and encrypted envelope protocol types.
+- CryptoKit E2E envelope helpers for X25519/HKDF/ChaCha20-Poly1305 encryption and replay checks.
 
 Still open:
 
-- E2E encrypted terminal/control stream runtime key agreement and payload encryption.
+- E2E encrypted terminal/control stream handshake exchange and live relay wiring.

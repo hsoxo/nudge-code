@@ -234,10 +234,11 @@ Current implementation status:
 - Relay exposes `/readyz` with config flags, runtime counts, and warnings for weak hosted settings such as missing persistence, unsigned websockets, missing websocket challenges, legacy HTTP messages, and non-required E2E envelopes.
 - Canonical protobuf schema now includes E2E handshake and encrypted envelope messages, with Rust, TypeScript, and Swift protocol mirrors.
 - Daemon has tested X25519/HKDF/ChaCha20-Poly1305 envelope helpers with route-bound associated data and sequence replay rejection; these helpers are not yet wired into live relay traffic.
+- iOS has matching CryptoKit E2E envelope helpers and tests for encryption/decryption, replay rejection, route checks, and canonical relay JSON payloads.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
-- Daemon/iOS X25519 handshake, payload encryption/decryption, encrypted sequence replay rejection, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
+- Daemon/iOS handshake transcript exchange/validation, live relay encryption wiring, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -476,7 +477,7 @@ Current implementation status:
 - Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
 - Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
 - Relay E2E payload enforcement can be enabled with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; it rejects plaintext relay payloads and forwards only opaque `e2e_envelope` payloads.
-- Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon crypto helpers cover encryption and replay rejection, but transcript validation and live relay/iOS wiring are still open.
+- Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon and iOS crypto helpers cover encryption and replay rejection, but transcript validation and live relay wiring are still open.
 - Relay legacy HTTP message endpoints can be disabled with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`, leaving signed websocket routing active.
 - The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 
