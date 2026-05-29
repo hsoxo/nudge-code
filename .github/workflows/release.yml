@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   rust-release:
@@ -89,8 +90,28 @@ jobs:
       - name: Check relay container definition
         run: npm run check:relay-container
 
+      - name: Prepare relay image metadata
+        id: relay-image
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/$owner/nudge-relay"
+          tags="nudge-relay:ci"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="$tags,$image:${GITHUB_REF_NAME},$image:latest"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build relay container
-        run: docker build -f packages/relay/Dockerfile -t nudge-relay:ci .
+        run: docker build -f packages/relay/Dockerfile $(printf '%s' "${{ steps.relay-image.outputs.tags }}" | awk -F, '{ for (i = 1; i <= NF; i++) printf "-t %s ", $i }') .
 
       - name: Smoke relay container readiness
         run: |
@@ -128,6 +149,12 @@ jobs:
       - name: Stop relay container
         if: always()
         run: docker rm -f nudge-relay >/dev/null 2>&1 || true
+
+      - name: Publish relay container
+        if: github.ref_type == 'tag'
+        run: |
+          docker push "${{ steps.relay-image.outputs.image }}:${GITHUB_REF_NAME}"
+          docker push "${{ steps.relay-image.outputs.image }}:latest"
 
   publish-github-release:
     name: Publish GitHub release

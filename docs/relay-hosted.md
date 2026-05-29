@@ -24,7 +24,13 @@ docker run --rm -p 8787:8787 \
 
 The container enables `NUDGE_RELAY_HOSTED_MODE=1` by default.
 
-The release workflow builds this image on Linux and smoke-checks `/readyz` so container regressions are caught before release. Publishing the image to a registry is intentionally left until the hosting target is chosen.
+The release workflow builds this image on Linux, smoke-checks `/readyz`, and publishes tagged releases to GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/<owner>/nudge-relay:<version>
+```
+
+Use the tag-specific image for deployments. The workflow also updates `latest` for convenience, but release tags are the safer deployment reference.
 
 `NUDGE_RELAY_HOSTED_MODE=1` enables the relay hardening defaults expected for hosted service traffic:
 
