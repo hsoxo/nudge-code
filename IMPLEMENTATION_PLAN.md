@@ -410,11 +410,13 @@ Goals:
 
 Current implementation status:
 
+- `scripts/install.sh` detects macOS/Linux architecture, downloads a release tarball, verifies a `.sha256` file unless `NUDGE_SKIP_CHECKSUM=1`, installs `nudge` into the configured user bin directory, and supports local release URL overrides for smoke tests.
+- `scripts/smoke-install.sh` verifies the installer against a locally generated tarball and checksum.
 - `nudge service install --dry-run` renders the platform-specific user service file.
 - macOS service support writes `~/Library/LaunchAgents/dev.nudgecode.nudge.daemon.plist` and uses `launchctl bootstrap/kickstart`.
 - Linux service support writes `~/.config/systemd/user/nudge.service` and uses `systemctl --user enable --now`.
 - `nudge service uninstall --dry-run`, `nudge service status`, and `nudge service logs` have first-pass command wiring.
-- Release artifact download, checksum/signature verification, and CI-built binaries remain open.
+- CI-built release artifacts, signature verification beyond SHA-256 checksums, update command, and hosted install URL publishing remain open.
 
 Tasks:
 
