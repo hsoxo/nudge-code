@@ -13,6 +13,23 @@ export interface Tab {
   widthMode: 'computer' | 'phone';
   rows: number;
   cols: number;
+  agentStatus?: AgentStatus;
+}
+
+export type AgentKind = 'claude' | 'codex' | 'opencode' | 'openclaw' | 'shell' | 'unknown';
+export type AgentInteractionState =
+  | 'running'
+  | 'idle'
+  | 'waiting_for_input'
+  | 'needs_approval'
+  | 'needs_attention'
+  | 'exited';
+
+export interface AgentStatus {
+  kind: AgentKind;
+  state: AgentInteractionState;
+  confidence: number;
+  source: 'process' | 'screen' | 'title' | 'heuristic' | 'unknown';
 }
 
 export interface SessionState {

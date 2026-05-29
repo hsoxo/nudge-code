@@ -160,6 +160,7 @@ message Tab {
   string width_mode = 4;
   uint32 rows = 5;
   uint32 cols = 6;
+  AgentStatus agent_status = 7;
 }
 
 message Entitlement {
@@ -181,6 +182,13 @@ message BindingState {
   string expires_at = 5;
   string status = 6;
   string bound_phone_id = 7;
+}
+
+message AgentStatus {
+  string kind = 1;
+  string state = 2;
+  double confidence = 3;
+  string source = 4;
 }
 
 message Error {

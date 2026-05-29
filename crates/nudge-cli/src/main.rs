@@ -267,19 +267,9 @@ async fn main() -> Result<()> {
             );
         }
         Some(Command::SessionState) => {
-            let session = nudge_daemon::load_session()?;
-            println!(
-                "session={} tabs={} plan={}",
-                session.id,
-                session.tabs.len(),
-                session.entitlement.plan
-            );
-            for tab in session.tabs {
-                println!(
-                    "tab id={} title={} status={:?}",
-                    tab.id, tab.title, tab.status
-                );
-            }
+            ensure_daemon().await?;
+            let state = get_session_state().await?;
+            print_session_state(&state);
         }
         Some(Command::CreateTab { title }) => {
             ensure_daemon().await?;
@@ -1190,8 +1180,25 @@ fn print_session_state(state: &v1::SessionState) {
     println!("session tabs={} plan={}", state.tabs.len(), plan);
     for tab in &state.tabs {
         println!(
-            "tab id={} title={} status={} width_mode={} size={}x{}",
-            tab.id, tab.title, tab.status, tab.width_mode, tab.rows, tab.cols
+            "tab id={} title={} status={} width_mode={} size={}x{} agent_kind={} agent_state={} agent_confidence={:.2}",
+            tab.id,
+            tab.title,
+            tab.status,
+            tab.width_mode,
+            tab.rows,
+            tab.cols,
+            tab.agent_status
+                .as_ref()
+                .map(|status| status.kind.as_str())
+                .unwrap_or("unknown"),
+            tab.agent_status
+                .as_ref()
+                .map(|status| status.state.as_str())
+                .unwrap_or("unknown"),
+            tab.agent_status
+                .as_ref()
+                .map(|status| status.confidence)
+                .unwrap_or_default()
         );
     }
 }

@@ -51,6 +51,8 @@ pub struct TerminalTab {
     pub title: String,
     pub status: TabStatus,
     #[serde(default)]
+    pub agent_status: AgentStatus,
+    #[serde(default)]
     pub width_mode: WidthMode,
     #[serde(default = "default_rows")]
     pub rows: u16,
@@ -80,6 +82,57 @@ impl Default for WidthMode {
     fn default() -> Self {
         Self::Computer
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentStatus {
+    pub kind: AgentKind,
+    pub state: AgentInteractionState,
+    pub confidence: f64,
+    pub source: AgentDetectionSource,
+}
+
+impl Default for AgentStatus {
+    fn default() -> Self {
+        Self {
+            kind: AgentKind::Shell,
+            state: AgentInteractionState::Running,
+            confidence: 0.5,
+            source: AgentDetectionSource::Heuristic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Opencode,
+    Openclaw,
+    Shell,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInteractionState {
+    Running,
+    Idle,
+    WaitingForInput,
+    NeedsApproval,
+    NeedsAttention,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDetectionSource {
+    Process,
+    Screen,
+    Title,
+    Heuristic,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +509,7 @@ impl TerminalTab {
             id,
             title,
             status: TabStatus::Running,
+            agent_status: AgentStatus::default(),
             width_mode: WidthMode::Computer,
             rows: 24,
             cols: 80,
@@ -472,6 +526,7 @@ impl TerminalTab {
             width_mode: self.width_mode.as_str().to_string(),
             rows: self.rows as u32,
             cols: self.cols as u32,
+            agent_status: Some(self.agent_status.to_proto()),
         }
     }
 }
@@ -492,6 +547,55 @@ impl WidthMode {
         match self {
             Self::Computer => "computer",
             Self::Phone => "phone",
+        }
+    }
+}
+
+impl AgentStatus {
+    pub fn to_proto(&self) -> v1::AgentStatus {
+        v1::AgentStatus {
+            kind: self.kind.as_str().to_string(),
+            state: self.state.as_str().to_string(),
+            confidence: self.confidence,
+            source: self.source.as_str().to_string(),
+        }
+    }
+}
+
+impl AgentKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+            Self::Openclaw => "openclaw",
+            Self::Shell => "shell",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl AgentInteractionState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::WaitingForInput => "waiting_for_input",
+            Self::NeedsApproval => "needs_approval",
+            Self::NeedsAttention => "needs_attention",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+impl AgentDetectionSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Screen => "screen",
+            Self::Title => "title",
+            Self::Heuristic => "heuristic",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -738,6 +842,93 @@ fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
     })
 }
 
+fn detect_agent_status(title: &str, screen_text: &str, tab_status: &TabStatus) -> AgentStatus {
+    if matches!(tab_status, TabStatus::Exited | TabStatus::NeedsRestart) {
+        return AgentStatus {
+            kind: AgentKind::Unknown,
+            state: AgentInteractionState::Exited,
+            confidence: 0.6,
+            source: AgentDetectionSource::Heuristic,
+        };
+    }
+
+    let title_lower = title.to_lowercase();
+    let text_lower = screen_text.to_lowercase();
+    let combined = format!("{title_lower}\n{text_lower}");
+    let (kind, source, mut confidence): (AgentKind, AgentDetectionSource, f64) =
+        if contains_any(&title_lower, &["claude"]) {
+            (AgentKind::Claude, AgentDetectionSource::Title, 0.78)
+        } else if contains_any(&title_lower, &["codex"]) {
+            (AgentKind::Codex, AgentDetectionSource::Title, 0.78)
+        } else if contains_any(&title_lower, &["opencode"]) {
+            (AgentKind::Opencode, AgentDetectionSource::Title, 0.72)
+        } else if contains_any(&title_lower, &["openclaw"]) {
+            (AgentKind::Openclaw, AgentDetectionSource::Title, 0.72)
+        } else if contains_any(
+            &text_lower,
+            &["claude code", "claude>", "claude >", "anthropic"],
+        ) {
+            (AgentKind::Claude, AgentDetectionSource::Screen, 0.72)
+        } else if contains_any(&text_lower, &["codex", "openai codex"]) {
+            (AgentKind::Codex, AgentDetectionSource::Screen, 0.72)
+        } else if contains_any(&text_lower, &["opencode"]) {
+            (AgentKind::Opencode, AgentDetectionSource::Screen, 0.68)
+        } else if contains_any(&text_lower, &["openclaw"]) {
+            (AgentKind::Openclaw, AgentDetectionSource::Screen, 0.68)
+        } else if looks_like_shell_prompt(&text_lower) {
+            (AgentKind::Shell, AgentDetectionSource::Screen, 0.62)
+        } else {
+            (AgentKind::Unknown, AgentDetectionSource::Unknown, 0.3)
+        };
+
+    let state = if contains_any(
+        &combined,
+        &[
+            "approve?",
+            "approval required",
+            "allow this command",
+            "do you want to proceed",
+            "permission",
+            "需要你确认权限",
+            "确认权限",
+        ],
+    ) {
+        confidence = confidence.max(0.82);
+        AgentInteractionState::NeedsApproval
+    } else if contains_any(
+        &combined,
+        &[
+            "waiting for input",
+            "press enter",
+            "enter your prompt",
+            "send a message",
+            "what would you like",
+            "等待输入",
+            "等待用户输入",
+        ],
+    ) {
+        confidence = confidence.max(0.78);
+        AgentInteractionState::WaitingForInput
+    } else {
+        AgentInteractionState::Running
+    };
+
+    AgentStatus {
+        kind,
+        state,
+        confidence,
+        source,
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn looks_like_shell_prompt(text: &str) -> bool {
+    text.contains("$ ") || text.contains("% ") || text.contains("# ")
+}
+
 #[derive(Debug, Clone)]
 pub struct IpcPaths {
     runtime_dir: PathBuf,
@@ -840,6 +1031,7 @@ impl DaemonRuntime {
     }
 
     async fn session_state(&self) -> v1::SessionState {
+        let _ = self.refresh_all_agent_statuses().await;
         self.session.lock().await.to_proto()
     }
 
@@ -940,6 +1132,21 @@ impl DaemonRuntime {
     }
 
     async fn terminal_snapshot(&self, tab_id: &str) -> Result<v1::TerminalSnapshot> {
+        let agent_text = {
+            let ptys = self.ptys.lock().await;
+            let runtime_tab = ptys
+                .iter()
+                .find(|tab| tab.tab_id == tab_id)
+                .with_context(|| format!("tab {tab_id} was not found"))?;
+            runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned")
+                .snapshot()
+                .text
+        };
+        self.refresh_agent_status(tab_id, &agent_text).await?;
+
         let ptys = self.ptys.lock().await;
         let runtime_tab = ptys
             .iter()
@@ -960,6 +1167,21 @@ impl DaemonRuntime {
     }
 
     async fn terminal_render(&self, tab_id: &str) -> Result<v1::TerminalRender> {
+        let agent_text = {
+            let ptys = self.ptys.lock().await;
+            let runtime_tab = ptys
+                .iter()
+                .find(|tab| tab.tab_id == tab_id)
+                .with_context(|| format!("tab {tab_id} was not found"))?;
+            runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned")
+                .snapshot()
+                .text
+        };
+        self.refresh_agent_status(tab_id, &agent_text).await?;
+
         let ptys = self.ptys.lock().await;
         let runtime_tab = ptys
             .iter()
@@ -986,6 +1208,60 @@ impl DaemonRuntime {
             frame: snapshot.formatted,
             width_mode,
         })
+    }
+
+    async fn refresh_agent_status(&self, tab_id: &str, screen_text: &str) -> Result<AgentStatus> {
+        let mut session = self.session.lock().await;
+        let tab = session
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| SessionError::TabNotFound {
+                tab_id: tab_id.to_string(),
+            })?;
+        let detected = detect_agent_status(&tab.title, screen_text, &tab.status);
+        if tab.agent_status != detected {
+            tab.agent_status = detected.clone();
+            tab.last_activity_at = now_string();
+            session.updated_at = now_string();
+            self.state_store.save(&session)?;
+        }
+        Ok(detected)
+    }
+
+    async fn refresh_all_agent_statuses(&self) -> Result<()> {
+        let snapshots = {
+            let ptys = self.ptys.lock().await;
+            ptys.iter()
+                .map(|runtime_tab| {
+                    let text = runtime_tab
+                        .grid
+                        .lock()
+                        .expect("terminal grid lock poisoned")
+                        .snapshot()
+                        .text;
+                    (runtime_tab.tab_id.clone(), text)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut session = self.session.lock().await;
+        let mut changed = false;
+        for (tab_id, text) in snapshots {
+            if let Some(tab) = session.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                let detected = detect_agent_status(&tab.title, &text, &tab.status);
+                if tab.agent_status != detected {
+                    tab.agent_status = detected;
+                    tab.last_activity_at = now_string();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            session.updated_at = now_string();
+            self.state_store.save(&session)?;
+        }
+        Ok(())
     }
 
     async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
@@ -1366,6 +1642,14 @@ fn session_state_json(state: v1::SessionState) -> Value {
                 "widthMode": tab.width_mode,
                 "rows": tab.rows,
                 "cols": tab.cols,
+                "agentStatus": tab.agent_status.map(|status| {
+                    json!({
+                        "kind": status.kind,
+                        "state": status.state,
+                        "confidence": status.confidence,
+                        "source": status.source,
+                    })
+                }),
             })
         })
         .collect();
@@ -1869,5 +2153,37 @@ mod tests {
         let parsed = binding_from_proto(binding).expect("proto binding should parse");
         assert_eq!(parsed.status, BindingStatus::Pending);
         assert_eq!(parsed.bound_phone_id, None);
+    }
+
+    #[test]
+    fn detects_claude_approval_from_screen_text() {
+        let status = detect_agent_status(
+            "shell",
+            "Claude Code\nPermission required. Allow this command?",
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Claude);
+        assert_eq!(status.state, AgentInteractionState::NeedsApproval);
+        assert!(status.confidence >= 0.82);
+    }
+
+    #[test]
+    fn detects_codex_waiting_from_title_and_screen_text() {
+        let status = detect_agent_status(
+            "codex",
+            "Waiting for input. Enter your prompt",
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Codex);
+        assert_eq!(status.state, AgentInteractionState::WaitingForInput);
+        assert_eq!(status.source, AgentDetectionSource::Title);
+    }
+
+    #[test]
+    fn exited_tabs_do_not_get_high_confidence_agent_labels() {
+        let status = detect_agent_status("claude", "Claude Code", &TabStatus::NeedsRestart);
+        assert_eq!(status.kind, AgentKind::Unknown);
+        assert_eq!(status.state, AgentInteractionState::Exited);
+        assert!(status.confidence < 0.8);
     }
 }
