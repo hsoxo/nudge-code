@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use nudge_protocol::v1;
 use serde_json::{Value, json};
@@ -201,6 +202,128 @@ pub(crate) fn envelope_from_relay_payload(payload: &Value) -> Result<v1::E2eEncr
     })
 }
 
+pub(crate) fn handshake_start_to_relay_payload(start: &v1::E2eHandshakeStart) -> Value {
+    json!({
+        "type": "e2e_handshake_start",
+        "sessionId": start.session_id,
+        "senderDeviceId": start.sender_device_id,
+        "recipientDeviceId": start.recipient_device_id,
+        "senderIdentityPublicKeyBase64": BASE64_STANDARD.encode(&start.sender_identity_public_key),
+        "senderEphemeralPublicKeyBase64": BASE64_STANDARD.encode(&start.sender_ephemeral_public_key),
+        "transcriptSignatureBase64": BASE64_STANDARD.encode(&start.transcript_signature),
+        "createdAt": start.created_at,
+    })
+}
+
+pub(crate) fn handshake_finish_to_relay_payload(finish: &v1::E2eHandshakeFinish) -> Value {
+    json!({
+        "type": "e2e_handshake_finish",
+        "sessionId": finish.session_id,
+        "senderDeviceId": finish.sender_device_id,
+        "recipientDeviceId": finish.recipient_device_id,
+        "senderEphemeralPublicKeyBase64": BASE64_STANDARD.encode(&finish.sender_ephemeral_public_key),
+        "transcriptSignatureBase64": BASE64_STANDARD.encode(&finish.transcript_signature),
+        "acceptedAt": finish.accepted_at,
+    })
+}
+
+pub(crate) fn handshake_start_from_relay_payload(payload: &Value) -> Result<v1::E2eHandshakeStart> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("e2e handshake start payload must be an object"))?;
+    let payload_type = relay_string_field(object, "type")?;
+    if payload_type != "e2e_handshake_start" {
+        anyhow::bail!("relay payload is not an e2e handshake start");
+    }
+    Ok(v1::E2eHandshakeStart {
+        session_id: relay_string_field(object, "sessionId")?.to_string(),
+        sender_device_id: relay_string_field(object, "senderDeviceId")?.to_string(),
+        recipient_device_id: relay_string_field(object, "recipientDeviceId")?.to_string(),
+        sender_identity_public_key: relay_base64_field(object, "senderIdentityPublicKeyBase64")?,
+        sender_ephemeral_public_key: relay_base64_field(object, "senderEphemeralPublicKeyBase64")?,
+        transcript_signature: relay_base64_field(object, "transcriptSignatureBase64")?,
+        created_at: relay_string_field(object, "createdAt")?.to_string(),
+    })
+}
+
+pub(crate) fn handshake_finish_from_relay_payload(
+    payload: &Value,
+) -> Result<v1::E2eHandshakeFinish> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("e2e handshake finish payload must be an object"))?;
+    let payload_type = relay_string_field(object, "type")?;
+    if payload_type != "e2e_handshake_finish" {
+        anyhow::bail!("relay payload is not an e2e handshake finish");
+    }
+    Ok(v1::E2eHandshakeFinish {
+        session_id: relay_string_field(object, "sessionId")?.to_string(),
+        sender_device_id: relay_string_field(object, "senderDeviceId")?.to_string(),
+        recipient_device_id: relay_string_field(object, "recipientDeviceId")?.to_string(),
+        sender_ephemeral_public_key: relay_base64_field(object, "senderEphemeralPublicKeyBase64")?,
+        transcript_signature: relay_base64_field(object, "transcriptSignatureBase64")?,
+        accepted_at: relay_string_field(object, "acceptedAt")?.to_string(),
+    })
+}
+
+pub(crate) fn sign_handshake_start(
+    signing_key: &[u8; 32],
+    mut start: v1::E2eHandshakeStart,
+) -> v1::E2eHandshakeStart {
+    start.transcript_signature.clear();
+    let signing_key = SigningKey::from_bytes(signing_key);
+    start.transcript_signature = signing_key
+        .sign(&handshake_start_transcript(&start))
+        .to_bytes()
+        .to_vec();
+    start
+}
+
+pub(crate) fn verify_handshake_start(
+    start: &v1::E2eHandshakeStart,
+    expected_identity_public_key: &[u8; 32],
+) -> Result<()> {
+    let sender_identity: [u8; 32] = start
+        .sender_identity_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("e2e handshake sender identity key must be 32 bytes"))?;
+    if &sender_identity != expected_identity_public_key {
+        anyhow::bail!("e2e handshake sender identity key mismatch");
+    }
+    let signature = signature_from_bytes(&start.transcript_signature)?;
+    VerifyingKey::from_bytes(expected_identity_public_key)
+        .context("invalid e2e handshake sender identity public key")?
+        .verify(&handshake_start_transcript(start), &signature)
+        .context("invalid e2e handshake start signature")
+}
+
+pub(crate) fn sign_handshake_finish(
+    signing_key: &[u8; 32],
+    start: &v1::E2eHandshakeStart,
+    mut finish: v1::E2eHandshakeFinish,
+) -> v1::E2eHandshakeFinish {
+    finish.transcript_signature.clear();
+    let signing_key = SigningKey::from_bytes(signing_key);
+    finish.transcript_signature = signing_key
+        .sign(&handshake_finish_transcript(start, &finish))
+        .to_bytes()
+        .to_vec();
+    finish
+}
+
+pub(crate) fn verify_handshake_finish(
+    start: &v1::E2eHandshakeStart,
+    finish: &v1::E2eHandshakeFinish,
+    expected_identity_public_key: &[u8; 32],
+) -> Result<()> {
+    let signature = signature_from_bytes(&finish.transcript_signature)?;
+    VerifyingKey::from_bytes(expected_identity_public_key)
+        .context("invalid e2e handshake finisher identity public key")?
+        .verify(&handshake_finish_transcript(start, finish), &signature)
+        .context("invalid e2e handshake finish signature")
+}
+
 fn relay_string_field<'a>(
     object: &'a serde_json::Map<String, Value>,
     field: &str,
@@ -284,6 +407,46 @@ fn associated_data(
         nonce,
     ]
     .join(&0)
+}
+
+fn handshake_start_transcript(start: &v1::E2eHandshakeStart) -> Vec<u8> {
+    join_transcript_fields(&[
+        b"nudge.e2e.handshake.start.v1".as_slice(),
+        start.session_id.as_bytes(),
+        start.sender_device_id.as_bytes(),
+        start.recipient_device_id.as_bytes(),
+        &start.sender_identity_public_key,
+        &start.sender_ephemeral_public_key,
+        start.created_at.as_bytes(),
+    ])
+}
+
+fn handshake_finish_transcript(
+    start: &v1::E2eHandshakeStart,
+    finish: &v1::E2eHandshakeFinish,
+) -> Vec<u8> {
+    let start_transcript = handshake_start_transcript(start);
+    join_transcript_fields(&[
+        b"nudge.e2e.handshake.finish.v1".as_slice(),
+        &start_transcript,
+        &start.transcript_signature,
+        finish.session_id.as_bytes(),
+        finish.sender_device_id.as_bytes(),
+        finish.recipient_device_id.as_bytes(),
+        &finish.sender_ephemeral_public_key,
+        finish.accepted_at.as_bytes(),
+    ])
+}
+
+fn join_transcript_fields(fields: &[&[u8]]) -> Vec<u8> {
+    fields.join(&0)
+}
+
+fn signature_from_bytes(bytes: &[u8]) -> Result<Signature> {
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("e2e handshake signature must be 64 bytes"))?;
+    Ok(Signature::from_bytes(&bytes))
 }
 
 #[cfg(test)]
@@ -416,5 +579,102 @@ mod tests {
         assert_eq!(decoded.sequence, u64::MAX);
         assert_eq!(decoded.nonce, b"nonce-000001");
         assert_eq!(decoded.ciphertext, b"ciphertext");
+    }
+
+    #[test]
+    fn handshake_transcript_signatures_verify_and_bind_route_fields() {
+        let phone_signing_secret = [3u8; 32];
+        let daemon_signing_secret = [4u8; 32];
+        let phone_identity = SigningKey::from_bytes(&phone_signing_secret)
+            .verifying_key()
+            .to_bytes();
+        let daemon_identity = SigningKey::from_bytes(&daemon_signing_secret)
+            .verifying_key()
+            .to_bytes();
+        let phone_ephemeral = KeyPair::from_secret_bytes([7u8; 32]);
+        let daemon_ephemeral = KeyPair::from_secret_bytes([9u8; 32]);
+
+        let start = sign_handshake_start(
+            &phone_signing_secret,
+            v1::E2eHandshakeStart {
+                session_id: "session-1".to_string(),
+                sender_device_id: "phone_1".to_string(),
+                recipient_device_id: "daemon_1".to_string(),
+                sender_identity_public_key: phone_identity.to_vec(),
+                sender_ephemeral_public_key: phone_ephemeral.public_bytes().to_vec(),
+                transcript_signature: Vec::new(),
+                created_at: "2026-05-29T00:00:00.000Z".to_string(),
+            },
+        );
+        verify_handshake_start(&start, &phone_identity).expect("start should verify");
+
+        let mut tampered_start = start.clone();
+        tampered_start.recipient_device_id = "daemon_2".to_string();
+        let error = verify_handshake_start(&tampered_start, &phone_identity)
+            .expect_err("tampered start should fail");
+        assert!(error.to_string().contains("handshake start signature"));
+
+        let finish = sign_handshake_finish(
+            &daemon_signing_secret,
+            &start,
+            v1::E2eHandshakeFinish {
+                session_id: "session-1".to_string(),
+                sender_device_id: "daemon_1".to_string(),
+                recipient_device_id: "phone_1".to_string(),
+                sender_ephemeral_public_key: daemon_ephemeral.public_bytes().to_vec(),
+                transcript_signature: Vec::new(),
+                accepted_at: "2026-05-29T00:00:01.000Z".to_string(),
+            },
+        );
+        verify_handshake_finish(&start, &finish, &daemon_identity).expect("finish should verify");
+
+        let mut tampered_finish = finish.clone();
+        tampered_finish.sender_ephemeral_public_key[0] ^= 1;
+        let error = verify_handshake_finish(&start, &tampered_finish, &daemon_identity)
+            .expect_err("tampered finish should fail");
+        assert!(error.to_string().contains("handshake finish signature"));
+    }
+
+    #[test]
+    fn handshake_relay_payloads_use_canonical_json_fields() {
+        let start = v1::E2eHandshakeStart {
+            session_id: "session-1".to_string(),
+            sender_device_id: "phone_1".to_string(),
+            recipient_device_id: "daemon_1".to_string(),
+            sender_identity_public_key: vec![1; 32],
+            sender_ephemeral_public_key: vec![2; 32],
+            transcript_signature: vec![3; 64],
+            created_at: "2026-05-29T00:00:00.000Z".to_string(),
+        };
+        let finish = v1::E2eHandshakeFinish {
+            session_id: "session-1".to_string(),
+            sender_device_id: "daemon_1".to_string(),
+            recipient_device_id: "phone_1".to_string(),
+            sender_ephemeral_public_key: vec![4; 32],
+            transcript_signature: vec![5; 64],
+            accepted_at: "2026-05-29T00:00:01.000Z".to_string(),
+        };
+
+        let start_payload = handshake_start_to_relay_payload(&start);
+        let finish_payload = handshake_finish_to_relay_payload(&finish);
+        let decoded_start =
+            handshake_start_from_relay_payload(&start_payload).expect("start should decode");
+        let decoded_finish =
+            handshake_finish_from_relay_payload(&finish_payload).expect("finish should decode");
+
+        assert_eq!(start_payload["type"], "e2e_handshake_start");
+        assert_eq!(start_payload["sessionId"], "session-1");
+        assert_eq!(
+            start_payload["senderIdentityPublicKeyBase64"],
+            BASE64_STANDARD.encode([1; 32])
+        );
+        assert!(start_payload.get("senderKeyId").is_none());
+        assert_eq!(finish_payload["type"], "e2e_handshake_finish");
+        assert_eq!(
+            finish_payload["senderEphemeralPublicKeyBase64"],
+            BASE64_STANDARD.encode([4; 32])
+        );
+        assert_eq!(decoded_start.sender_identity_public_key, vec![1; 32]);
+        assert_eq!(decoded_finish.transcript_signature, vec![5; 64]);
     }
 }

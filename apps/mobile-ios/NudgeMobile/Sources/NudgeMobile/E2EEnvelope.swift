@@ -2,6 +2,8 @@ import CryptoKit
 import Foundation
 
 enum E2EEnvelopeError: Error, Equatable {
+    case identityKeyMismatch
+    case invalidHandshakeSignature
     case invalidNonceLength
     case invalidRelayPayload
     case routeMismatch
@@ -206,6 +208,155 @@ struct E2ERelayPayload: Codable, Equatable {
     }
 }
 
+struct E2EHandshakeStartRelayPayload: Codable, Equatable {
+    let type: String
+    let sessionID: String
+    let senderDeviceID: String
+    let recipientDeviceID: String
+    let senderIdentityPublicKeyBase64: String
+    let senderEphemeralPublicKeyBase64: String
+    let transcriptSignatureBase64: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sessionID = "sessionId"
+        case senderDeviceID = "senderDeviceId"
+        case recipientDeviceID = "recipientDeviceId"
+        case senderIdentityPublicKeyBase64
+        case senderEphemeralPublicKeyBase64
+        case transcriptSignatureBase64
+        case createdAt
+    }
+
+    init(start: Nudge_V1_E2EHandshakeStart) {
+        type = "e2e_handshake_start"
+        sessionID = start.sessionID
+        senderDeviceID = start.senderDeviceID
+        recipientDeviceID = start.recipientDeviceID
+        senderIdentityPublicKeyBase64 = start.senderIdentityPublicKey.base64EncodedString()
+        senderEphemeralPublicKeyBase64 = start.senderEphemeralPublicKey.base64EncodedString()
+        transcriptSignatureBase64 = start.transcriptSignature.base64EncodedString()
+        createdAt = start.createdAt
+    }
+
+    func start() throws -> Nudge_V1_E2EHandshakeStart {
+        guard type == "e2e_handshake_start",
+              let senderIdentityPublicKey = Data(base64Encoded: senderIdentityPublicKeyBase64),
+              let senderEphemeralPublicKey = Data(base64Encoded: senderEphemeralPublicKeyBase64),
+              let transcriptSignature = Data(base64Encoded: transcriptSignatureBase64)
+        else {
+            throw E2EEnvelopeError.invalidRelayPayload
+        }
+        var start = Nudge_V1_E2EHandshakeStart()
+        start.sessionID = sessionID
+        start.senderDeviceID = senderDeviceID
+        start.recipientDeviceID = recipientDeviceID
+        start.senderIdentityPublicKey = senderIdentityPublicKey
+        start.senderEphemeralPublicKey = senderEphemeralPublicKey
+        start.transcriptSignature = transcriptSignature
+        start.createdAt = createdAt
+        return start
+    }
+}
+
+struct E2EHandshakeFinishRelayPayload: Codable, Equatable {
+    let type: String
+    let sessionID: String
+    let senderDeviceID: String
+    let recipientDeviceID: String
+    let senderEphemeralPublicKeyBase64: String
+    let transcriptSignatureBase64: String
+    let acceptedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sessionID = "sessionId"
+        case senderDeviceID = "senderDeviceId"
+        case recipientDeviceID = "recipientDeviceId"
+        case senderEphemeralPublicKeyBase64
+        case transcriptSignatureBase64
+        case acceptedAt
+    }
+
+    init(finish: Nudge_V1_E2EHandshakeFinish) {
+        type = "e2e_handshake_finish"
+        sessionID = finish.sessionID
+        senderDeviceID = finish.senderDeviceID
+        recipientDeviceID = finish.recipientDeviceID
+        senderEphemeralPublicKeyBase64 = finish.senderEphemeralPublicKey.base64EncodedString()
+        transcriptSignatureBase64 = finish.transcriptSignature.base64EncodedString()
+        acceptedAt = finish.acceptedAt
+    }
+
+    func finish() throws -> Nudge_V1_E2EHandshakeFinish {
+        guard type == "e2e_handshake_finish",
+              let senderEphemeralPublicKey = Data(base64Encoded: senderEphemeralPublicKeyBase64),
+              let transcriptSignature = Data(base64Encoded: transcriptSignatureBase64)
+        else {
+            throw E2EEnvelopeError.invalidRelayPayload
+        }
+        var finish = Nudge_V1_E2EHandshakeFinish()
+        finish.sessionID = sessionID
+        finish.senderDeviceID = senderDeviceID
+        finish.recipientDeviceID = recipientDeviceID
+        finish.senderEphemeralPublicKey = senderEphemeralPublicKey
+        finish.transcriptSignature = transcriptSignature
+        finish.acceptedAt = acceptedAt
+        return finish
+    }
+}
+
+func signE2EHandshakeStart(
+    signingPrivateKeyRaw: Data,
+    start: Nudge_V1_E2EHandshakeStart
+) throws -> Nudge_V1_E2EHandshakeStart {
+    let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: signingPrivateKeyRaw)
+    var signed = start
+    signed.transcriptSignature = Data()
+    signed.transcriptSignature = try privateKey.signature(for: handshakeStartTranscript(signed))
+    return signed
+}
+
+func verifyE2EHandshakeStart(
+    _ start: Nudge_V1_E2EHandshakeStart,
+    expectedIdentityPublicKey: Data
+) throws {
+    guard start.senderIdentityPublicKey == expectedIdentityPublicKey else {
+        throw E2EEnvelopeError.identityKeyMismatch
+    }
+    let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: expectedIdentityPublicKey)
+    guard publicKey.isValidSignature(start.transcriptSignature, for: handshakeStartTranscript(start)) else {
+        throw E2EEnvelopeError.invalidHandshakeSignature
+    }
+}
+
+func signE2EHandshakeFinish(
+    signingPrivateKeyRaw: Data,
+    start: Nudge_V1_E2EHandshakeStart,
+    finish: Nudge_V1_E2EHandshakeFinish
+) throws -> Nudge_V1_E2EHandshakeFinish {
+    let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: signingPrivateKeyRaw)
+    var signed = finish
+    signed.transcriptSignature = Data()
+    signed.transcriptSignature = try privateKey.signature(for: handshakeFinishTranscript(start: start, finish: signed))
+    return signed
+}
+
+func verifyE2EHandshakeFinish(
+    start: Nudge_V1_E2EHandshakeStart,
+    finish: Nudge_V1_E2EHandshakeFinish,
+    expectedIdentityPublicKey: Data
+) throws {
+    let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: expectedIdentityPublicKey)
+    guard publicKey.isValidSignature(
+        finish.transcriptSignature,
+        for: handshakeFinishTranscript(start: start, finish: finish)
+    ) else {
+        throw E2EEnvelopeError.invalidHandshakeSignature
+    }
+}
+
 private func sequenceNonce(_ sequence: UInt64) -> Data {
     var nonce = Data(repeating: 0, count: 12)
     var bigEndian = sequence.bigEndian
@@ -237,4 +388,43 @@ private func associatedData(
         result.append(0)
         result.append(chunk)
     }
+}
+
+private func handshakeStartTranscript(_ start: Nudge_V1_E2EHandshakeStart) -> Data {
+    joinTranscriptFields([
+        Data("nudge.e2e.handshake.start.v1".utf8),
+        Data(start.sessionID.utf8),
+        Data(start.senderDeviceID.utf8),
+        Data(start.recipientDeviceID.utf8),
+        start.senderIdentityPublicKey,
+        start.senderEphemeralPublicKey,
+        Data(start.createdAt.utf8)
+    ])
+}
+
+private func handshakeFinishTranscript(
+    start: Nudge_V1_E2EHandshakeStart,
+    finish: Nudge_V1_E2EHandshakeFinish
+) -> Data {
+    joinTranscriptFields([
+        Data("nudge.e2e.handshake.finish.v1".utf8),
+        handshakeStartTranscript(start),
+        start.transcriptSignature,
+        Data(finish.sessionID.utf8),
+        Data(finish.senderDeviceID.utf8),
+        Data(finish.recipientDeviceID.utf8),
+        finish.senderEphemeralPublicKey,
+        Data(finish.acceptedAt.utf8)
+    ])
+}
+
+private func joinTranscriptFields(_ fields: [Data]) -> Data {
+    guard var result = fields.first else {
+        return Data()
+    }
+    for field in fields.dropFirst() {
+        result.append(0)
+        result.append(field)
+    }
+    return result
 }

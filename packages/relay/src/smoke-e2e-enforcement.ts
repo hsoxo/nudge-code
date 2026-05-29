@@ -52,6 +52,16 @@ async function main(): Promise<void> {
       throw new Error(`expected queued e2e envelope, got ${JSON.stringify(polled)}`);
     }
 
+    await expectPostJson('/api/messages/send', {
+      bindingId: binding.binding.id,
+      fromDeviceId: phone.id,
+      toDeviceId: daemon.id,
+      payload: {
+        ...handshakeStartPayload(phone.id, daemon.id),
+        senderEphemeralPublicKeyBase64: 'bad',
+      },
+    }, 400, 'invalid_e2e_payload');
+
     const daemonSocket = await connectSocket('daemon', daemon.id, binding.binding.id, daemonIdentity.privateKey);
     const phoneSocket = await connectSocket('mobile', phone.id, binding.binding.id, phoneIdentity.privateKey);
     const rejected = waitForMessage(phoneSocket, (message) => message.type === 'error');
@@ -72,6 +82,26 @@ async function main(): Promise<void> {
     const routedMessage = await routed;
     if (routedMessage.message?.payload?.type !== 'e2e_envelope') {
       throw new Error(`expected routed e2e envelope, got ${JSON.stringify(routedMessage)}`);
+    }
+
+    const routedHandshake = waitForMessage(daemonSocket, (message) => message.type === 'message');
+    phoneSocket.send(JSON.stringify({
+      toDeviceId: daemon.id,
+      payload: handshakeStartPayload(phone.id, daemon.id),
+    }));
+    const routedHandshakeMessage = await routedHandshake;
+    if (routedHandshakeMessage.message?.payload?.type !== 'e2e_handshake_start') {
+      throw new Error(`expected routed e2e handshake, got ${JSON.stringify(routedHandshakeMessage)}`);
+    }
+
+    const routedHandshakeFinish = waitForMessage(phoneSocket, (message) => message.type === 'message');
+    daemonSocket.send(JSON.stringify({
+      toDeviceId: phone.id,
+      payload: handshakeFinishPayload(daemon.id, phone.id),
+    }));
+    const routedHandshakeFinishMessage = await routedHandshakeFinish;
+    if (routedHandshakeFinishMessage.message?.payload?.type !== 'e2e_handshake_finish') {
+      throw new Error(`expected routed e2e handshake finish, got ${JSON.stringify(routedHandshakeFinishMessage)}`);
     }
 
     daemonSocket.close();
@@ -189,6 +219,31 @@ function encryptedPayload(
     sequence,
     nonceBase64: Buffer.from('nonce-000001').toString('base64'),
     ciphertextBase64: Buffer.from('opaque ciphertext bytes').toString('base64'),
+  };
+}
+
+function handshakeStartPayload(senderDeviceId: string, recipientDeviceId: string): Record<string, unknown> {
+  return {
+    type: 'e2e_handshake_start',
+    sessionId: 'session_1',
+    senderDeviceId,
+    recipientDeviceId,
+    senderIdentityPublicKeyBase64: Buffer.alloc(32, 7).toString('base64'),
+    senderEphemeralPublicKeyBase64: Buffer.alloc(32, 8).toString('base64'),
+    transcriptSignatureBase64: Buffer.alloc(64, 9).toString('base64'),
+    createdAt: '2026-05-29T00:00:00.000Z',
+  };
+}
+
+function handshakeFinishPayload(senderDeviceId: string, recipientDeviceId: string): Record<string, unknown> {
+  return {
+    type: 'e2e_handshake_finish',
+    sessionId: 'session_1',
+    senderDeviceId,
+    recipientDeviceId,
+    senderEphemeralPublicKeyBase64: Buffer.alloc(32, 10).toString('base64'),
+    transcriptSignatureBase64: Buffer.alloc(64, 11).toString('base64'),
+    acceptedAt: '2026-05-29T00:00:01.000Z',
   };
 }
 

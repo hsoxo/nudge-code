@@ -735,9 +735,23 @@ function validateRelayPayload(
     return { ok: false, error: 'e2e_payload_required' };
   }
   const candidate = payload as Record<string, unknown>;
+  if (candidate.type === 'e2e_handshake_start') {
+    return validateE2EHandshakeStart(candidate, fromDeviceId, toDeviceId);
+  }
+  if (candidate.type === 'e2e_handshake_finish') {
+    return validateE2EHandshakeFinish(candidate, fromDeviceId, toDeviceId);
+  }
   if (candidate.type !== 'e2e_envelope') {
     return { ok: false, error: 'e2e_payload_required' };
   }
+  return validateE2EEnvelope(candidate, fromDeviceId, toDeviceId);
+}
+
+function validateE2EEnvelope(
+  candidate: Record<string, unknown>,
+  fromDeviceId?: string,
+  toDeviceId?: string,
+): PayloadValidation {
   if (
     typeof candidate.sessionId !== 'string' ||
     typeof candidate.senderDeviceId !== 'string' ||
@@ -768,6 +782,97 @@ function validateRelayPayload(
     return { ok: false, error: 'invalid_e2e_payload' };
   }
   if (Buffer.from(candidate.nonceBase64, 'base64').length !== 12) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  return { ok: true };
+}
+
+function validateE2EHandshakeStart(
+  candidate: Record<string, unknown>,
+  fromDeviceId?: string,
+  toDeviceId?: string,
+): PayloadValidation {
+  if (
+    typeof candidate.sessionId !== 'string' ||
+    typeof candidate.senderDeviceId !== 'string' ||
+    typeof candidate.recipientDeviceId !== 'string' ||
+    typeof candidate.senderIdentityPublicKeyBase64 !== 'string' ||
+    typeof candidate.senderEphemeralPublicKeyBase64 !== 'string' ||
+    typeof candidate.transcriptSignatureBase64 !== 'string' ||
+    typeof candidate.createdAt !== 'string'
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.sessionId.length === 0 ||
+    candidate.senderDeviceId.length === 0 ||
+    candidate.recipientDeviceId.length === 0 ||
+    candidate.createdAt.length === 0
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.senderDeviceId !== fromDeviceId ||
+    candidate.recipientDeviceId !== toDeviceId
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    !isBase64(candidate.senderIdentityPublicKeyBase64) ||
+    !isBase64(candidate.senderEphemeralPublicKeyBase64) ||
+    !isBase64(candidate.transcriptSignatureBase64)
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    Buffer.from(candidate.senderIdentityPublicKeyBase64, 'base64').length !== 32 ||
+    Buffer.from(candidate.senderEphemeralPublicKeyBase64, 'base64').length !== 32 ||
+    Buffer.from(candidate.transcriptSignatureBase64, 'base64').length !== 64
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  return { ok: true };
+}
+
+function validateE2EHandshakeFinish(
+  candidate: Record<string, unknown>,
+  fromDeviceId?: string,
+  toDeviceId?: string,
+): PayloadValidation {
+  if (
+    typeof candidate.sessionId !== 'string' ||
+    typeof candidate.senderDeviceId !== 'string' ||
+    typeof candidate.recipientDeviceId !== 'string' ||
+    typeof candidate.senderEphemeralPublicKeyBase64 !== 'string' ||
+    typeof candidate.transcriptSignatureBase64 !== 'string' ||
+    typeof candidate.acceptedAt !== 'string'
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.sessionId.length === 0 ||
+    candidate.senderDeviceId.length === 0 ||
+    candidate.recipientDeviceId.length === 0 ||
+    candidate.acceptedAt.length === 0
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.senderDeviceId !== fromDeviceId ||
+    candidate.recipientDeviceId !== toDeviceId
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    !isBase64(candidate.senderEphemeralPublicKeyBase64) ||
+    !isBase64(candidate.transcriptSignatureBase64)
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    Buffer.from(candidate.senderEphemeralPublicKeyBase64, 'base64').length !== 32 ||
+    Buffer.from(candidate.transcriptSignatureBase64, 'base64').length !== 64
+  ) {
     return { ok: false, error: 'invalid_e2e_payload' };
   }
   return { ok: true };
