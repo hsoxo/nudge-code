@@ -204,6 +204,31 @@ struct RelayClientTests {
         #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
     }
 
+    @Test func openSessionAcceptsUnsolicitedLiveTerminalSnapshot() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","ok":true,"data":{"tabId":"default","rows":24,"cols":80,"text":"live update"}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "unused" }
+        )
+
+        let session = try await client.openSession(machine: activeMachine)
+        let event = try await session.receiveEvent()
+        session.close()
+
+        #expect(socket.sent.isEmpty)
+        #expect(event == .terminalSnapshot(TerminalSnapshot(
+            tabID: "default",
+            profile: TerminalProfile(rows: 24, cols: 80),
+            text: "live update"
+        )))
+    }
+
     @Test func setPhoneProfileSendsRelayControlRequest() async throws {
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,

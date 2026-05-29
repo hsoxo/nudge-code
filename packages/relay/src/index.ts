@@ -31,6 +31,7 @@ interface RelayMessage {
   bindingId: string;
   fromDeviceId: string;
   toDeviceId: string;
+  ephemeral: boolean;
   payload: unknown;
   createdAt: string;
 }
@@ -211,6 +212,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       bindingId?: string;
       fromDeviceId?: string;
       toDeviceId?: string;
+      ephemeral?: boolean;
       payload?: unknown;
     }>(request);
     const binding = body.bindingId ? bindings.get(body.bindingId) : undefined;
@@ -231,12 +233,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       bindingId: binding.id,
       fromDeviceId: body.fromDeviceId,
       toDeviceId: body.toDeviceId,
+      ephemeral: body.ephemeral === true,
       payload: body.payload ?? {},
       createdAt: now(),
     };
-    const queue = messages.get(message.toDeviceId) ?? [];
-    queue.push(message);
-    messages.set(message.toDeviceId, queue);
+    const targetSocket = sockets.get(message.toDeviceId);
+    if (targetSocket && targetSocket.readyState === targetSocket.OPEN) {
+      targetSocket.send(JSON.stringify({ type: 'message', message }));
+    } else if (!message.ephemeral) {
+      const queue = messages.get(message.toDeviceId) ?? [];
+      queue.push(message);
+      messages.set(message.toDeviceId, queue);
+    }
     writeJson(response, 202, { accepted: true, messageId: message.id });
     return;
   }
@@ -306,9 +314,9 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
   sockets.set(device.id, websocket);
   websocket.send(JSON.stringify({ type: 'connected', deviceId: device.id, bindingId: binding.id }));
   websocket.on('message', (bytes) => {
-    let message: { toDeviceId?: string; payload?: unknown };
+    let message: { toDeviceId?: string; ephemeral?: boolean; payload?: unknown };
     try {
-      message = JSON.parse(bytes.toString()) as { toDeviceId?: string; payload?: unknown };
+      message = JSON.parse(bytes.toString()) as { toDeviceId?: string; ephemeral?: boolean; payload?: unknown };
     } catch {
       websocket.send(JSON.stringify({ type: 'error', error: 'invalid_json' }));
       return;
@@ -322,13 +330,14 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       bindingId: binding.id,
       fromDeviceId: device.id,
       toDeviceId: message.toDeviceId,
+      ephemeral: message.ephemeral === true,
       payload: message.payload ?? {},
       createdAt: now(),
     };
     const targetSocket = sockets.get(relayMessage.toDeviceId);
     if (targetSocket && targetSocket.readyState === targetSocket.OPEN) {
       targetSocket.send(JSON.stringify({ type: 'message', message: relayMessage }));
-    } else {
+    } else if (!relayMessage.ephemeral) {
       const queue = messages.get(relayMessage.toDeviceId) ?? [];
       queue.push(relayMessage);
       messages.set(relayMessage.toDeviceId, queue);

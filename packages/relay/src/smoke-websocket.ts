@@ -27,6 +27,21 @@ async function main(): Promise<void> {
     throw new Error(`unexpected routed payload: ${JSON.stringify(message)}`);
   }
 
+  const liveUpdate = waitForMessage(phoneSocket, (candidate) => candidate.type === 'message');
+  daemonSocket.send(JSON.stringify({
+    toDeviceId: phone.id,
+    ephemeral: true,
+    payload: {
+      type: 'daemon_response',
+      ok: true,
+      data: { tabId: 'default', rows: 24, cols: 80, text: 'live update' },
+    },
+  }));
+  const update = await liveUpdate;
+  if (update.message?.payload?.data?.text !== 'live update') {
+    throw new Error(`unexpected live update payload: ${JSON.stringify(update)}`);
+  }
+
   daemonSocket.close();
   phoneSocket.close();
   console.log(`relay websocket smoke passed binding=${binding.binding.id}`);

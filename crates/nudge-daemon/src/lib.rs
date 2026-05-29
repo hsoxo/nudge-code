@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -15,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tokio::task;
-use tokio::time::sleep;
+use tokio::time::{MissedTickBehavior, interval, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
@@ -186,6 +187,11 @@ struct RelayRoutedMessage {
     id: String,
     from_device_id: String,
     payload: RelayControlRequest,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalChange {
+    tab_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,6 +990,7 @@ struct DaemonRuntime {
     shutdown: Arc<Notify>,
     connected_clients: Arc<AtomicU32>,
     relay_state: Arc<Mutex<RelayConnectionState>>,
+    terminal_changes: broadcast::Sender<TerminalChange>,
     started_at: Instant,
     socket_path: PathBuf,
 }
@@ -1006,6 +1013,7 @@ impl DaemonRuntime {
             shutdown: Arc::new(Notify::new()),
             connected_clients: Arc::new(AtomicU32::new(0)),
             relay_state: Arc::new(Mutex::new(RelayConnectionState::default())),
+            terminal_changes: broadcast::channel(512).0,
             started_at: Instant::now(),
             socket_path,
         }
@@ -1089,7 +1097,10 @@ impl DaemonRuntime {
                     .lock()
                     .expect("terminal grid lock poisoned")
                     .resize(GridSize::default());
-                runtime_tab.pty = Some(spawn_pty_for_tab(tab_id, runtime_tab.grid.clone()).await?);
+                runtime_tab.pty = Some(
+                    self.spawn_pty_for_runtime_tab(tab_id, runtime_tab.grid.clone())
+                        .await?,
+                );
             }
         }
         {
@@ -1104,11 +1115,21 @@ impl DaemonRuntime {
         let mut ptys = self.ptys.lock().await;
         for runtime_tab in ptys.iter_mut() {
             if runtime_tab.pty.is_none() {
-                runtime_tab.pty =
-                    Some(spawn_pty_for_tab(&runtime_tab.tab_id, runtime_tab.grid.clone()).await?);
+                runtime_tab.pty = Some(
+                    self.spawn_pty_for_runtime_tab(&runtime_tab.tab_id, runtime_tab.grid.clone())
+                        .await?,
+                );
             }
         }
         Ok(())
+    }
+
+    async fn spawn_pty_for_runtime_tab(
+        &self,
+        tab_id: &str,
+        grid: Arc<std::sync::Mutex<TerminalGrid>>,
+    ) -> Result<PtyTab> {
+        spawn_pty_for_tab(tab_id, grid, self.terminal_changes.clone()).await
     }
 
     async fn write_input(&self, tab_id: &str, data: Vec<u8>) -> Result<()> {
@@ -1317,6 +1338,17 @@ impl DaemonRuntime {
             .filter(|binding| binding.status == BindingStatus::Active)
     }
 
+    async fn running_tab_ids(&self) -> Vec<String> {
+        self.session
+            .lock()
+            .await
+            .tabs
+            .iter()
+            .filter(|tab| matches!(tab.status, TabStatus::Running))
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
     async fn set_relay_state(&self, state: RelayConnectionState) {
         *self.relay_state.lock().await = state;
     }
@@ -1342,6 +1374,10 @@ impl DaemonRuntime {
         }
         pty.resize(size)
     }
+
+    fn subscribe_terminal_changes(&self) -> broadcast::Receiver<TerminalChange> {
+        self.terminal_changes.subscribe()
+    }
 }
 
 struct RuntimeTab {
@@ -1353,13 +1389,19 @@ struct RuntimeTab {
 async fn spawn_pty_for_tab(
     tab_id: &str,
     grid: Arc<std::sync::Mutex<TerminalGrid>>,
+    terminal_changes: broadcast::Sender<TerminalChange>,
 ) -> Result<PtyTab> {
     let tab_id = tab_id.to_string();
+    let spawn_tab_id = tab_id.clone();
     task::spawn_blocking(move || {
+        let output_tab_id = spawn_tab_id;
         PtyTab::spawn_shell_with_output_hook(TerminalSize::default(), move |bytes| {
             grid.lock()
                 .expect("terminal grid lock poisoned")
                 .process(bytes);
+            let _ = terminal_changes.send(TerminalChange {
+                tab_id: output_tab_id.clone(),
+            });
         })
     })
     .await
@@ -1408,6 +1450,10 @@ async fn relay_connection_loop(runtime: DaemonRuntime) {
 
 async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> Result<()> {
     let url = relay_websocket_url(binding)?;
+    let bound_phone_id = binding
+        .bound_phone_id
+        .clone()
+        .context("active relay binding is missing bound phone id")?;
     runtime
         .set_relay_state(RelayConnectionState::connecting(binding))
         .await;
@@ -1417,10 +1463,38 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     runtime
         .set_relay_state(RelayConnectionState::connected(binding))
         .await;
+    let mut terminal_changes = runtime.subscribe_terminal_changes();
+    let mut pending_terminal_tabs = BTreeSet::new();
+    let mut terminal_flush = interval(Duration::from_millis(100));
+    terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = runtime.shutdown.notified() => break,
+            change = terminal_changes.recv() => {
+                match change {
+                    Ok(change) => {
+                        pending_terminal_tabs.insert(change.tab_id);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        pending_terminal_tabs.extend(runtime.running_tab_ids().await);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = terminal_flush.tick(), if !pending_terminal_tabs.is_empty() => {
+                let tab_ids = std::mem::take(&mut pending_terminal_tabs);
+                for tab_id in tab_ids {
+                    if let Some(message) =
+                        live_terminal_snapshot_json(runtime, binding, &bound_phone_id, &tab_id).await
+                    {
+                        websocket
+                            .send(WebSocketMessage::Text(message.into()))
+                            .await
+                            .context("failed to send relay terminal update")?;
+                    }
+                }
+            }
             message = websocket.next() => {
                 match message {
                     Some(Ok(message)) => {
@@ -1500,15 +1574,9 @@ async fn handle_relay_control_request(
         ),
         RelayControlRequest::TerminalSnapshot { request_id, tab_id } => {
             match runtime.terminal_snapshot(&tab_id).await {
-                Ok(snapshot) => RelayControlResponse::ok(
-                    request_id,
-                    json!({
-                        "tabId": snapshot.tab_id,
-                        "rows": snapshot.rows,
-                        "cols": snapshot.cols,
-                        "text": snapshot.text,
-                    }),
-                ),
+                Ok(snapshot) => {
+                    RelayControlResponse::ok(request_id, terminal_snapshot_json(&snapshot))
+                }
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
         }
@@ -1628,6 +1696,47 @@ fn relay_response_json(
         }
     }))
     .expect("relay response json should serialize")
+}
+
+async fn live_terminal_snapshot_json(
+    runtime: &DaemonRuntime,
+    binding: &BindingState,
+    to_device_id: &str,
+    tab_id: &str,
+) -> Option<String> {
+    let snapshot = runtime.terminal_snapshot(tab_id).await.ok()?;
+    Some(relay_live_terminal_snapshot_json(
+        to_device_id,
+        binding,
+        &snapshot,
+    ))
+}
+
+fn relay_live_terminal_snapshot_json(
+    to_device_id: &str,
+    binding: &BindingState,
+    snapshot: &v1::TerminalSnapshot,
+) -> String {
+    serde_json::to_string(&json!({
+        "toDeviceId": to_device_id,
+        "ephemeral": true,
+        "payload": {
+            "type": "daemon_response",
+            "bindingId": binding.binding_id,
+            "ok": true,
+            "data": terminal_snapshot_json(snapshot),
+        }
+    }))
+    .expect("relay live terminal snapshot should serialize")
+}
+
+fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
+    json!({
+        "tabId": snapshot.tab_id,
+        "rows": snapshot.rows,
+        "cols": snapshot.cols,
+        "text": snapshot.text,
+    })
 }
 
 fn session_state_json(state: v1::SessionState) -> Value {
@@ -2153,6 +2262,39 @@ mod tests {
         let parsed = binding_from_proto(binding).expect("proto binding should parse");
         assert_eq!(parsed.status, BindingStatus::Pending);
         assert_eq!(parsed.bound_phone_id, None);
+    }
+
+    #[test]
+    fn live_terminal_snapshot_uses_unsolicited_daemon_response_shape() {
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string());
+        let snapshot = v1::TerminalSnapshot {
+            tab_id: "default".to_string(),
+            rows: 24,
+            cols: 80,
+            text: "ready".to_string(),
+            formatted: Vec::new(),
+        };
+
+        let json = relay_live_terminal_snapshot_json("phone_1", &binding, &snapshot);
+        let value: Value = serde_json::from_str(&json).expect("live snapshot json should parse");
+
+        assert_eq!(value["toDeviceId"], "phone_1");
+        assert_eq!(value["ephemeral"], true);
+        assert_eq!(value["payload"]["type"], "daemon_response");
+        assert_eq!(value["payload"]["bindingId"], "bind_1");
+        assert_eq!(value["payload"]["ok"], true);
+        assert!(value["payload"].get("requestId").is_none());
+        assert_eq!(value["payload"]["data"]["tabId"], "default");
+        assert_eq!(value["payload"]["data"]["rows"], 24);
+        assert_eq!(value["payload"]["data"]["cols"], 80);
+        assert_eq!(value["payload"]["data"]["text"], "ready");
     }
 
     #[test]
