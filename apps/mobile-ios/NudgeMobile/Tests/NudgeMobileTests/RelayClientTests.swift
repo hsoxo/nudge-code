@@ -106,6 +106,32 @@ struct RelayClientTests {
         ])
     }
 
+    @Test func sendTerminalInputSendsRelayControlRequest() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-input","ok":true,"data":{"accepted":true}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "ios-input" }
+        )
+
+        try await client.sendTerminalInput(machine: activeMachine, tabID: "default", text: "echo hi", enter: true)
+
+        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""toDeviceId":"daemon_1""#))
+        #expect(socket.sent[0].contains(#""type":"terminal_input""#))
+        #expect(socket.sent[0].contains(#""requestId":"ios-input""#))
+        #expect(socket.sent[0].contains(#""tabId":"default""#))
+        #expect(socket.sent[0].contains(#""text":"echo hi""#))
+        #expect(socket.sent[0].contains(#""enter":true"#))
+        #expect(socket.closed)
+    }
+
     private var activeMachine: Machine {
         Machine(
             id: "mac",

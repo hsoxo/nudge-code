@@ -104,6 +104,22 @@ final class AppModel {
         }
     }
 
+    func sendSelectedTabInput(_ text: String, enter: Bool) async {
+        guard !text.isEmpty,
+              let machine = selectedMachine,
+              let tab = selectedTab
+        else {
+            return
+        }
+        do {
+            try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
+        } catch {
+            if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
+                machines[machineIndex].lastSeenText = "Unable to send input"
+            }
+        }
+    }
+
     func parsePairingURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
               let draft = BindingDraft(pairingURL: url)

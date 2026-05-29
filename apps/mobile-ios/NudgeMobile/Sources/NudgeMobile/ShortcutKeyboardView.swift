@@ -19,8 +19,11 @@ struct ShortcutKeyboardView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button {
-                    send(model.commandComposer)
+                    let text = model.commandComposer
                     model.commandComposer = ""
+                    Task {
+                        await model.sendSelectedTabInput(text, enter: true)
+                    }
                 } label: {
                     Image(systemName: "paperplane.fill")
                         .frame(width: 36, height: 36)
@@ -39,7 +42,9 @@ struct ShortcutKeyboardView: View {
             HStack(spacing: 8) {
                 ForEach(keys) { key in
                     Button(key.label) {
-                        send(key.payload)
+                        Task {
+                            await model.sendSelectedTabInput(key.payload, enter: false)
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -48,7 +53,4 @@ struct ShortcutKeyboardView: View {
         }
     }
 
-    private func send(_ payload: String) {
-        _ = payload
-    }
 }

@@ -138,6 +138,49 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id] == [remoteTab])
         #expect(model.machines.first?.lastSeenText == "relay session attached")
     }
+
+    @Test func appModelSendsSelectedTabInput() async throws {
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://nudgecode.dev")!,
+            connectionState: .online,
+            lastSeenText: "relay session attached",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .active,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let client = RecordingRelayClient()
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.sendSelectedTabInput("echo hi", enter: true)
+
+        #expect(client.inputRequests == [TerminalInputRequest(
+            machine: machine,
+            tabID: tab.id,
+            text: "echo hi",
+            enter: true
+        )])
+    }
 }
 
 private struct RelayClaim: Equatable {
@@ -150,10 +193,18 @@ private struct BindingStatusRequest: Equatable {
     var relayURL: URL
 }
 
+private struct TerminalInputRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+    var text: String
+    var enter: Bool
+}
+
 private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var claims: [RelayClaim] = []
     var statusRequests: [BindingStatusRequest] = []
     var sessionRequests: [Machine] = []
+    var inputRequests: [TerminalInputRequest] = []
     var statusClaim: BindingClaim
     var sessionState: RemoteSessionState
     var error: Error?
@@ -202,6 +253,13 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         sessionRequests.append(machine)
         return sessionState
+    }
+
+    func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws {
+        if let error {
+            throw error
+        }
+        inputRequests.append(TerminalInputRequest(machine: machine, tabID: tabID, text: text, enter: enter))
     }
 
     func connect(machine: Machine) async throws {
