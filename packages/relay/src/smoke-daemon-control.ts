@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   createCipheriv,
   createDecipheriv,
@@ -11,6 +11,7 @@ import {
   type KeyObject,
 } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -75,8 +76,9 @@ interface SmokeContext {
   phoneIdentity: { publicKey: string; privateKey: KeyObject };
 }
 
-const baseUrl = process.env.NUDGE_RELAY_SMOKE_URL ?? 'http://127.0.0.1:8787';
+let baseUrl = process.env.NUDGE_RELAY_SMOKE_URL ?? '';
 const nudgeBin = process.env.NUDGE_SMOKE_NUDGE_BIN ?? join(process.cwd(), '..', '..', 'target', 'debug', 'nudge');
+const relayBin = join(process.cwd(), 'dist', 'index.js');
 const textEncoder = new TextEncoder();
 const ed25519SpkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
 const x25519SpkiPrefix = Buffer.from('302a300506032b656e032100', 'hex');
@@ -90,7 +92,11 @@ interface BindingResult {
 async function main(): Promise<void> {
   const tmp = await mkdtemp(join(tmpdir(), 'nudge-daemon-control-'));
   let env: NodeJS.ProcessEnv | undefined;
+  let relay: ChildProcess | undefined;
   try {
+    if (!baseUrl) {
+      relay = await startRelay(tmp);
+    }
     env = {
       ...process.env,
       NUDGE_STATE_PATH: join(tmp, 'state', 'session.json'),
@@ -198,8 +204,85 @@ async function main(): Promise<void> {
         // daemon may not have started yet
       }
     }
+    if (relay) {
+      await stopRelay(relay);
+    }
     await rm(tmp, { recursive: true, force: true });
   }
+}
+
+async function startRelay(tmp: string): Promise<ChildProcess> {
+  const port = await getFreePort();
+  baseUrl = `http://127.0.0.1:${port}`;
+  const relay = spawn(process.execPath, [relayBin], {
+    env: {
+      ...process.env,
+      NUDGE_RELAY_PORT: String(port),
+      NUDGE_RELAY_STATE_PATH: join(tmp, 'relay-state.json'),
+      NUDGE_RELAY_REQUIRE_E2E_PAYLOAD: '1',
+      NUDGE_RELAY_REQUIRE_WS_SIGNATURE: '1',
+      NUDGE_RELAY_REQUIRE_WS_CHALLENGE: '1',
+      NUDGE_RELAY_DISABLE_HTTP_MESSAGES: '1',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  relay.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString('utf8');
+  });
+  relay.on('exit', (code) => {
+    if (code !== null && code !== 0) {
+      stderr += `relay exited with ${code}`;
+    }
+  });
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (relay.exitCode !== null) {
+      throw new Error(stderr || `relay exited with ${relay.exitCode}`);
+    }
+    try {
+      const health = await getJson<{ ok: boolean }>('/healthz');
+      if (health.ok) {
+        return relay;
+      }
+    } catch {
+      // relay may still be binding the port
+    }
+    await sleep(100);
+  }
+  throw new Error(`relay did not start: ${stderr}`);
+}
+
+async function stopRelay(relay: ChildProcess): Promise<void> {
+  if (relay.exitCode !== null) {
+    return;
+  }
+  relay.kill('SIGTERM');
+  await new Promise<void>((resolve) => {
+    relay.once('exit', () => resolve());
+    setTimeout(() => {
+      if (relay.exitCode === null) {
+        relay.kill('SIGKILL');
+      }
+      resolve();
+    }, 2000);
+  });
+}
+
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => {
+        if (!address || typeof address === 'string') {
+          reject(new Error('failed to allocate relay smoke port'));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  });
 }
 
 async function bindThroughCli(env: NodeJS.ProcessEnv, phonePublicKey: string): Promise<BindingResult> {
@@ -350,6 +433,14 @@ async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!response.ok) {
+    throw new Error(`${path} failed: ${response.status} ${await response.text()}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function getJson<T = unknown>(path: string): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`);
   if (!response.ok) {
     throw new Error(`${path} failed: ${response.status} ${await response.text()}`);
   }
