@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
-import { MemorySocketNonceStore, verifySocketSignature } from './auth.js';
+import { MemorySocketChallengeStore, MemorySocketNonceStore, verifySocketSignature } from './auth.js';
 
 type DeviceKind = 'daemon' | 'phone';
 type BindingStatus = 'pending' | 'claimed' | 'active' | 'revoked';
@@ -94,8 +94,10 @@ class FixedWindowRateLimiter {
 
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
+const requireWebSocketChallenge = process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
 const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
+const socketChallengeTtlMs = readPositiveIntEnv('NUDGE_SOCKET_CHALLENGE_TTL_MS', 60_000);
 const pairingClaimWindowMs = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_RATE_WINDOW_MS', 10 * 60 * 1000);
 const pairingClaimIpLimit = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_IP_LIMIT', 60);
 const pairingClaimCodeLimit = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_CODE_LIMIT', 10);
@@ -104,6 +106,7 @@ const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
 const sockets = new Map<string, WebSocket>();
 const nonceStore = new MemorySocketNonceStore();
+const challengeStore = new MemorySocketChallengeStore();
 const pairingClaimIpLimiter = new FixedWindowRateLimiter(pairingClaimIpLimit, pairingClaimWindowMs);
 const pairingClaimCodeLimiter = new FixedWindowRateLimiter(pairingClaimCodeLimit, pairingClaimWindowMs);
 
@@ -173,6 +176,37 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     devices.set(device.id, device);
     persistRelayState();
     writeJson(response, 201, { device });
+    return;
+  }
+
+  if (method === 'POST' && url.pathname === '/api/ws/challenge') {
+    const body = await readJson<{ deviceId?: string; bindingId?: string }>(request);
+    const device = body.deviceId ? devices.get(body.deviceId) : undefined;
+    const binding = body.bindingId ? bindings.get(body.bindingId) : undefined;
+    if (!device) {
+      writeJson(response, 401, { error: 'device_not_registered' });
+      return;
+    }
+    if (!binding || binding.status !== 'active') {
+      writeJson(response, 403, { error: 'binding_not_active' });
+      return;
+    }
+    if (!isBindingParticipant(binding, device.id)) {
+      writeJson(response, 403, { error: 'route_not_authorized' });
+      return;
+    }
+    const challenge = challengeStore.issue({
+      deviceId: device.id,
+      bindingId: binding.id,
+      ttlMs: socketChallengeTtlMs,
+    });
+    writeJson(response, 201, {
+      challenge: {
+        id: challenge.id,
+        message: challenge.message,
+        expiresAt: challenge.expiresAt,
+      },
+    });
     return;
   }
 
@@ -440,7 +474,9 @@ function authorizeSocketSignature(
     bindingId,
     params,
     requireSignature: requireWebSocketSignature,
+    requireChallenge: requireWebSocketChallenge,
     nonceStore,
+    challengeStore,
   });
 }
 

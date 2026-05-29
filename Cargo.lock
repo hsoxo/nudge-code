@@ -996,6 +996,7 @@ dependencies = [
  "nudge-pty",
  "nudge-terminal",
  "prost",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

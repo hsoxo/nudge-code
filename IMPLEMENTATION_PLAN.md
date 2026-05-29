@@ -227,10 +227,11 @@ Current implementation status:
 - Relay revocation closes active participant websockets, rejects new websocket attaches for revoked bindings, and drops queued messages for the revoked binding.
 - Relay can persist devices and bindings to a local JSON file when `NUDGE_RELAY_STATE_PATH` is set; queued messages remain process-local so terminal/control payloads are not written to disk by default.
 - Relay supports Ed25519 signed websocket auth query parameters with in-memory nonce replay rejection in compatibility mode, and can require signatures with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
+- Relay issues short-lived, one-shot websocket auth challenges through `POST /api/ws/challenge`; daemon and iOS sign those challenges before opening their websocket, and hosted deployments can require them with `NUDGE_RELAY_REQUIRE_WS_CHALLENGE=1`.
 - Relay rate-limits pairing claim attempts by client address and normalized pairing code; this protects the short pairing code from simple online guessing while keeping the limits configurable for hosted deployment.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
-- E2E encrypted envelopes, managed database storage, hosted deployment, server-issued websocket challenges, and daemon/iOS revocation UX remain open.
+- E2E encrypted envelopes, managed database storage, hosted deployment, and daemon/iOS revocation UX remain open.
 
 Exit criteria:
 
@@ -461,8 +462,9 @@ Tasks:
 
 Current implementation status:
 
+- Signed websocket auth supports relay-issued one-shot challenges; daemon and iOS both request and sign challenges before websocket connect, and relay can reject legacy timestamp/nonce auth when challenge enforcement is enabled.
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
-- The in-memory limiter is appropriate for the single-process hosted MVP; production multi-instance deployment should move these counters to Redis or the managed data store.
+- The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 
 Exit criteria:
 

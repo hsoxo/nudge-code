@@ -17,6 +17,7 @@ use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
 use nudge_terminal::{TerminalGrid, TerminalSize as GridSize};
 use prost::Message;
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1758,7 +1759,8 @@ async fn relay_connection_loop(runtime: DaemonRuntime) {
 
 async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> Result<()> {
     let identity = runtime.device_identity().await?;
-    let url = signed_relay_websocket_url(binding, &identity)?;
+    let http_client = HttpClient::new();
+    let url = signed_relay_websocket_url(&http_client, binding, &identity).await?;
     let bound_phone_id = binding
         .bound_phone_id
         .clone()
@@ -1768,7 +1770,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         .await;
     let (mut websocket, _) = connect_async(&url)
         .await
-        .with_context(|| format!("failed to connect relay websocket {url}"))?;
+        .context("failed to connect relay websocket")?;
     runtime
         .set_relay_state(RelayConnectionState::connected(binding))
         .await;
@@ -2198,7 +2200,68 @@ fn relay_websocket_url(binding: &BindingState) -> Result<String> {
     ))
 }
 
-fn signed_relay_websocket_url(binding: &BindingState, identity: &DeviceIdentity) -> Result<String> {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SocketChallengeEnvelope {
+    challenge: SocketChallenge,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SocketChallenge {
+    id: String,
+    message: String,
+}
+
+async fn signed_relay_websocket_url(
+    http_client: &HttpClient,
+    binding: &BindingState,
+    identity: &DeviceIdentity,
+) -> Result<String> {
+    let mut url = Url::parse(&relay_websocket_url(binding)?)
+        .context("failed to parse relay websocket url")?;
+    let challenge = issue_socket_challenge(http_client, binding).await?;
+    let signature = identity.sign(challenge.message.as_bytes())?;
+    url.query_pairs_mut()
+        .append_pair("authChallengeId", &challenge.id)
+        .append_pair("authChallengeSignature", &signature);
+    Ok(url.to_string())
+}
+
+async fn issue_socket_challenge(
+    http_client: &HttpClient,
+    binding: &BindingState,
+) -> Result<SocketChallenge> {
+    let response = http_client
+        .post(format!(
+            "{}/api/ws/challenge",
+            binding.relay_url.trim_end_matches('/')
+        ))
+        .json(&json!({
+            "deviceId": binding.daemon_device_id,
+            "bindingId": binding.binding_id,
+        }))
+        .send()
+        .await
+        .context("failed to request relay websocket challenge")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read relay websocket challenge response")?;
+    if !status.is_success() {
+        anyhow::bail!("relay returned HTTP {status} from websocket challenge: {body}");
+    }
+    let envelope: SocketChallengeEnvelope =
+        serde_json::from_str(&body).context("failed to decode relay websocket challenge")?;
+    Ok(envelope.challenge)
+}
+
+#[cfg(test)]
+fn legacy_signed_relay_websocket_url(
+    binding: &BindingState,
+    identity: &DeviceIdentity,
+) -> Result<String> {
     let mut url = Url::parse(&relay_websocket_url(binding)?)
         .context("failed to parse relay websocket url")?;
     let timestamp = current_unix_millis().to_string();
@@ -2217,6 +2280,7 @@ fn signed_relay_websocket_url(binding: &BindingState, identity: &DeviceIdentity)
     Ok(url.to_string())
 }
 
+#[cfg(test)]
 fn socket_signature_message(
     device_id: &str,
     binding_id: &str,
@@ -2233,12 +2297,14 @@ fn socket_signature_message(
     .join("\n")
 }
 
+#[cfg(test)]
 fn random_nonce() -> Result<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).context("failed to generate websocket auth nonce")?;
     Ok(BASE64_STANDARD.encode(bytes))
 }
 
+#[cfg(test)]
 fn current_unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2722,7 +2788,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_relay_websocket_url_adds_auth_parameters() {
+    fn legacy_signed_relay_websocket_url_adds_auth_parameters() {
         let binding = BindingState::pending(
             "https://relay.example".to_string(),
             "daemon_1".to_string(),
@@ -2732,7 +2798,7 @@ mod tests {
         );
         let identity = DeviceIdentity::from_secret_key([9; 32]);
 
-        let url = signed_relay_websocket_url(&binding, &identity).expect("signed url");
+        let url = legacy_signed_relay_websocket_url(&binding, &identity).expect("signed url");
 
         assert!(
             url.starts_with("wss://relay.example/ws/daemon?deviceId=daemon_1&bindingId=bind_1")

@@ -73,13 +73,17 @@ struct RelayClientTests {
     }
 
     @Test func fetchSessionStateConnectsMobileSocketAndRequestsState() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-fixed","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48,"agentStatus":{"kind":"claude","state":"needs_approval","confidence":0.82,"source":"screen"}}]}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "ios-fixed" }
@@ -107,13 +111,17 @@ struct RelayClientTests {
     }
 
     @Test func sendTerminalInputSendsRelayControlRequest() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-input","ok":true,"data":{"accepted":true}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "ios-input" }
@@ -133,13 +141,17 @@ struct RelayClientTests {
     }
 
     @Test func fetchTerminalSnapshotRequestsSelectedTabSnapshot() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-snapshot","ok":true,"data":{"tabId":"default","rows":24,"cols":80,"text":"$ echo hi\nhi"}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "ios-snapshot" }
@@ -161,6 +173,10 @@ struct RelayClientTests {
     }
 
     @Test func openSessionReusesMobileSocketForMultipleRequests() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"session-1","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48,"agentStatus":{"kind":"claude","state":"needs_approval","confidence":0.82,"source":"screen"}}]}}}}"#,
@@ -170,7 +186,7 @@ struct RelayClientTests {
         let factory = RecordingWebSocketFactory(socket: socket)
         let requestIDs = RequestIDSequence(["session-1", "output-1", "input-1"])
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { requestIDs.next() }
@@ -205,13 +221,17 @@ struct RelayClientTests {
     }
 
     @Test func openSessionAcceptsUnsolicitedLiveTerminalSnapshot() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","ok":true,"data":{"tabId":"default","rows":24,"cols":80,"text":"live update"}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "unused" }
@@ -230,13 +250,17 @@ struct RelayClientTests {
     }
 
     @Test func openSessionAcceptsUnsolicitedTerminalOutputBytes() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","ok":true,"data":{"tabId":"default","bytesBase64":"G1szMW1yZWQK"}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "unused" }
@@ -254,13 +278,17 @@ struct RelayClientTests {
     }
 
     @Test func setPhoneProfileSendsRelayControlRequest() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"profile-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"phone","rows":34,"cols":52}]}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "profile-1" }
@@ -280,13 +308,17 @@ struct RelayClientTests {
     }
 
     @Test func setWidthModeSendsRelayControlRequest() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
         let socket = RecordingWebSocket(messages: [
             #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
             #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"width-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"computer","rows":24,"cols":100}]}}}}"#
         ])
         let factory = RecordingWebSocketFactory(socket: socket)
         let client = HTTPRelayClient(
-            urlSession: URLSession(configuration: .ephemeral),
+            urlSession: URLSession(configuration: configuration),
             identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
             webSocketFactory: factory,
             requestIDGenerator: { "width-1" }
@@ -343,9 +375,15 @@ struct RelayClientTests {
         #expect(components.path == "/ws/mobile")
         #expect(query["deviceId"] == "phone_1")
         #expect(query["bindingId"] == "bind_1")
-        #expect(query["authTimestamp"] != nil)
-        #expect(query["authNonce"]?.isEmpty == false)
-        #expect(query["authSignature"] == Data("signed:nudge.relay.websocket.v1\nphone_1\nbind_1\n\(query["authTimestamp"] ?? "")\n\(query["authNonce"] ?? "")".utf8).base64EncodedString())
+        #expect(query["authChallengeId"] == "challenge_1")
+        #expect(query["authChallengeSignature"] == Data("signed:nudge.relay.websocket.challenge.v1\nphone_1\nbind_1\nchallenge_1\n2026-05-29T00:01:00Z".utf8).base64EncodedString())
+    }
+
+    private func socketChallengeResponse() -> StubResponse {
+        StubResponse(
+            path: "/api/ws/challenge",
+            data: #"{"challenge":{"id":"challenge_1","message":"nudge.relay.websocket.challenge.v1\nphone_1\nbind_1\nchallenge_1\n2026-05-29T00:01:00Z","expiresAt":"2026-05-29T00:01:00Z"}}"#.data(using: .utf8)!
+        )
     }
 }
 

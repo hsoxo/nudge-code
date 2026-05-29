@@ -1,5 +1,10 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { MemorySocketNonceStore, socketSignatureMessage, verifySocketSignature } from './auth.js';
+import {
+  MemorySocketChallengeStore,
+  MemorySocketNonceStore,
+  socketSignatureMessage,
+  verifySocketSignature,
+} from './auth.js';
 
 const nowMs = Date.parse('2026-05-29T00:00:00.000Z');
 const deviceId = 'phone_1';
@@ -65,6 +70,66 @@ expectOk(verifySocketSignature({
   nowMs,
   nonceStore,
 }));
+
+expectError(
+  verifySocketSignature({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    bindingId,
+    params: validParams,
+    requireSignature: true,
+    requireChallenge: true,
+    nowMs,
+  }),
+  'missing_socket_challenge',
+);
+
+const challengeStore = new MemorySocketChallengeStore();
+const challenge = challengeStore.issue({ deviceId, bindingId, ttlMs: 60_000, nowMs });
+const challengeParams = new URLSearchParams({
+  authChallengeId: challenge.id,
+  authChallengeSignature: sign(null, Buffer.from(challenge.message), privateKey).toString('base64'),
+});
+
+expectOk(verifySocketSignature({
+  device: { id: deviceId, publicKey: publicKeyBase64 },
+  bindingId,
+  params: challengeParams,
+  requireSignature: true,
+  requireChallenge: true,
+  nowMs,
+  challengeStore,
+}));
+
+expectError(
+  verifySocketSignature({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    bindingId,
+    params: challengeParams,
+    requireSignature: true,
+    requireChallenge: true,
+    nowMs,
+    challengeStore,
+  }),
+  'invalid_socket_challenge',
+);
+
+const expiredChallengeStore = new MemorySocketChallengeStore();
+const expiredChallenge = expiredChallengeStore.issue({ deviceId, bindingId, ttlMs: 60_000, nowMs });
+expectError(
+  verifySocketSignature({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    bindingId,
+    params: new URLSearchParams({
+      authChallengeId: expiredChallenge.id,
+      authChallengeSignature: sign(null, Buffer.from(expiredChallenge.message), privateKey).toString('base64'),
+    }),
+    requireSignature: true,
+    requireChallenge: true,
+    nowMs: nowMs + 60_001,
+    challengeStore: expiredChallengeStore,
+  }),
+  'invalid_socket_challenge',
+);
 
 expectOk(verifySocketSignature({
   device: { id: deviceId, publicKey: publicKeyBase64 },

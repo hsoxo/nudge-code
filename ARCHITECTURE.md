@@ -525,6 +525,7 @@ daemon -> client:
 
 ```text
 POST /api/devices/register
+POST /api/ws/challenge
 POST /api/bind/start
 POST /api/bind/claim
 POST /api/bind/confirm
@@ -533,6 +534,14 @@ GET  /api/computers
 WS   /ws/daemon
 WS   /ws/mobile
 ```
+
+Websocket auth:
+
+- client requests `POST /api/ws/challenge` with its device id and active binding id
+- relay issues a short-lived, one-shot challenge message
+- client signs the challenge with its long-lived Ed25519 identity key
+- websocket URL carries `authChallengeId` and `authChallengeSignature`
+- relay consumes the challenge during upgrade and rejects replayed or expired challenges
 
 Phone terminal profile updates travel as encrypted daemon-bound control messages after binding. The daemon is the source of truth for the latest phone terminal profile. The relay should not store terminal profile details in MVP.
 
@@ -598,7 +607,7 @@ Baseline:
 - daemon stores its identity key in the user's Nudge data directory with strict file permissions
 - phone stores its identity key in Keychain
 - relay stores public identity keys only
-- every websocket authenticates with a signed challenge
+- every websocket authenticates with a relay-issued signed challenge
 - binding is explicit and revocable
 - relay enforces route authorization
 - terminal/control payloads are end-to-end encrypted between phone and daemon

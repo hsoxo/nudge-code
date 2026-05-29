@@ -10,7 +10,12 @@ interface BindingResponse {
   binding: { id: string; code: string };
 }
 
+interface ChallengeResponse {
+  challenge: { id: string; message: string };
+}
+
 const baseUrl = process.env.NUDGE_RELAY_SMOKE_URL ?? 'http://127.0.0.1:8787';
+const useChallenge = process.env.NUDGE_RELAY_SMOKE_USE_CHALLENGE === '1';
 
 async function main(): Promise<void> {
   const daemonIdentity = generateSmokeIdentity();
@@ -93,7 +98,7 @@ async function connectSocket(
   bindingId: string,
   privateKey: KeyObject,
 ): Promise<WebSocket> {
-  const wsUrl = signedWebSocketUrl(kind, deviceId, bindingId, privateKey);
+  const wsUrl = await signedWebSocketUrl(kind, deviceId, bindingId, privateKey);
   const websocket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     websocket.once('open', () => resolve());
@@ -109,7 +114,12 @@ async function expectSocketRejected(
   bindingId: string,
   privateKey: KeyObject,
 ): Promise<void> {
-  const wsUrl = signedWebSocketUrl(kind, deviceId, bindingId, privateKey);
+  let wsUrl: string;
+  try {
+    wsUrl = await signedWebSocketUrl(kind, deviceId, bindingId, privateKey);
+  } catch {
+    return;
+  }
   const websocket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     websocket.once('open', () => reject(new Error('revoked binding unexpectedly opened websocket')));
@@ -118,22 +128,33 @@ async function expectSocketRejected(
   });
 }
 
-function signedWebSocketUrl(
+async function signedWebSocketUrl(
   kind: 'daemon' | 'mobile',
   deviceId: string,
   bindingId: string,
   privateKey: KeyObject,
-): string {
+): Promise<string> {
   const url = new URL(`${baseUrl.replace(/^http/, 'ws')}/ws/${kind}`);
-  const timestamp = String(Date.now());
-  const nonce = `nonce-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
   url.searchParams.set('deviceId', deviceId);
   url.searchParams.set('bindingId', bindingId);
-  url.searchParams.set('authTimestamp', timestamp);
-  url.searchParams.set('authNonce', nonce);
-  url.searchParams.set('authSignature', sign(null, Buffer.from(message), privateKey).toString('base64'));
+  if (useChallenge) {
+    const challenge = await issueSocketChallenge(deviceId, bindingId);
+    url.searchParams.set('authChallengeId', challenge.id);
+    url.searchParams.set('authChallengeSignature', sign(null, Buffer.from(challenge.message), privateKey).toString('base64'));
+  } else {
+    const timestamp = String(Date.now());
+    const nonce = `nonce-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
+    url.searchParams.set('authTimestamp', timestamp);
+    url.searchParams.set('authNonce', nonce);
+    url.searchParams.set('authSignature', sign(null, Buffer.from(message), privateKey).toString('base64'));
+  }
   return url.toString();
+}
+
+async function issueSocketChallenge(deviceId: string, bindingId: string): Promise<ChallengeResponse['challenge']> {
+  const response = await postJson<ChallengeResponse>('/api/ws/challenge', { deviceId, bindingId });
+  return response.challenge;
 }
 
 function waitForClose(websocket: WebSocket): Promise<{ code: number; reason: string }> {

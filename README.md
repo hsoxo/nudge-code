@@ -11,6 +11,7 @@ cargo build
 cargo run -p nudge-cli -- --help
 npm install
 npm run build
+npm run smoke:auth --workspace @nudge/relay
 npm run smoke:persistence --workspace @nudge/relay
 npm run smoke:rate-limit --workspace @nudge/relay
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh

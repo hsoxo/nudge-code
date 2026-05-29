@@ -57,7 +57,8 @@ struct HTTPRelayClient: RelayClient {
         guard let binding = machine.binding else {
             throw RelayClientError.missingBinding
         }
-        let socket = try webSocketFactory.webSocket(for: relayWebSocketURL(relayURL: machine.relayURL, binding: binding))
+        let socketURL = try await relayWebSocketURL(relayURL: machine.relayURL, binding: binding)
+        let socket = try webSocketFactory.webSocket(for: socketURL)
         do {
             try await waitForConnected(socket: socket, binding: binding)
         } catch {
@@ -176,7 +177,7 @@ struct HTTPRelayClient: RelayClient {
         )
     }
 
-    private func relayWebSocketURL(relayURL: URL, binding: MachineBinding) throws -> URL {
+    private func relayWebSocketURL(relayURL: URL, binding: MachineBinding) async throws -> URL {
         var components = URLComponents(url: relayURL, resolvingAgainstBaseURL: false)
         switch components?.scheme {
         case "https":
@@ -186,28 +187,32 @@ struct HTTPRelayClient: RelayClient {
         default:
             throw RelayClientError.badURL
         }
-        let timestamp = String(Int(Date().timeIntervalSince1970 * 1000))
-        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let message = [
-            "nudge.relay.websocket.v1",
-            binding.phoneDeviceID,
-            binding.bindingID,
-            timestamp,
-            nonce
-        ].joined(separator: "\n")
-        let signature = try identityStore.sign(Data(message.utf8)).base64EncodedString()
+        let challenge = try await issueSocketChallenge(relayURL: relayURL, binding: binding)
+        let signature = try identityStore.sign(Data(challenge.message.utf8)).base64EncodedString()
         components?.path = "/ws/mobile"
         components?.queryItems = [
             URLQueryItem(name: "deviceId", value: binding.phoneDeviceID),
             URLQueryItem(name: "bindingId", value: binding.bindingID),
-            URLQueryItem(name: "authTimestamp", value: timestamp),
-            URLQueryItem(name: "authNonce", value: nonce),
-            URLQueryItem(name: "authSignature", value: signature)
+            URLQueryItem(name: "authChallengeId", value: challenge.id),
+            URLQueryItem(name: "authChallengeSignature", value: signature)
         ]
         guard let url = components?.url else {
             throw RelayClientError.badURL
         }
         return url
+    }
+
+    private func issueSocketChallenge(relayURL: URL, binding: MachineBinding) async throws -> SocketChallengeResponse.Challenge {
+        var request = URLRequest(url: relayURL.appending(path: "/api/ws/challenge"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SocketChallengeRequest(
+            deviceId: binding.phoneDeviceID,
+            bindingId: binding.bindingID
+        ))
+        let (data, response) = try await urlSession.data(for: request)
+        try validate(response: response)
+        return try JSONDecoder().decode(SocketChallengeResponse.self, from: data).challenge
     }
 
     private func waitForConnected(socket: any RelayWebSocketTransport, binding: MachineBinding) async throws {
@@ -233,7 +238,8 @@ struct HTTPRelayClient: RelayClient {
         guard let binding = machine.binding else {
             throw RelayClientError.missingBinding
         }
-        let socket = try webSocketFactory.webSocket(for: relayWebSocketURL(relayURL: machine.relayURL, binding: binding))
+        let socketURL = try await relayWebSocketURL(relayURL: machine.relayURL, binding: binding)
+        let socket = try webSocketFactory.webSocket(for: socketURL)
         defer {
             socket.close()
         }
@@ -611,6 +617,20 @@ private struct BindingResponse: Decodable {
 private struct ClaimRequest: Encodable {
     var code: String
     var phoneDeviceId: String
+}
+
+private struct SocketChallengeRequest: Encodable {
+    var deviceId: String
+    var bindingId: String
+}
+
+private struct SocketChallengeResponse: Decodable {
+    struct Challenge: Decodable {
+        var id: String
+        var message: String
+    }
+
+    var challenge: Challenge
 }
 
 private struct RelaySocketRequest<Payload: Encodable>: Encodable {

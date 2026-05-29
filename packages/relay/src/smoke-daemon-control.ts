@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { WebSocket } from 'ws';
-import { socketSignatureMessage } from './auth.js';
 
 interface DeviceResponse {
   device: { id: string };
@@ -13,6 +12,10 @@ interface DeviceResponse {
 
 interface BindingResponse {
   binding: { id: string; code: string };
+}
+
+interface ChallengeResponse {
+  challenge: { id: string; message: string };
 }
 
 interface RelayMessage {
@@ -166,7 +169,7 @@ function generateSmokeIdentity(): { publicKey: string; privateKey: KeyObject } {
 }
 
 async function connectPhone(deviceId: string, bindingId: string, privateKey: KeyObject): Promise<WebSocket> {
-  const wsUrl = signedPhoneWebSocketUrl(deviceId, bindingId, privateKey);
+  const wsUrl = await signedPhoneWebSocketUrl(deviceId, bindingId, privateKey);
   const websocket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     websocket.once('open', () => resolve());
@@ -176,17 +179,19 @@ async function connectPhone(deviceId: string, bindingId: string, privateKey: Key
   return websocket;
 }
 
-function signedPhoneWebSocketUrl(deviceId: string, bindingId: string, privateKey: KeyObject): string {
+async function signedPhoneWebSocketUrl(deviceId: string, bindingId: string, privateKey: KeyObject): Promise<string> {
   const url = new URL(`${baseUrl.replace(/^http/, 'ws')}/ws/mobile`);
-  const timestamp = String(Date.now());
-  const nonce = `nonce-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
+  const challenge = await issueSocketChallenge(deviceId, bindingId);
   url.searchParams.set('deviceId', deviceId);
   url.searchParams.set('bindingId', bindingId);
-  url.searchParams.set('authTimestamp', timestamp);
-  url.searchParams.set('authNonce', nonce);
-  url.searchParams.set('authSignature', sign(null, Buffer.from(message), privateKey).toString('base64'));
+  url.searchParams.set('authChallengeId', challenge.id);
+  url.searchParams.set('authChallengeSignature', sign(null, Buffer.from(challenge.message), privateKey).toString('base64'));
   return url.toString();
+}
+
+async function issueSocketChallenge(deviceId: string, bindingId: string): Promise<ChallengeResponse['challenge']> {
+  const response = await postJson<ChallengeResponse>('/api/ws/challenge', { deviceId, bindingId });
+  return response.challenge;
 }
 
 async function waitForDaemonResponse(websocket: WebSocket, requestId: string): Promise<RelayMessage> {
