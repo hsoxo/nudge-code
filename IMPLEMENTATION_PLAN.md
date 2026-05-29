@@ -232,11 +232,12 @@ Current implementation status:
 - Relay can require opaque encrypted payload envelopes with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; in that mode it rejects plaintext relay payloads and only forwards `e2e_envelope` metadata plus ciphertext fields.
 - Relay can disable legacy unauthenticated HTTP message send/poll endpoints with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`; hosted deployments should use signed websocket routing for cross-device control.
 - Relay exposes `/readyz` with config flags, runtime counts, and warnings for weak hosted settings such as missing persistence, unsigned websockets, missing websocket challenges, legacy HTTP messages, and non-required E2E envelopes.
+- Relay binding responses include route-authorized daemon and phone public identity keys so both endpoints can verify the upcoming E2E handshake transcript.
 - Canonical protobuf schema now includes E2E handshake and encrypted envelope messages, with Rust, TypeScript, and Swift protocol mirrors.
 - Daemon has tested X25519/HKDF/ChaCha20-Poly1305 envelope helpers with route-bound associated data and sequence replay rejection; these helpers are not yet wired into live relay traffic.
 - iOS has matching CryptoKit E2E envelope helpers and tests for encryption/decryption, replay rejection, route checks, and canonical relay JSON payloads.
-- Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
-- iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
+- Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, caches the phone public key after binding confirmation, and signs relay websocket URLs before connecting.
+- iOS sends signed mobile websocket URLs using its Keychain-backed signing identity and stores the daemon public key from binding claim/status responses.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
 - Daemon/iOS handshake transcript exchange/validation, live relay encryption wiring, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
@@ -261,7 +262,7 @@ Current implementation status:
 - `nudge bind phone` renders a terminal QR code and can `--wait --yes` for simulated phone claim and computer confirmation.
 - Hidden smoke helpers can simulate phone claim and computer confirmation until the native iOS binding UI exists.
 - `nudge bind revoke` revokes the relay binding and clears local binding state.
-- Native iOS QR scanning, phone signed websocket URLs, and daemon signed websocket URLs are implemented. E2E encryption remains open Phase 5/relay work.
+- Native iOS QR scanning, phone signed websocket URLs, daemon signed websocket URLs, and participant public key caching are implemented. E2E live encryption wiring remains open Phase 5/relay work.
 
 Tasks:
 
@@ -477,7 +478,7 @@ Current implementation status:
 - Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
 - Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
 - Relay E2E payload enforcement can be enabled with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; it rejects plaintext relay payloads and forwards only opaque `e2e_envelope` payloads.
-- Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon and iOS crypto helpers cover encryption and replay rejection, but transcript validation and live relay wiring are still open.
+- Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon and iOS crypto helpers cover encryption and replay rejection, and binding flows now cache peer public identity keys for transcript validation. Transcript validation and live relay wiring are still open.
 - Relay legacy HTTP message endpoints can be disabled with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`, leaving signed websocket routing active.
 - The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 

@@ -327,6 +327,8 @@ final class AppModel {
                 bindingID: binding.bindingID,
                 daemonDeviceID: binding.daemonDeviceID,
                 phoneDeviceID: binding.phoneDeviceID,
+                daemonPublicKey: binding.daemonPublicKey,
+                phonePublicKey: binding.phonePublicKey,
                 status: .revoked,
                 expiresAt: binding.expiresAt
             )

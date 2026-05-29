@@ -13,7 +13,7 @@ struct RelayClientTests {
             ),
             StubResponse(
                 path: "/api/bind/claim",
-                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","status":"claimed","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
+                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","daemonPublicKey":"daemon-public-key","phonePublicKey":"phone-public-key","status":"claimed","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
             )
         ]
         let configuration = URLSessionConfiguration.ephemeral
@@ -30,6 +30,8 @@ struct RelayClientTests {
             bindingID: "bind_1",
             daemonDeviceID: "daemon_1",
             phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         ))
@@ -46,7 +48,7 @@ struct RelayClientTests {
         URLProtocolStub.responses = [
             StubResponse(
                 path: "/api/bind/status",
-                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","status":"active","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
+                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","daemonPublicKey":"daemon-public-key","phonePublicKey":"phone-public-key","status":"active","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
             )
         ]
         let configuration = URLSessionConfiguration.ephemeral
@@ -68,6 +70,8 @@ struct RelayClientTests {
         )
 
         #expect(claim.status == .active)
+        #expect(claim.daemonPublicKey == "daemon-public-key")
+        #expect(claim.phonePublicKey == "phone-public-key")
         #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/bind/status"])
         #expect(URLProtocolStub.requests.first?.url?.query == "bindingId=bind_1&deviceId=phone_1")
     }

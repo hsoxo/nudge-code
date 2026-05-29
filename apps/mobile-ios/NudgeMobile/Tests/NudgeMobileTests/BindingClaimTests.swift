@@ -20,6 +20,8 @@ struct BindingClaimTests {
             bindingID: "bind_1",
             daemonDeviceID: "daemon_1",
             phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         ))
@@ -59,6 +61,8 @@ struct BindingClaimTests {
             bindingID: "bind_1",
             daemonDeviceID: "daemon_1",
             phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
             status: .active,
             expiresAt: "2026-05-29T00:00:00Z"
         ))
@@ -71,6 +75,8 @@ struct BindingClaimTests {
             relayURL: URL(string: "https://nudgecode.dev")!
         )])
         #expect(model.machines.first?.binding?.status == .active)
+        #expect(model.machines.first?.binding?.daemonPublicKey == "daemon-public-key")
+        #expect(model.machines.first?.binding?.phonePublicKey == "phone-public-key")
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "binding active")
     }
@@ -694,6 +700,8 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
             bindingID: "bind_1",
             daemonDeviceID: "daemon_1",
             phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         )

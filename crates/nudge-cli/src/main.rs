@@ -561,6 +561,8 @@ async fn main() -> Result<()> {
                 expires_at: String::new(),
                 status: parse_binding_status(&status)?,
                 bound_phone_id,
+                daemon_public_key: None,
+                phone_public_key: None,
                 updated_at: now_millis().to_string(),
             };
             set_binding_state(binding).await?;
@@ -700,6 +702,8 @@ async fn bind_phone(relay_url: &str, wait: bool, yes: bool, timeout_seconds: u64
         binding_response.binding.code,
         binding_response.binding.expires_at,
     );
+    let mut binding = binding;
+    binding.daemon_public_key = binding_response.binding.daemon_public_key;
     set_binding_state(binding.clone()).await?;
 
     println!("binding pending");
@@ -835,10 +839,14 @@ async fn confirm_binding_with_client(
         .binding
         .phone_device_id
         .context("relay confirmed binding without phone device id")?;
-    let mut active = pending.active(phone_id.clone());
+    let mut active = pending.active(phone_id.clone(), binding_response.binding.phone_public_key);
     active.relay_url = relay_url.to_string();
     active.binding_id = binding_response.binding.id;
     active.expires_at = binding_response.binding.expires_at;
+    active.daemon_public_key = binding_response
+        .binding
+        .daemon_public_key
+        .or(active.daemon_public_key);
     set_binding_state(active.clone()).await?;
     println!("binding active");
     println!("binding_id={}", active.binding_id);
@@ -891,6 +899,8 @@ struct RelayBinding {
     id: String,
     code: String,
     phone_device_id: Option<String>,
+    daemon_public_key: Option<String>,
+    phone_public_key: Option<String>,
     status: String,
     expires_at: String,
 }

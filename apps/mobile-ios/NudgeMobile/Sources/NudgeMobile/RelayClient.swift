@@ -172,6 +172,8 @@ struct HTTPRelayClient: RelayClient {
             bindingID: binding.id,
             daemonDeviceID: binding.daemonDeviceId,
             phoneDeviceID: phoneDeviceID,
+            daemonPublicKey: binding.daemonPublicKey,
+            phonePublicKey: binding.phonePublicKey,
             status: binding.status,
             expiresAt: binding.expiresAt
         )
@@ -307,6 +309,8 @@ struct BindingClaim: Equatable, Sendable {
     var bindingID: String
     var daemonDeviceID: String
     var phoneDeviceID: String
+    var daemonPublicKey: String? = nil
+    var phonePublicKey: String? = nil
     var status: BindingStatus
     var expiresAt: String
 }
@@ -617,6 +621,8 @@ private struct BindingResponse: Decodable {
         var id: String
         var daemonDeviceId: String
         var phoneDeviceId: String?
+        var daemonPublicKey: String?
+        var phonePublicKey: String?
         var status: BindingStatus
         var expiresAt: String
     }

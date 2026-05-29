@@ -165,6 +165,10 @@ pub struct BindingState {
     pub status: BindingStatus,
     #[serde(default)]
     pub bound_phone_id: Option<String>,
+    #[serde(default)]
+    pub daemon_public_key: Option<String>,
+    #[serde(default)]
+    pub phone_public_key: Option<String>,
     pub updated_at: String,
 }
 
@@ -725,13 +729,16 @@ impl BindingState {
             expires_at,
             status: BindingStatus::Pending,
             bound_phone_id: None,
+            daemon_public_key: None,
+            phone_public_key: None,
             updated_at: now_string(),
         }
     }
 
-    pub fn active(mut self, bound_phone_id: String) -> Self {
+    pub fn active(mut self, bound_phone_id: String, phone_public_key: Option<String>) -> Self {
         self.status = BindingStatus::Active;
         self.bound_phone_id = Some(bound_phone_id);
+        self.phone_public_key = phone_public_key;
         self.updated_at = now_string();
         self
     }
@@ -957,6 +964,8 @@ fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
         expires_at: binding.expires_at,
         status: binding.status.parse()?,
         bound_phone_id,
+        daemon_public_key: None,
+        phone_public_key: None,
         updated_at: now_string(),
     })
 }
@@ -2943,7 +2952,7 @@ mod tests {
             "ABC123".to_string(),
             "2026-05-29T00:00:00.000Z".to_string(),
         )
-        .active("phone_1".to_string());
+        .active("phone_1".to_string(), None);
         session.set_binding(binding.clone());
         let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
 
@@ -2974,7 +2983,7 @@ mod tests {
             "ABC123".to_string(),
             "2026-05-29T00:00:00.000Z".to_string(),
         )
-        .active("phone_1".to_string());
+        .active("phone_1".to_string(), None);
         let snapshot = v1::TerminalSnapshot {
             tab_id: "default".to_string(),
             rows: 24,
@@ -3007,7 +3016,7 @@ mod tests {
             "ABC123".to_string(),
             "2026-05-29T00:00:00.000Z".to_string(),
         )
-        .active("phone_1".to_string());
+        .active("phone_1".to_string(), None);
 
         let json =
             relay_live_terminal_output_json("phone_1", &binding, "default", b"\x1b[31mred\n");

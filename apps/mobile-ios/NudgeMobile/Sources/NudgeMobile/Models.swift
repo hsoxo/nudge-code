@@ -65,6 +65,8 @@ struct MachineBinding: Codable, Equatable, Sendable {
     var bindingID: String
     var daemonDeviceID: String
     var phoneDeviceID: String
+    var daemonPublicKey: String?
+    var phonePublicKey: String?
     var status: BindingStatus
     var expiresAt: String
 
@@ -72,12 +74,16 @@ struct MachineBinding: Codable, Equatable, Sendable {
         bindingID: String,
         daemonDeviceID: String,
         phoneDeviceID: String,
+        daemonPublicKey: String? = nil,
+        phonePublicKey: String? = nil,
         status: BindingStatus,
         expiresAt: String
     ) {
         self.bindingID = bindingID
         self.daemonDeviceID = daemonDeviceID
         self.phoneDeviceID = phoneDeviceID
+        self.daemonPublicKey = daemonPublicKey
+        self.phonePublicKey = phonePublicKey
         self.status = status
         self.expiresAt = expiresAt
     }
@@ -87,6 +93,8 @@ struct MachineBinding: Codable, Equatable, Sendable {
             bindingID: claim.bindingID,
             daemonDeviceID: claim.daemonDeviceID,
             phoneDeviceID: claim.phoneDeviceID,
+            daemonPublicKey: claim.daemonPublicKey,
+            phonePublicKey: claim.phonePublicKey,
             status: claim.status,
             expiresAt: claim.expiresAt
         )

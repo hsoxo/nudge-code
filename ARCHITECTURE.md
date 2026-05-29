@@ -594,11 +594,12 @@ Input/control messages:
 10. CLI shows pending phone and asks for confirmation.
 11. CLI confirms binding.
 12. Relay records active binding.
-13. Daemon records bound phone id.
-14. Phone sends encrypted portrait terminal profile to daemon: current portrait cols/rows and font scale.
-15. Relay forwards the encrypted profile update without storing terminal profile details.
-16. Daemon decrypts and caches the latest phone terminal profile locally.
-17. Phone stores machine profile.
+13. Relay returns participant public identity keys through authorized binding responses.
+14. Daemon records bound phone id and phone public identity key.
+15. Phone stores machine profile with daemon public identity key.
+16. Phone sends encrypted portrait terminal profile to daemon: current portrait cols/rows and font scale.
+17. Relay forwards the encrypted profile update without storing terminal profile details.
+18. Daemon decrypts and caches the latest phone terminal profile locally.
 
 ## Security Design
 
@@ -609,6 +610,7 @@ Baseline:
 - daemon stores its identity key in the user's Nudge data directory with strict file permissions
 - phone stores its identity key in Keychain
 - relay stores public identity keys only
+- relay returns peer public identity keys only through authorized binding start/claim/status/confirm/revoke responses
 - every websocket authenticates with a relay-issued signed challenge
 - binding is explicit and revocable
 - relay revocation closes participant sockets with `binding_revoked`; daemon and iOS persist/surface revoked local state and stop reconnect loops

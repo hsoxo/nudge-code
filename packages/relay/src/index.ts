@@ -278,7 +278,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       daemonDeviceId: daemon.id,
       expiresAt: binding.expiresAt,
     });
-    writeJson(response, 201, { binding });
+    writeJson(response, 201, { binding: bindingResponse(binding) });
     return;
   }
 
@@ -343,7 +343,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       daemonDeviceId: binding.daemonDeviceId,
       phoneDeviceId: phone.id,
     });
-    writeJson(response, 200, { binding });
+    writeJson(response, 200, { binding: bindingResponse(binding) });
     return;
   }
 
@@ -355,7 +355,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 404, { error: 'binding_not_found' });
       return;
     }
-    writeJson(response, 200, { binding });
+    writeJson(response, 200, { binding: bindingResponse(binding) });
     return;
   }
 
@@ -382,7 +382,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       daemonDeviceId: binding.daemonDeviceId,
       phoneDeviceId: binding.phoneDeviceId,
     });
-    writeJson(response, 200, { binding, entitlement: FREE_ENTITLEMENT });
+    writeJson(response, 200, { binding: bindingResponse(binding), entitlement: FREE_ENTITLEMENT });
     return;
   }
 
@@ -404,7 +404,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       phoneDeviceId: binding.phoneDeviceId,
       actorDeviceId: body.deviceId,
     });
-    writeJson(response, 200, { binding });
+    writeJson(response, 200, { binding: bindingResponse(binding) });
     return;
   }
 
@@ -697,6 +697,14 @@ function clearBindingQueues(binding: Binding): void {
 
 function bindingDeviceIds(binding: Binding): string[] {
   return [binding.daemonDeviceId, binding.phoneDeviceId].filter((deviceId): deviceId is string => Boolean(deviceId));
+}
+
+function bindingResponse(binding: Binding): Record<string, unknown> {
+  return {
+    ...binding,
+    daemonPublicKey: devices.get(binding.daemonDeviceId)?.publicKey,
+    phonePublicKey: binding.phoneDeviceId ? devices.get(binding.phoneDeviceId)?.publicKey : undefined,
+  };
 }
 
 function makePairingCode(): string {
