@@ -274,6 +274,12 @@ Goals:
 - native-first phone experience
 - view and control computer tabs through relay
 
+Current implementation status:
+
+- `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
+- The scaffold includes machine list, tab strip, terminal preview WebView, phone/computer width control, pairing URL parsing, pending binding UI, a first-pass relay claim client, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
+- Camera QR scanning, Keychain identity, websocket sync, protobuf Swift generation, xterm.js assets, signed auth, and E2E encryption remain open.
+
 Tasks:
 
 - Create Swift/SwiftUI app.

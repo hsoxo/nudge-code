@@ -1,0 +1,13 @@
+import SwiftUI
+
+@main
+struct NudgeMobileApp: App {
+    @State private var model = AppModel.preview()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(model)
+        }
+    }
+}
