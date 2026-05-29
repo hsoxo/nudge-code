@@ -15,6 +15,12 @@ xcodegen generate --spec project.yml
 xcodebuild -project NudgeMobile.xcodeproj -scheme NudgeMobile -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
+The first real relay/daemon integration smoke runs the iOS simulator test process against a hosted-mode local relay and a real `nudge bind phone --wait` flow:
+
+```sh
+../../scripts/smoke-ios-relay-claim.sh
+```
+
 Shared protocol types are generated from the repo protobuf schema:
 
 ```sh
@@ -46,7 +52,8 @@ Current scaffold:
 - CryptoKit E2E handshake/envelope helpers for transcript signatures, X25519/HKDF/ChaCha20-Poly1305 encryption, and replay checks.
 - E2E relay handshake exchange and encrypted request/response handling in `RelayClient`.
 - in-process relay-session coverage for encrypted terminal input, daemon-pushed live output, and reconnect replay handling.
+- gated iOS simulator integration coverage for claiming a real relay binding while the real daemon-side CLI waits and confirms.
 
 Still open:
 
-- On-device mobile-app process integration coverage against a hosted relay and real daemon.
+- On-device mobile app terminal-session integration coverage against a hosted relay and real daemon.

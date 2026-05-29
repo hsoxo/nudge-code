@@ -44,6 +44,26 @@ struct RelayClientTests {
         #expect(bodies[1].contains(#""phoneDeviceId":"phone_1""#))
     }
 
+    @Test func liveRelayClaimBindingWhenConfigured() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["NUDGE_IOS_INTEGRATION"] == "1" else {
+            return
+        }
+        let relayURLValue = try #require(environment["NUDGE_IOS_RELAY_URL"])
+        let relayURL = try #require(URL(string: relayURLValue))
+        let pairingCode = try #require(environment["NUDGE_IOS_PAIRING_CODE"])
+        let phonePublicKey = environment["NUDGE_IOS_PHONE_PUBLIC_KEY"] ?? "nudge-ios-live-claim-phone-key"
+        let client = HTTPRelayClient(identityStore: MemoryPhoneIdentityStore(publicKey: phonePublicKey))
+
+        let claim = try await client.claimBinding(code: pairingCode, relayURL: relayURL)
+
+        #expect(claim.status == .claimed)
+        #expect(!claim.bindingID.isEmpty)
+        #expect(!claim.daemonDeviceID.isEmpty)
+        #expect(!claim.phoneDeviceID.isEmpty)
+        #expect(claim.phonePublicKey == phonePublicKey)
+    }
+
     @Test func fetchBindingStatusUsesPhoneDeviceAsParticipant() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [
