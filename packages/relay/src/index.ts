@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
 
 type DeviceKind = 'daemon' | 'phone';
@@ -38,6 +39,7 @@ const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const devices = new Map<string, Device>();
 const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
+const sockets = new Map<string, WebSocket>();
 
 const server = createServer(async (request, response) => {
   try {
@@ -48,6 +50,28 @@ const server = createServer(async (request, response) => {
       message: error instanceof Error ? error.message : String(error),
     });
   }
+});
+const websocketServer = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+  if (url.pathname !== '/ws/daemon' && url.pathname !== '/ws/mobile') {
+    socket.destroy();
+    return;
+  }
+  const expectedKind: DeviceKind = url.pathname === '/ws/daemon' ? 'daemon' : 'phone';
+  const deviceId = url.searchParams.get('deviceId') ?? undefined;
+  const bindingId = url.searchParams.get('bindingId') ?? undefined;
+  const authorization = authorizeSocket(expectedKind, deviceId, bindingId);
+  if (!authorization.ok) {
+    socket.write(`HTTP/1.1 ${authorization.statusCode} ${authorization.error}\r\n\r\n`);
+    socket.destroy();
+    return;
+  }
+
+  websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+    bindWebSocket(websocket, authorization.device, authorization.binding);
+  });
 });
 
 async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -241,6 +265,69 @@ function findBindingByCode(code: string | undefined): Binding | undefined {
 
 function isBindingParticipant(binding: Binding, deviceId: string | undefined): deviceId is string {
   return Boolean(deviceId && (deviceId === binding.daemonDeviceId || deviceId === binding.phoneDeviceId));
+}
+
+type SocketAuthorization =
+  | { ok: true; device: Device; binding: Binding }
+  | { ok: false; statusCode: number; error: string };
+
+function authorizeSocket(
+  expectedKind: DeviceKind,
+  deviceId: string | undefined,
+  bindingId: string | undefined,
+): SocketAuthorization {
+  const device = deviceId ? devices.get(deviceId) : undefined;
+  if (!device || device.kind !== expectedKind) {
+    return { ok: false, statusCode: 401, error: 'device_not_registered' };
+  }
+  const binding = bindingId ? bindings.get(bindingId) : undefined;
+  if (!binding || binding.status !== 'active') {
+    return { ok: false, statusCode: 403, error: 'binding_not_active' };
+  }
+  if (!isBindingParticipant(binding, device.id)) {
+    return { ok: false, statusCode: 403, error: 'route_not_authorized' };
+  }
+  return { ok: true, device, binding };
+}
+
+function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): void {
+  sockets.set(device.id, websocket);
+  websocket.send(JSON.stringify({ type: 'connected', deviceId: device.id, bindingId: binding.id }));
+  websocket.on('message', (bytes) => {
+    let message: { toDeviceId?: string; payload?: unknown };
+    try {
+      message = JSON.parse(bytes.toString()) as { toDeviceId?: string; payload?: unknown };
+    } catch {
+      websocket.send(JSON.stringify({ type: 'error', error: 'invalid_json' }));
+      return;
+    }
+    if (!isBindingParticipant(binding, message.toDeviceId) || message.toDeviceId === device.id) {
+      websocket.send(JSON.stringify({ type: 'error', error: 'route_not_authorized' }));
+      return;
+    }
+    const relayMessage: RelayMessage = {
+      id: `msg_${randomUUID()}`,
+      bindingId: binding.id,
+      fromDeviceId: device.id,
+      toDeviceId: message.toDeviceId,
+      payload: message.payload ?? {},
+      createdAt: now(),
+    };
+    const targetSocket = sockets.get(relayMessage.toDeviceId);
+    if (targetSocket && targetSocket.readyState === targetSocket.OPEN) {
+      targetSocket.send(JSON.stringify({ type: 'message', message: relayMessage }));
+    } else {
+      const queue = messages.get(relayMessage.toDeviceId) ?? [];
+      queue.push(relayMessage);
+      messages.set(relayMessage.toDeviceId, queue);
+    }
+    websocket.send(JSON.stringify({ type: 'accepted', messageId: relayMessage.id }));
+  });
+  websocket.on('close', () => {
+    if (sockets.get(device.id) === websocket) {
+      sockets.delete(device.id);
+    }
+  });
 }
 
 function makePairingCode(): string {
