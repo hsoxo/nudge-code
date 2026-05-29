@@ -421,7 +421,8 @@ Current implementation status:
 - macOS service support writes `~/Library/LaunchAgents/dev.nudgecode.nudge.daemon.plist` and uses `launchctl bootstrap/kickstart`.
 - Linux service support writes `~/.config/systemd/user/nudge.service` and uses `systemctl --user enable --now`.
 - `nudge service uninstall --dry-run`, `nudge service status`, and `nudge service logs` have first-pass command wiring.
-- CI-built release artifacts, signature verification beyond SHA-256 checksums, update command, and hosted install URL publishing remain open.
+- `nudge update` re-runs the native installer from `https://nudgecode.dev/install.sh` by default, supports dry-run, version override, install-dir override, checksum skip forwarding, and local installer paths for tests.
+- CI-built release artifacts, signature verification beyond SHA-256 checksums, and hosted install URL publishing remain open.
 
 Tasks:
 
@@ -434,7 +435,7 @@ Tasks:
 - Add `nudge service install` for systemd user services on Linux.
 - Add `nudge service uninstall`.
 - Add logs command.
-- Add update/version command.
+- Add update command.
 - Add clear diagnostics for unsupported OS/architecture.
 
 Exit criteria:

@@ -29,4 +29,5 @@ cargo run -p nudge-cli --
 cargo run -p nudge-cli -- daemon status
 cargo run -p nudge-cli -- daemon stop
 cargo run -p nudge-cli -- service install --dry-run
+cargo run -p nudge-cli -- update --dry-run
 ```

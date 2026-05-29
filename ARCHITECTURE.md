@@ -319,6 +319,7 @@ Installer responsibilities:
 - print the exact install path
 - optionally set up launchd/systemd user service
 - support update and uninstall commands
+- `nudge update` should re-run the native installer and forward explicit version/install-dir/checksum options
 
 The installer should not require Node, npm, Cargo, Xcode, or a Rust toolchain on the user's computer. Build toolchains belong in CI/release automation, not in the normal user install path.
 

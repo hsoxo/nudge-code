@@ -49,6 +49,24 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Re-run the native installer to update this binary.
+    Update {
+        /// Print the installer URL and environment without running it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Installer script URL or local path.
+        #[arg(long, default_value = DEFAULT_INSTALL_SCRIPT_URL)]
+        install_script_url: String,
+        /// Release version to install; defaults to the installer default.
+        #[arg(long)]
+        version: Option<String>,
+        /// Install directory override.
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        /// Skip installer checksum verification.
+        #[arg(long)]
+        skip_checksum: bool,
+    },
     /// Bind or revoke a phone through the relay.
     Bind {
         #[command(subcommand)]
@@ -185,6 +203,8 @@ enum Command {
     },
 }
 
+const DEFAULT_INSTALL_SCRIPT_URL: &str = "https://nudgecode.dev/install.sh";
+
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
     /// Run daemon/server mode.
@@ -311,6 +331,22 @@ async fn main() -> Result<()> {
             ServiceCommand::Status => service_status()?,
             ServiceCommand::Logs { lines } => service_logs(lines)?,
         },
+        Some(Command::Update {
+            dry_run,
+            install_script_url,
+            version,
+            install_dir,
+            skip_checksum,
+        }) => {
+            update_nudge(
+                dry_run,
+                &install_script_url,
+                version.as_deref(),
+                install_dir.as_deref(),
+                skip_checksum,
+            )
+            .await?
+        }
         Some(Command::Bind { command }) => match command {
             BindCommand::Phone {
                 relay_url,
@@ -1665,6 +1701,71 @@ fn service_logs(lines: usize) -> Result<()> {
     let executable = std::env::current_exe().context("failed to locate current executable")?;
     let service = ServiceSpec::detect(&executable)?;
     run_inherited_command(&service.logs_command(lines))
+}
+
+async fn update_nudge(
+    dry_run: bool,
+    install_script_url: &str,
+    version: Option<&str>,
+    install_dir: Option<&Path>,
+    skip_checksum: bool,
+) -> Result<()> {
+    let script = install_script_url.trim();
+    if script.is_empty() {
+        anyhow::bail!("install script URL cannot be empty");
+    }
+    let command = update_shell_command(script);
+    if dry_run {
+        println!("nudge update dry run");
+        println!("install_script_url={script}");
+        if let Some(version) = version {
+            println!("NUDGE_VERSION={version}");
+        }
+        if let Some(install_dir) = install_dir {
+            println!("NUDGE_INSTALL_DIR={}", install_dir.display());
+        }
+        if skip_checksum {
+            println!("NUDGE_SKIP_CHECKSUM=1");
+        }
+        println!("command=sh -c {}", shell_quote(&command));
+        return Ok(());
+    }
+
+    let mut process = TokioCommand::new("sh");
+    process.arg("-c").arg(&command);
+    if let Some(version) = version {
+        process.env("NUDGE_VERSION", version);
+    }
+    if let Some(install_dir) = install_dir {
+        process.env("NUDGE_INSTALL_DIR", install_dir);
+    }
+    if skip_checksum {
+        process.env("NUDGE_SKIP_CHECKSUM", "1");
+    }
+    let status = process
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .context("failed to run update installer")?;
+    if !status.success() {
+        anyhow::bail!("update installer exited with {status}");
+    }
+    Ok(())
+}
+
+fn update_shell_command(script: &str) -> String {
+    if script.starts_with("http://") || script.starts_with("https://") {
+        format!(
+            "if command -v curl >/dev/null 2>&1; then curl -fsSL {} | sh; elif command -v wget >/dev/null 2>&1; then wget -qO- {} | sh; else echo 'curl or wget is required to download {}' >&2; exit 1; fi",
+            shell_quote(script),
+            shell_quote(script),
+            script.replace('\'', "'\\''"),
+        )
+    } else {
+        format!("sh {}", shell_quote(script))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
