@@ -229,7 +229,7 @@ struct HTTPRelayClient: RelayClient {
                 return
             }
             if message.type == "error" {
-                if message.error == "binding_revoked" {
+                if isRelayRevocationError(message.error) {
                     throw RelayClientError.bindingRevoked
                 }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
@@ -274,7 +274,7 @@ struct HTTPRelayClient: RelayClient {
             let text = try await socket.receiveString()
             let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
             if message.type == "error" {
-                if message.error == "binding_revoked" {
+                if isRelayRevocationError(message.error) {
                     throw RelayClientError.bindingRevoked
                 }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
@@ -312,6 +312,10 @@ enum RelayClientError: Error {
     case missingBinding
     case missingPhoneDeviceID
     case unsupportedRelayValue(String)
+}
+
+private func isRelayRevocationError(_ error: String?) -> Bool {
+    error == "binding_revoked" || error == "device_revoked"
 }
 
 struct BindingClaim: Equatable, Sendable {
@@ -531,7 +535,7 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             let text = try await socket.receiveString()
             let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
             if message.type == "error" {
-                if message.error == "binding_revoked" {
+                if isRelayRevocationError(message.error) {
                     throw RelayClientError.bindingRevoked
                 }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
@@ -778,7 +782,7 @@ private func openE2ESessionIfPossible(
         let text = try await socket.receiveString()
         let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
         if message.type == "error" {
-            if message.error == "binding_revoked" {
+            if isRelayRevocationError(message.error) {
                 throw RelayClientError.bindingRevoked
             }
             throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")

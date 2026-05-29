@@ -2341,7 +2341,7 @@ async fn handle_relay_message(
         Err(_) => return Ok(None),
     };
     if relay_message.message_type == "error"
-        && relay_message.error.as_deref() == Some("binding_revoked")
+        && is_relay_revocation_error(relay_message.error.as_deref())
     {
         runtime.mark_binding_revoked(&binding.binding_id).await?;
         return Err(SessionError::RelayBindingRevoked.into());
@@ -2370,6 +2370,10 @@ async fn handle_relay_message(
         Some(&routed.id),
         response_payload,
     )))
+}
+
+fn is_relay_revocation_error(error: Option<&str>) -> bool {
+    matches!(error, Some("binding_revoked" | "device_revoked"))
 }
 
 async fn handle_relay_payload(
@@ -3831,6 +3835,50 @@ mod tests {
         )
         .await
         .expect_err("revocation should break relay connection");
+
+        assert!(error.to_string().contains("relay binding was revoked"));
+        assert!(runtime.current_active_binding().await.is_none());
+        let session = runtime.session.lock().await;
+        assert_eq!(
+            session.binding.as_ref().map(|binding| binding.status),
+            Some(BindingStatus::Revoked)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn relay_device_revoked_error_marks_local_binding_revoked() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-device-revoked-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string(), None);
+        session.set_binding(binding.clone());
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        let identity = DeviceIdentity::from_secret_key([7; 32]);
+        let mut e2e_session = None;
+
+        let error = handle_relay_message(
+            &runtime,
+            &binding,
+            "phone_1",
+            &identity,
+            &mut e2e_session,
+            WebSocketMessage::Text(r#"{"type":"error","error":"device_revoked"}"#.into()),
+        )
+        .await
+        .expect_err("device revocation should break relay connection");
 
         assert!(error.to_string().contains("relay binding was revoked"));
         assert!(runtime.current_active_binding().await.is_none());
