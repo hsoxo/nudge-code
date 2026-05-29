@@ -53,4 +53,19 @@ struct GeneratedProtocolTests {
         #expect(decoded.e2EEncryptedEnvelope.sequence == 7)
         #expect(decoded.e2EEncryptedEnvelope.ciphertext == Data([4, 5, 6]))
     }
+
+    @Test func rotateDeviceKeyRoundTripsThroughGeneratedProtobuf() throws {
+        var outer = Nudge_V1_Envelope()
+        outer.messageID = "rotate-1"
+        outer.rotateDeviceKey = Nudge_V1_RotateDeviceKey()
+
+        let encoded = try outer.serializedData()
+        let decoded = try Nudge_V1_Envelope(serializedBytes: encoded)
+
+        #expect(decoded.messageID == "rotate-1")
+        guard case .rotateDeviceKey? = decoded.payload else {
+            Issue.record("expected rotate_device_key payload")
+            return
+        }
+    }
 }

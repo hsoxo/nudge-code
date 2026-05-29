@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
@@ -206,6 +206,14 @@ pub struct DeviceIdentity {
     pub public_key: String,
     pub signing_key: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceKeyRotation {
+    pub identity: DeviceIdentity,
+    pub signed_at: String,
+    pub nonce: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -540,6 +548,20 @@ impl MachineSession {
         self.device_identity
             .as_ref()
             .context("device identity should exist")
+    }
+
+    pub fn rotate_device_identity(&mut self, identity: DeviceIdentity) -> Result<DeviceIdentity> {
+        self.ensure_device_identity()?;
+        let previous = self
+            .device_identity
+            .replace(identity.clone())
+            .context("device identity is required before rotation")?;
+        if let Some(binding) = self.binding.as_mut() {
+            binding.daemon_public_key = Some(identity.public_key.clone());
+            binding.updated_at = now_string();
+        }
+        self.updated_at = now_string();
+        Ok(previous)
     }
 
     pub fn create_tab(&mut self, title: String) -> std::result::Result<&TerminalTab, SessionError> {
@@ -891,6 +913,19 @@ impl DeviceIdentity {
     pub fn sign(&self, message: &[u8]) -> Result<String> {
         let signing_key = SigningKey::from_bytes(&self.secret_key_bytes()?);
         Ok(BASE64_STANDARD.encode(signing_key.sign(message).to_bytes()))
+    }
+
+    pub fn verify(&self, message: &[u8], signature: &str) -> Result<()> {
+        let verifying_key = VerifyingKey::from_bytes(&decode_fixed_base64::<32>(&self.public_key)?)
+            .context("stored daemon public key is invalid")?;
+        let signature_bytes: [u8; 64] = BASE64_STANDARD
+            .decode(signature)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stored daemon signature must be 64 bytes"))?;
+        let signature = Signature::from_bytes(&signature_bytes);
+        verifying_key
+            .verify(message, &signature)
+            .context("daemon signature verification failed")
     }
 
     pub(crate) fn secret_key_bytes(&self) -> Result<[u8; 32]> {
@@ -2015,6 +2050,42 @@ impl DaemonRuntime {
             .context("device identity should exist")
     }
 
+    async fn rotate_device_key(&self) -> Result<v1::SessionState> {
+        let (binding, current_identity) = {
+            let mut session = self.session.lock().await;
+            if session.ensure_device_identity()? {
+                self.state_store.save(&session)?;
+            }
+            let binding = session
+                .binding
+                .clone()
+                .filter(|binding| binding.status == BindingStatus::Active)
+                .context("active binding is required before rotating device key")?;
+            let current_identity = session
+                .device_identity
+                .clone()
+                .context("device identity should exist")?;
+            (binding, current_identity)
+        };
+        let rotation = prepare_device_key_rotation(&binding.daemon_device_id, &current_identity)?;
+        rotate_relay_device_key(&HttpClient::new(), &binding, &rotation).await?;
+        {
+            let mut session = self.session.lock().await;
+            let Some(current_binding) = session.binding.as_ref() else {
+                anyhow::bail!("binding disappeared during device key rotation");
+            };
+            if current_binding.binding_id != binding.binding_id
+                || current_binding.daemon_device_id != binding.daemon_device_id
+                || current_binding.status != BindingStatus::Active
+            {
+                anyhow::bail!("binding changed during device key rotation");
+            }
+            session.rotate_device_identity(rotation.identity)?;
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
     async fn current_active_binding(&self) -> Option<BindingState> {
         self.session
             .lock()
@@ -2926,6 +2997,115 @@ struct SocketChallenge {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceKeyRotationRequest {
+    device_id: String,
+    new_public_key: String,
+    signed_at: String,
+    nonce: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceEnvelope {
+    device: RelayDevice,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayDevice {
+    id: String,
+    public_key: String,
+}
+
+fn prepare_device_key_rotation(
+    device_id: &str,
+    current_identity: &DeviceIdentity,
+) -> Result<DeviceKeyRotation> {
+    let identity = DeviceIdentity::generate()?;
+    let signed_at = current_unix_millis().to_string();
+    let nonce = random_rotation_nonce()?;
+    let message = device_key_rotation_message(
+        device_id,
+        current_identity.public_key(),
+        identity.public_key(),
+        &signed_at,
+        &nonce,
+    );
+    let signature = current_identity.sign(message.as_bytes())?;
+    Ok(DeviceKeyRotation {
+        identity,
+        signed_at,
+        nonce,
+        signature,
+    })
+}
+
+async fn rotate_relay_device_key(
+    http_client: &HttpClient,
+    binding: &BindingState,
+    rotation: &DeviceKeyRotation,
+) -> Result<()> {
+    let response = http_client
+        .post(format!(
+            "{}/api/devices/rotate-key",
+            binding.relay_url.trim_end_matches('/')
+        ))
+        .json(&DeviceKeyRotationRequest {
+            device_id: binding.daemon_device_id.clone(),
+            new_public_key: rotation.identity.public_key.clone(),
+            signed_at: rotation.signed_at.clone(),
+            nonce: rotation.nonce.clone(),
+            signature: rotation.signature.clone(),
+        })
+        .send()
+        .await
+        .context("failed to request relay device key rotation")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read relay device key rotation response")?;
+    if !status.is_success() {
+        anyhow::bail!("relay returned HTTP {status} from device key rotation: {body}");
+    }
+    let envelope: DeviceEnvelope =
+        serde_json::from_str(&body).context("failed to decode relay device key rotation")?;
+    if envelope.device.id != binding.daemon_device_id {
+        anyhow::bail!("relay returned rotated device id for a different daemon");
+    }
+    if envelope.device.public_key != rotation.identity.public_key {
+        anyhow::bail!("relay returned a different rotated daemon public key");
+    }
+    Ok(())
+}
+
+fn device_key_rotation_message(
+    device_id: &str,
+    current_public_key: &str,
+    new_public_key: &str,
+    signed_at: &str,
+    nonce: &str,
+) -> String {
+    [
+        "nudge.relay.device_key_rotation.v1",
+        device_id,
+        current_public_key,
+        new_public_key,
+        signed_at,
+        nonce,
+    ]
+    .join("\n")
+}
+
+fn random_rotation_nonce() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).context("failed to generate device key rotation nonce")?;
+    Ok(format!("rotation-{}", BASE64_STANDARD.encode(bytes)))
+}
+
 async fn signed_relay_websocket_url(
     http_client: &HttpClient,
     binding: &BindingState,
@@ -3017,7 +3197,6 @@ fn random_nonce() -> Result<String> {
     Ok(BASE64_STANDARD.encode(bytes))
 }
 
-#[cfg(test)]
 fn current_unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3252,6 +3431,9 @@ async fn handle_payload(
         }
         Some(v1::envelope::Payload::ClearBindingState(_)) => Some(
             v1::envelope::Payload::SessionState(runtime.clear_binding().await?),
+        ),
+        Some(v1::envelope::Payload::RotateDeviceKey(_)) => Some(
+            v1::envelope::Payload::SessionState(runtime.rotate_device_key().await?),
         ),
         Some(v1::envelope::Payload::CreateTab(request)) => Some(
             v1::envelope::Payload::SessionState(runtime.create_tab(request.title).await?),
@@ -3757,6 +3939,96 @@ mod tests {
         assert_eq!(identity.public_key.len(), 44);
         assert_eq!(identity.signing_key.len(), 44);
         assert_eq!(identity.sign(b"hello").expect("signature").len(), 88);
+    }
+
+    #[test]
+    fn device_key_rotation_message_matches_relay_transcript() {
+        assert_eq!(
+            device_key_rotation_message(
+                "daemon_1",
+                "current-public-key",
+                "new-public-key",
+                "1780000000000",
+                "rotation-nonce"
+            ),
+            "nudge.relay.device_key_rotation.v1\ndaemon_1\ncurrent-public-key\nnew-public-key\n1780000000000\nrotation-nonce"
+        );
+    }
+
+    #[test]
+    fn device_key_rotation_request_uses_relay_contract_fields() {
+        let request = DeviceKeyRotationRequest {
+            device_id: "daemon_1".to_string(),
+            new_public_key: "new-public-key".to_string(),
+            signed_at: "1780000000000".to_string(),
+            nonce: "rotation-nonce".to_string(),
+            signature: "signature".to_string(),
+        };
+        let json = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(json["deviceId"], "daemon_1");
+        assert_eq!(json["newPublicKey"], "new-public-key");
+        assert_eq!(json["signedAt"], "1780000000000");
+        assert_eq!(json["nonce"], "rotation-nonce");
+        assert_eq!(json["signature"], "signature");
+    }
+
+    #[test]
+    fn device_key_rotation_is_signed_by_current_identity() {
+        let current = DeviceIdentity::from_secret_key([7; 32]);
+        let rotation =
+            prepare_device_key_rotation("daemon_1", &current).expect("rotation should prepare");
+        let message = device_key_rotation_message(
+            "daemon_1",
+            current.public_key(),
+            rotation.identity.public_key(),
+            &rotation.signed_at,
+            &rotation.nonce,
+        );
+
+        current
+            .verify(message.as_bytes(), &rotation.signature)
+            .expect("rotation signature should verify with current key");
+        assert_ne!(rotation.identity.public_key(), current.public_key());
+        assert!(rotation.nonce.starts_with("rotation-"));
+    }
+
+    #[test]
+    fn rotating_session_identity_updates_binding_public_key() {
+        let old_identity = DeviceIdentity::from_secret_key([7; 32]);
+        let new_identity = DeviceIdentity::from_secret_key([8; 32]);
+        let mut session = MachineSession::new_default();
+        session.device_identity = Some(old_identity.clone());
+        let mut binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string(), None);
+        binding.daemon_public_key = Some(old_identity.public_key.clone());
+        session.set_binding(binding);
+
+        let previous = session
+            .rotate_device_identity(new_identity.clone())
+            .expect("rotation should update session identity");
+
+        assert_eq!(previous.public_key, old_identity.public_key);
+        assert_eq!(
+            session
+                .device_identity
+                .as_ref()
+                .map(|identity| identity.public_key()),
+            Some(new_identity.public_key())
+        );
+        assert_eq!(
+            session
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.daemon_public_key.as_deref()),
+            Some(new_identity.public_key())
+        );
     }
 
     #[test]

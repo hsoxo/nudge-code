@@ -91,6 +91,9 @@ enum Command {
     /// Print daemon signing public key for relay smoke tests.
     #[command(hide = true)]
     DevicePublicKey,
+    /// Rotate daemon relay signing key through the active binding.
+    #[command(hide = true)]
+    RotateDeviceKey,
     /// Create a tab in the persisted session metadata.
     #[command(hide = true)]
     CreateTab {
@@ -398,6 +401,22 @@ async fn main() -> Result<()> {
         }
         Some(Command::DevicePublicKey) => {
             println!("{}", daemon_public_key()?);
+        }
+        Some(Command::RotateDeviceKey) => {
+            ensure_daemon().await?;
+            let response = nudge_daemon::request(envelope(v1::envelope::Payload::RotateDeviceKey(
+                v1::RotateDeviceKey {},
+            )))
+            .await?;
+            let state = session_from_response(response)?;
+            let public_key = state
+                .binding
+                .and_then(|binding| {
+                    (!binding.daemon_public_key.is_empty()).then_some(binding.daemon_public_key)
+                })
+                .context("daemon rotated key without returning binding public key")?;
+            println!("daemon device key rotated");
+            println!("daemon_public_key={public_key}");
         }
         Some(Command::CreateTab { title }) => {
             ensure_daemon().await?;

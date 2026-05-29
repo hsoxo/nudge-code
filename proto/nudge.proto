@@ -34,6 +34,7 @@ message Envelope {
     E2EHandshakeFinish e2e_handshake_finish = 36;
     E2EEncryptedEnvelope e2e_encrypted_envelope = 37;
     SetEntitlement set_entitlement = 38;
+    RotateDeviceKey rotate_device_key = 39;
   }
 }
 
@@ -205,6 +206,8 @@ message Entitlement {
 message SetEntitlement {
   Entitlement entitlement = 1;
 }
+
+message RotateDeviceKey {}
 
 message PhoneProfile {
   uint32 rows = 1;

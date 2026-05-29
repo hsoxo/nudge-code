@@ -10,6 +10,8 @@ export interface SetEntitlement {
   entitlement: Entitlement;
 }
 
+export interface RotateDeviceKey {}
+
 export interface Tab {
   id: string;
   title: string;

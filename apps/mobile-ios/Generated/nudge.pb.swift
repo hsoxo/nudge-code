@@ -266,6 +266,14 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     set {payload = .setEntitlement(newValue)}
   }
 
+  var rotateDeviceKey: Nudge_V1_RotateDeviceKey {
+    get {
+      if case .rotateDeviceKey(let v)? = payload {return v}
+      return Nudge_V1_RotateDeviceKey()
+    }
+    set {payload = .rotateDeviceKey(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Payload: Equatable, Sendable {
@@ -298,6 +306,7 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     case e2EHandshakeFinish(Nudge_V1_E2EHandshakeFinish)
     case e2EEncryptedEnvelope(Nudge_V1_E2EEncryptedEnvelope)
     case setEntitlement(Nudge_V1_SetEntitlement)
+    case rotateDeviceKey(Nudge_V1_RotateDeviceKey)
 
   }
 
@@ -822,6 +831,16 @@ nonisolated struct Nudge_V1_SetEntitlement: Sendable {
   fileprivate var _entitlement: Nudge_V1_Entitlement? = nil
 }
 
+nonisolated struct Nudge_V1_RotateDeviceKey: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
 nonisolated struct Nudge_V1_PhoneProfile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -902,7 +921,7 @@ fileprivate nonisolated let _protobuf_package = "nudge.v1"
 
 nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0\u{3}e2e_handshake_start\0\u{3}e2e_handshake_finish\0\u{3}e2e_encrypted_envelope\0\u{3}set_entitlement\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0\u{3}e2e_handshake_start\0\u{3}e2e_handshake_finish\0\u{3}e2e_encrypted_envelope\0\u{3}set_entitlement\0\u{3}rotate_device_key\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1288,6 +1307,19 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .setEntitlement(v)
         }
       }()
+      case 39: try {
+        var v: Nudge_V1_RotateDeviceKey?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .rotateDeviceKey(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .rotateDeviceKey(v)
+        }
+      }()
       default: break
       }
     }
@@ -1417,6 +1449,10 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
     case .setEntitlement?: try {
       guard case .setEntitlement(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 38)
+    }()
+    case .rotateDeviceKey?: try {
+      guard case .rotateDeviceKey(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 39)
     }()
     case nil: break
     }
@@ -2583,6 +2619,25 @@ nonisolated extension Nudge_V1_SetEntitlement: SwiftProtobuf.Message, SwiftProto
 
   static func ==(lhs: Nudge_V1_SetEntitlement, rhs: Nudge_V1_SetEntitlement) -> Bool {
     if lhs._entitlement != rhs._entitlement {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Nudge_V1_RotateDeviceKey: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".RotateDeviceKey"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Nudge_V1_RotateDeviceKey, rhs: Nudge_V1_RotateDeviceKey) -> Bool {
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
