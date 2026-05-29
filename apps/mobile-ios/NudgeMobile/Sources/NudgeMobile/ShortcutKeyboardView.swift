@@ -43,7 +43,7 @@ struct ShortcutKeyboardView: View {
                 ForEach(keys) { key in
                     Button(key.label) {
                         Task {
-                            await model.sendSelectedTabInput(key.payload, enter: false)
+                            await model.sendSelectedTabInput(key.payload, enter: key.submit)
                         }
                     }
                     .buttonStyle(.bordered)
