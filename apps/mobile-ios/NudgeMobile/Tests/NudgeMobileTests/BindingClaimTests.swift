@@ -297,7 +297,7 @@ struct BindingClaimTests {
         #expect(client.openSessionRequests == [machine])
         #expect(session.sessionStateRequestCount == 1)
         #expect(session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)])
-        #expect(session.snapshotRequests == ["default"])
+        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
         #expect(session.closed)
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "relay session synced")
@@ -346,7 +346,7 @@ struct BindingClaimTests {
         syncTask.cancel()
         await syncTask.value
 
-        #expect(session.snapshotRequests == ["default"])
+        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ ")
         #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputText == "echo hi\r\nhi\r\n")
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
@@ -408,11 +408,7 @@ struct BindingClaimTests {
         ])
         let secondSession = RecordingRelaySession(events: [
             .sessionState(RemoteSessionState(tabs: [secondTab])),
-            .terminalSnapshot(TerminalSnapshot(
-                tabID: "default",
-                profile: TerminalProfile(rows: 32, cols: 48),
-                text: "Codex reconnected"
-            ))
+            .terminalOutput(TerminalOutput(tabID: "default", text: "Codex reconnected"))
         ], suspendWhenEmpty: true)
         let client = RecordingRelayClient(sessions: [firstSession, secondSession])
         let model = AppModel(
@@ -431,7 +427,7 @@ struct BindingClaimTests {
 
         try await waitUntil {
             client.openSessionRequests.count == 2 &&
-                model.tabsByMachine[machine.id]?.first?.previewText == "Codex reconnected"
+                model.tabsByMachine[machine.id]?.first?.pendingOutputText == "Codex reconnected"
         }
 
         #expect(client.openSessionRequests.map(\.id) == [machine.id, machine.id])
@@ -439,9 +435,12 @@ struct BindingClaimTests {
         #expect(firstSession.closed)
         #expect(secondSession.sessionStateRequestCount == 1)
         #expect(secondSession.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)])
+        #expect(firstSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(secondSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "relay session synced")
         #expect(model.tabsByMachine[machine.id]?.first?.agentStatus.kind == .codex)
+        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputText == "Codex reconnected")
 
         syncTask.cancel()
         await syncTask.value
@@ -567,6 +566,11 @@ private struct TerminalInputRequest: Equatable {
 private struct TerminalSnapshotRequest: Equatable {
     var machine: Machine
     var tabID: String
+}
+
+private struct TerminalOutputRequest: Equatable {
+    var tabID: String
+    var maxBytes: Int
 }
 
 private struct PhoneProfileClientRequest: Equatable {
@@ -755,6 +759,7 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     var events: [RelaySessionEvent]
     var sessionStateRequestCount = 0
     var snapshotRequests: [String] = []
+    var outputRequests: [TerminalOutputRequest] = []
     var inputRequests: [TerminalInputRequest] = []
     var phoneProfiles: [TerminalProfile] = []
     var widthModeRequests: [WidthModeRequest] = []
@@ -773,6 +778,10 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
 
     func requestTerminalSnapshot(tabID: String) async throws {
         snapshotRequests.append(tabID)
+    }
+
+    func requestTerminalOutput(tabID: String, maxBytes: Int) async throws {
+        outputRequests.append(TerminalOutputRequest(tabID: tabID, maxBytes: maxBytes))
     }
 
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws {

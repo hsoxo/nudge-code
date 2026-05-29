@@ -208,6 +208,14 @@ enum RelayControlRequest {
         #[serde(rename = "tabId")]
         tab_id: String,
     },
+    TerminalOutput {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        #[serde(rename = "maxBytes", default)]
+        max_bytes: u32,
+    },
     TerminalInput {
         #[serde(rename = "requestId")]
         request_id: String,
@@ -1594,6 +1602,19 @@ async fn handle_relay_control_request(
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
         }
+        RelayControlRequest::TerminalOutput {
+            request_id,
+            tab_id,
+            max_bytes,
+        } => {
+            let max_bytes = replay_max_bytes(max_bytes);
+            match runtime.output_tail(&tab_id, max_bytes).await {
+                Ok(data) => {
+                    RelayControlResponse::ok(request_id, terminal_output_json(&tab_id, &data))
+                }
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
         RelayControlRequest::TerminalInput {
             request_id,
             tab_id,
@@ -1768,6 +1789,14 @@ fn terminal_output_json(tab_id: &str, data: &[u8]) -> Value {
         "tabId": tab_id,
         "bytesBase64": base64_encode(data),
     })
+}
+
+fn replay_max_bytes(requested: u32) -> usize {
+    if requested == 0 {
+        32 * 1024
+    } else {
+        requested.min(128 * 1024) as usize
+    }
 }
 
 fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
@@ -2391,6 +2420,13 @@ mod tests {
         assert_eq!(base64_encode(b"a"), "YQ==");
         assert_eq!(base64_encode(b"ab"), "YWI=");
         assert_eq!(base64_encode(b"abc"), "YWJj");
+    }
+
+    #[test]
+    fn replay_max_bytes_defaults_and_caps() {
+        assert_eq!(replay_max_bytes(0), 32 * 1024);
+        assert_eq!(replay_max_bytes(512), 512);
+        assert_eq!(replay_max_bytes(200 * 1024), 128 * 1024);
     }
 
     #[test]

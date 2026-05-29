@@ -310,6 +310,7 @@ enum RelaySessionEvent: Equatable, Sendable {
 protocol RelaySession: Sendable {
     func requestSessionState() async throws
     func requestTerminalSnapshot(tabID: String) async throws
+    func requestTerminalOutput(tabID: String, maxBytes: Int) async throws
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(_ profile: TerminalProfile) async throws
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
@@ -367,6 +368,7 @@ struct URLSessionRelayWebSocketTransport: RelayWebSocketTransport, @unchecked Se
 private enum RelaySessionRequestKind: Sendable {
     case sessionState
     case terminalSnapshot
+    case terminalOutput
     case terminalInput(tabID: String)
 }
 
@@ -402,6 +404,15 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             kind: .terminalSnapshot,
             requestID: requestID,
             payload: RelayTerminalSnapshotPayload(requestId: requestID, tabId: tabID)
+        )
+    }
+
+    func requestTerminalOutput(tabID: String, maxBytes: Int) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .terminalOutput,
+            requestID: requestID,
+            payload: RelayTerminalOutputPayload(requestId: requestID, tabId: tabID, maxBytes: maxBytes)
         )
     }
 
@@ -517,6 +528,14 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
                 text: snapshot.text
             ))
+        case .terminalOutput:
+            guard let output = payload.data?.output else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            return .terminalOutput(TerminalOutput(
+                tabID: output.tabId,
+                text: output.text
+            ))
         case .terminalInput(let tabID):
             return .terminalInputAccepted(tabID: tabID)
         case nil:
@@ -595,6 +614,13 @@ private struct RelayTerminalSnapshotPayload: Encodable {
     let type = "terminal_snapshot"
     var requestId: String
     var tabId: String
+}
+
+private struct RelayTerminalOutputPayload: Encodable {
+    let type = "terminal_output"
+    var requestId: String
+    var tabId: String
+    var maxBytes: Int
 }
 
 private struct RelayTerminalInputPayload: Encodable {

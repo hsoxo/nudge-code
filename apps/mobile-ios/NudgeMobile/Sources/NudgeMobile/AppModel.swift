@@ -341,7 +341,7 @@ final class AppModel {
                 machines[index].lastSeenText = "relay session synced"
             }
             for tab in state.tabs {
-                try await session.requestTerminalSnapshot(tabID: tab.id)
+                try await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
             }
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)
