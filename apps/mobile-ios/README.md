@@ -23,7 +23,8 @@ Current scaffold:
 - phone/computer width segmented control.
 - pairing URL parser and pending binding screen.
 - Keychain-backed phone signing identity.
-- first-pass relay claim client using the phone public key.
+- relay claim client using the phone public key.
+- machine binding metadata storage for later websocket attach.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 
 Still open:

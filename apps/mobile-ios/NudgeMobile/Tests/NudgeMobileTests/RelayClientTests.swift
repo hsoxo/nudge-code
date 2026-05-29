@@ -8,12 +8,12 @@ struct RelayClientTests {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [
             StubResponse(
-                path: "/api/devices",
+                path: "/api/devices/register",
                 data: #"{"device":{"id":"phone_1"}}"#.data(using: .utf8)!
             ),
             StubResponse(
                 path: "/api/bind/claim",
-                data: #"{"binding":{"id":"bind_1","status":"claimed"}}"#.data(using: .utf8)!
+                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","status":"claimed","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
             )
         ]
         let configuration = URLSessionConfiguration.ephemeral
@@ -24,9 +24,16 @@ struct RelayClientTests {
             identityStore: identityStore
         )
 
-        try await client.claimBinding(code: "pair-123", relayURL: URL(string: "https://relay.test")!)
+        let claim = try await client.claimBinding(code: "pair-123", relayURL: URL(string: "https://relay.test")!)
 
-        #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/devices", "/api/bind/claim"])
+        #expect(claim == BindingClaim(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            status: .claimed,
+            expiresAt: "2026-05-29T00:00:00Z"
+        ))
+        #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/devices/register", "/api/bind/claim"])
         let bodies = URLProtocolStub.requests.compactMap(\.httpBodyString)
         #expect(bodies[0].contains(#""kind":"phone""#))
         #expect(bodies[0].contains(#""publicKey":"phone-public-key""#))

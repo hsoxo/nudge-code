@@ -16,6 +16,13 @@ struct BindingClaimTests {
         #expect(model.bindingClaimState == .claimed)
         #expect(model.bindingDraft == nil)
         #expect(model.machines.first?.connectionState == .connecting)
+        #expect(model.machines.first?.binding == MachineBinding(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            status: .claimed,
+            expiresAt: "2026-05-29T00:00:00Z"
+        ))
     }
 
     @Test func appModelKeepsDraftWhenRelayClaimFails() async throws {
@@ -47,11 +54,18 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         self.error = error
     }
 
-    func claimBinding(code: String, relayURL: URL) async throws {
+    func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim {
         if let error {
             throw error
         }
         claims.append(RelayClaim(code: code, relayURL: relayURL))
+        return BindingClaim(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            status: .claimed,
+            expiresAt: "2026-05-29T00:00:00Z"
+        )
     }
 
     func connect(machine: Machine) async throws {

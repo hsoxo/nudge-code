@@ -58,6 +58,22 @@ struct Machine: Identifiable, Codable, Equatable, Sendable {
     var relayURL: URL
     var connectionState: ConnectionState
     var lastSeenText: String
+    var binding: MachineBinding?
+}
+
+struct MachineBinding: Codable, Equatable, Sendable {
+    var bindingID: String
+    var daemonDeviceID: String
+    var phoneDeviceID: String
+    var status: BindingStatus
+    var expiresAt: String
+}
+
+enum BindingStatus: String, Codable, Sendable {
+    case pending
+    case claimed
+    case active
+    case revoked
 }
 
 struct TerminalTab: Identifiable, Codable, Equatable, Sendable {

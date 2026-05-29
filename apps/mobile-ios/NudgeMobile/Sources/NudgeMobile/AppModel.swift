@@ -85,8 +85,9 @@ final class AppModel {
             return
         }
         bindingClaimState = .claiming
+        let claim: BindingClaim
         do {
-            try await relayClient.claimBinding(code: draft.code, relayURL: draft.relayURL)
+            claim = try await relayClient.claimBinding(code: draft.code, relayURL: draft.relayURL)
         } catch {
             bindingClaimState = .failed(error.localizedDescription)
             return
@@ -97,7 +98,14 @@ final class AppModel {
             name: "Pending Mac",
             relayURL: draft.relayURL,
             connectionState: .connecting,
-            lastSeenText: "Waiting for computer confirmation"
+            lastSeenText: "Waiting for computer confirmation",
+            binding: MachineBinding(
+                bindingID: claim.bindingID,
+                daemonDeviceID: claim.daemonDeviceID,
+                phoneDeviceID: claim.phoneDeviceID,
+                status: claim.status,
+                expiresAt: claim.expiresAt
+            )
         )
         machines.insert(machine, at: 0)
         tabsByMachine[machine.id] = [
@@ -122,7 +130,14 @@ final class AppModel {
             name: "MacBook Pro",
             relayURL: URL(string: "https://nudgecode.dev")!,
             connectionState: .online,
-            lastSeenText: "online now"
+            lastSeenText: "online now",
+            binding: MachineBinding(
+                bindingID: "bind_preview",
+                daemonDeviceID: "daemon_preview",
+                phoneDeviceID: "phone_preview",
+                status: .active,
+                expiresAt: ""
+            )
         )
         let tabs = [
             TerminalTab(

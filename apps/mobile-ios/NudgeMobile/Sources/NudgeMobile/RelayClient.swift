@@ -1,7 +1,7 @@
 import Foundation
 
 protocol RelayClient: Sendable {
-    func claimBinding(code: String, relayURL: URL) async throws
+    func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
     func connect(machine: Machine) async throws
 }
 
@@ -9,15 +9,26 @@ struct HTTPRelayClient: RelayClient {
     var urlSession: URLSession = .shared
     var identityStore: any PhoneIdentityStore = KeychainPhoneIdentityStore()
 
-    func claimBinding(code: String, relayURL: URL) async throws {
+    func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim {
         let identity = try identityStore.loadOrCreate()
         let device = try await registerPhone(relayURL: relayURL, phonePublicKey: identity.publicKey)
         var request = URLRequest(url: relayURL.appending(path: "/api/bind/claim"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(ClaimRequest(code: code, phoneDeviceId: device.id))
-        let (_, response) = try await urlSession.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         try validate(response: response)
+        let binding = try JSONDecoder().decode(BindingResponse.self, from: data).binding
+        guard let phoneDeviceID = binding.phoneDeviceId else {
+            throw RelayClientError.missingPhoneDeviceID
+        }
+        return BindingClaim(
+            bindingID: binding.id,
+            daemonDeviceID: binding.daemonDeviceId,
+            phoneDeviceID: phoneDeviceID,
+            status: binding.status,
+            expiresAt: binding.expiresAt
+        )
     }
 
     func connect(machine: Machine) async throws {
@@ -25,7 +36,7 @@ struct HTTPRelayClient: RelayClient {
     }
 
     private func registerPhone(relayURL: URL, phonePublicKey: String) async throws -> DeviceResponse.Device {
-        var request = URLRequest(url: relayURL.appending(path: "/api/devices"))
+        var request = URLRequest(url: relayURL.appending(path: "/api/devices/register"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(DeviceRequest(kind: "phone", publicKey: phonePublicKey))
@@ -45,6 +56,15 @@ struct HTTPRelayClient: RelayClient {
 
 enum RelayClientError: Error {
     case badStatus
+    case missingPhoneDeviceID
+}
+
+struct BindingClaim: Equatable, Sendable {
+    var bindingID: String
+    var daemonDeviceID: String
+    var phoneDeviceID: String
+    var status: BindingStatus
+    var expiresAt: String
 }
 
 private struct DeviceRequest: Encodable {
@@ -58,6 +78,18 @@ private struct DeviceResponse: Decodable {
     }
 
     var device: Device
+}
+
+private struct BindingResponse: Decodable {
+    struct Binding: Decodable {
+        var id: String
+        var daemonDeviceId: String
+        var phoneDeviceId: String?
+        var status: BindingStatus
+        var expiresAt: String
+    }
+
+    var binding: Binding
 }
 
 private struct ClaimRequest: Encodable {
