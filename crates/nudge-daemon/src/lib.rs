@@ -580,6 +580,11 @@ impl MachineSession {
         self.updated_at = now_string();
     }
 
+    pub fn set_entitlement(&mut self, entitlement: Entitlement) {
+        self.entitlement = entitlement;
+        self.updated_at = now_string();
+    }
+
     pub fn clear_binding(&mut self) {
         self.binding = None;
         self.updated_at = now_string();
@@ -906,6 +911,15 @@ impl Entitlement {
             max_bound_computers: self.max_bound_computers,
             max_tabs_per_computer: self.max_tabs_per_computer,
         }
+    }
+}
+
+fn entitlement_from_proto(entitlement: v1::Entitlement) -> Entitlement {
+    Entitlement {
+        plan: entitlement.plan,
+        max_bound_computers: entitlement.max_bound_computers,
+        max_tabs_per_computer: entitlement.max_tabs_per_computer,
+        updated_at: now_string(),
     }
 }
 
@@ -1668,6 +1682,15 @@ impl DaemonRuntime {
         {
             let mut session = self.session.lock().await;
             session.set_binding(binding);
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
+    async fn set_entitlement(&self, entitlement: Entitlement) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.set_entitlement(entitlement);
             self.state_store.save(&session)?;
         }
         Ok(self.session_state().await)
@@ -2833,6 +2856,16 @@ async fn handle_payload(
                 runtime.set_binding(binding).await?,
             ))
         }
+        Some(v1::envelope::Payload::SetEntitlement(request)) => {
+            let entitlement = entitlement_from_proto(
+                request
+                    .entitlement
+                    .context("set_entitlement requires an entitlement")?,
+            );
+            Some(v1::envelope::Payload::SessionState(
+                runtime.set_entitlement(entitlement).await?,
+            ))
+        }
         Some(v1::envelope::Payload::ClearBindingState(_)) => Some(
             v1::envelope::Payload::SessionState(runtime.clear_binding().await?),
         ),
@@ -2978,6 +3011,43 @@ mod tests {
         let proto = session.to_proto();
         assert_eq!(proto.tabs.len(), 1);
         assert_eq!(proto.entitlement, Some(nudge_protocol::free_entitlement()));
+    }
+
+    #[test]
+    fn entitlement_update_controls_tab_limit() {
+        let mut session = MachineSession::new_default();
+        session.set_entitlement(Entitlement {
+            plan: "paid".to_string(),
+            max_bound_computers: 1,
+            max_tabs_per_computer: 3,
+            updated_at: "1".to_string(),
+        });
+
+        session
+            .create_tab("second".to_string())
+            .expect("updated entitlement should allow more tabs");
+
+        assert_eq!(session.tabs.len(), 2);
+        let entitlement = session
+            .to_proto()
+            .entitlement
+            .expect("entitlement should be present");
+        assert_eq!(entitlement.plan, "paid");
+        assert_eq!(entitlement.max_tabs_per_computer, 3);
+    }
+
+    #[test]
+    fn entitlement_proto_updates_local_timestamp() {
+        let entitlement = entitlement_from_proto(v1::Entitlement {
+            plan: "paid".to_string(),
+            max_bound_computers: 2,
+            max_tabs_per_computer: 4,
+        });
+
+        assert_eq!(entitlement.plan, "paid");
+        assert_eq!(entitlement.max_bound_computers, 2);
+        assert_eq!(entitlement.max_tabs_per_computer, 4);
+        assert!(!entitlement.updated_at.is_empty());
     }
 
     #[test]

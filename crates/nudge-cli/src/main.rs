@@ -16,7 +16,7 @@ use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
     enable_raw_mode, size,
 };
-use nudge_daemon::{BindingState, BindingStatus, DaemonConfig};
+use nudge_daemon::{BindingState, BindingStatus, DaemonConfig, Entitlement};
 use nudge_protocol::v1;
 use qrcode::{QrCode, render::unicode};
 use serde::{Deserialize, Serialize};
@@ -841,6 +841,7 @@ async fn confirm_binding_with_client(
         },
     )
     .await?;
+    let entitlement = binding_response.entitlement;
     let phone_id = binding_response
         .binding
         .phone_device_id
@@ -854,6 +855,9 @@ async fn confirm_binding_with_client(
         .daemon_public_key
         .or(active.daemon_public_key);
     set_binding_state(active.clone()).await?;
+    if let Some(entitlement) = entitlement {
+        set_entitlement(entitlement.into()).await?;
+    }
     println!("binding active");
     println!("binding_id={}", active.binding_id);
     println!("bound_phone_id={phone_id}");
@@ -897,6 +901,7 @@ struct RelayDevice {
 #[derive(Debug, Deserialize)]
 struct BindingResponse {
     binding: RelayBinding,
+    entitlement: Option<RelayEntitlement>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,6 +914,25 @@ struct RelayBinding {
     phone_public_key: Option<String>,
     status: String,
     expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayEntitlement {
+    plan: String,
+    max_bound_computers: u32,
+    max_tabs_per_computer: u32,
+}
+
+impl From<RelayEntitlement> for Entitlement {
+    fn from(value: RelayEntitlement) -> Self {
+        Self {
+            plan: value.plan,
+            max_bound_computers: value.max_bound_computers,
+            max_tabs_per_computer: value.max_tabs_per_computer,
+            updated_at: now_millis().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1022,6 +1046,16 @@ async fn set_binding_state(binding: BindingState) -> Result<v1::SessionState> {
     let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetBindingState(
         v1::SetBindingState {
             binding: Some(binding.to_proto()),
+        },
+    )))
+    .await?;
+    session_from_response(response)
+}
+
+async fn set_entitlement(entitlement: Entitlement) -> Result<v1::SessionState> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetEntitlement(
+        v1::SetEntitlement {
+            entitlement: Some(entitlement.to_proto()),
         },
     )))
     .await?;

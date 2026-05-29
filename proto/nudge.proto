@@ -33,6 +33,7 @@ message Envelope {
     E2EHandshakeStart e2e_handshake_start = 35;
     E2EHandshakeFinish e2e_handshake_finish = 36;
     E2EEncryptedEnvelope e2e_encrypted_envelope = 37;
+    SetEntitlement set_entitlement = 38;
   }
 }
 
@@ -199,6 +200,10 @@ message Entitlement {
   string plan = 1;
   uint32 max_bound_computers = 2;
   uint32 max_tabs_per_computer = 3;
+}
+
+message SetEntitlement {
+  Entitlement entitlement = 1;
 }
 
 message PhoneProfile {

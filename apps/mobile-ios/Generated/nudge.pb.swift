@@ -258,6 +258,14 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     set {payload = .e2EEncryptedEnvelope(newValue)}
   }
 
+  var setEntitlement: Nudge_V1_SetEntitlement {
+    get {
+      if case .setEntitlement(let v)? = payload {return v}
+      return Nudge_V1_SetEntitlement()
+    }
+    set {payload = .setEntitlement(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Payload: Equatable, Sendable {
@@ -289,6 +297,7 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     case e2EHandshakeStart(Nudge_V1_E2EHandshakeStart)
     case e2EHandshakeFinish(Nudge_V1_E2EHandshakeFinish)
     case e2EEncryptedEnvelope(Nudge_V1_E2EEncryptedEnvelope)
+    case setEntitlement(Nudge_V1_SetEntitlement)
 
   }
 
@@ -792,6 +801,27 @@ nonisolated struct Nudge_V1_Entitlement: Sendable {
   init() {}
 }
 
+nonisolated struct Nudge_V1_SetEntitlement: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var entitlement: Nudge_V1_Entitlement {
+    get {_entitlement ?? Nudge_V1_Entitlement()}
+    set {_entitlement = newValue}
+  }
+  /// Returns true if `entitlement` has been explicitly set.
+  var hasEntitlement: Bool {self._entitlement != nil}
+  /// Clears the value of `entitlement`. Subsequent reads from it will return its default value.
+  mutating func clearEntitlement() {self._entitlement = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _entitlement: Nudge_V1_Entitlement? = nil
+}
+
 nonisolated struct Nudge_V1_PhoneProfile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -824,6 +854,10 @@ nonisolated struct Nudge_V1_BindingState: Sendable {
   var status: String = String()
 
   var boundPhoneID: String = String()
+
+  var daemonPublicKey: String = String()
+
+  var phonePublicKey: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -868,7 +902,7 @@ fileprivate nonisolated let _protobuf_package = "nudge.v1"
 
 nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0\u{3}e2e_handshake_start\0\u{3}e2e_handshake_finish\0\u{3}e2e_encrypted_envelope\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0\u{3}e2e_handshake_start\0\u{3}e2e_handshake_finish\0\u{3}e2e_encrypted_envelope\0\u{3}set_entitlement\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1241,6 +1275,19 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .e2EEncryptedEnvelope(v)
         }
       }()
+      case 38: try {
+        var v: Nudge_V1_SetEntitlement?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .setEntitlement(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .setEntitlement(v)
+        }
+      }()
       default: break
       }
     }
@@ -1366,6 +1413,10 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
     case .e2EEncryptedEnvelope?: try {
       guard case .e2EEncryptedEnvelope(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 37)
+    }()
+    case .setEntitlement?: try {
+      guard case .setEntitlement(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 38)
     }()
     case nil: break
     }
@@ -2503,6 +2554,40 @@ nonisolated extension Nudge_V1_Entitlement: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
+nonisolated extension Nudge_V1_SetEntitlement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".SetEntitlement"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}entitlement\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._entitlement) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._entitlement {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Nudge_V1_SetEntitlement, rhs: Nudge_V1_SetEntitlement) -> Bool {
+    if lhs._entitlement != rhs._entitlement {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Nudge_V1_PhoneProfile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PhoneProfile"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rows\0\u{1}cols\0")
@@ -2540,7 +2625,7 @@ nonisolated extension Nudge_V1_PhoneProfile: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension Nudge_V1_BindingState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".BindingState"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}relay_url\0\u{3}daemon_device_id\0\u{3}binding_id\0\u{1}code\0\u{3}expires_at\0\u{1}status\0\u{3}bound_phone_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}relay_url\0\u{3}daemon_device_id\0\u{3}binding_id\0\u{1}code\0\u{3}expires_at\0\u{1}status\0\u{3}bound_phone_id\0\u{3}daemon_public_key\0\u{3}phone_public_key\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2555,6 +2640,8 @@ nonisolated extension Nudge_V1_BindingState: SwiftProtobuf.Message, SwiftProtobu
       case 5: try { try decoder.decodeSingularStringField(value: &self.expiresAt) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.status) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.boundPhoneID) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.daemonPublicKey) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.phonePublicKey) }()
       default: break
       }
     }
@@ -2582,6 +2669,12 @@ nonisolated extension Nudge_V1_BindingState: SwiftProtobuf.Message, SwiftProtobu
     if !self.boundPhoneID.isEmpty {
       try visitor.visitSingularStringField(value: self.boundPhoneID, fieldNumber: 7)
     }
+    if !self.daemonPublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonPublicKey, fieldNumber: 8)
+    }
+    if !self.phonePublicKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.phonePublicKey, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2593,6 +2686,8 @@ nonisolated extension Nudge_V1_BindingState: SwiftProtobuf.Message, SwiftProtobu
     if lhs.expiresAt != rhs.expiresAt {return false}
     if lhs.status != rhs.status {return false}
     if lhs.boundPhoneID != rhs.boundPhoneID {return false}
+    if lhs.daemonPublicKey != rhs.daemonPublicKey {return false}
+    if lhs.phonePublicKey != rhs.phonePublicKey {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

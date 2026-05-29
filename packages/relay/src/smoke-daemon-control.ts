@@ -10,7 +10,7 @@ import {
   verify,
   type KeyObject,
 } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -21,7 +21,12 @@ interface DeviceResponse {
 }
 
 interface BindingResponse {
-  binding: { id: string; code: string };
+  binding: {
+    id: string;
+    code: string;
+    daemonDeviceId?: string;
+    phoneDeviceId?: string;
+  };
 }
 
 interface ChallengeResponse {
@@ -76,6 +81,12 @@ const textEncoder = new TextEncoder();
 const ed25519SpkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
 const x25519SpkiPrefix = Buffer.from('302a300506032b656e032100', 'hex');
 
+interface BindingResult {
+  bindingId: string;
+  daemonDeviceId: string;
+  phoneDeviceId: string;
+}
+
 async function main(): Promise<void> {
   const tmp = await mkdtemp(join(tmpdir(), 'nudge-daemon-control-'));
   let env: NodeJS.ProcessEnv | undefined;
@@ -86,45 +97,32 @@ async function main(): Promise<void> {
       NUDGE_RUNTIME_DIR: join(tmp, 'run'),
     };
     const daemonPublicKey = (await runNudge(env, ['device-public-key'])).trim();
+    const seededState = await readSessionState(env);
+    await writeSessionState(env, {
+      ...seededState,
+      entitlement: {
+        plan: 'paid',
+        max_bound_computers: 1,
+        max_tabs_per_computer: 3,
+        updated_at: 'smoke-seed',
+      },
+    });
     const phoneIdentity = generateSmokeIdentity();
-    const daemonDevice = await registerDevice('daemon', daemonPublicKey);
-    const phoneDevice = await registerDevice('phone', phoneIdentity.publicKey);
-    const binding = await postJson<BindingResponse>('/api/bind/start', { daemonDeviceId: daemonDevice.id });
-    await postJson('/api/bind/claim', { code: binding.binding.code, phoneDeviceId: phoneDevice.id });
-    await postJson('/api/bind/confirm', { bindingId: binding.binding.id, daemonDeviceId: daemonDevice.id });
-
-    await runNudge(env, [
-      'set-binding-state',
-      '--relay-url',
-      baseUrl,
-      '--daemon-device-id',
-      daemonDevice.id,
-      '--binding-id',
-      binding.binding.id,
-      '--code',
-      binding.binding.code,
-      '--status',
-      'active',
-      '--bound-phone-id',
-      phoneDevice.id,
-      '--daemon-public-key',
-      daemonPublicKey,
-      '--phone-public-key',
-      phoneIdentity.publicKey,
-    ]);
+    const binding = await bindThroughCli(env, phoneIdentity.publicKey);
+    await assertRelayEntitlementPersisted(env);
     await runNudge(env, ['restart-tab']);
 
     await waitForDaemonRelay(env);
 
     const smokeContext: SmokeContext = {
       daemonPublicKey,
-      daemonDeviceId: daemonDevice.id,
-      phoneDeviceId: phoneDevice.id,
+      daemonDeviceId: binding.daemonDeviceId,
+      phoneDeviceId: binding.phoneDeviceId,
       phoneIdentity,
     };
-    let phoneConnection = await connectEncryptedPhone(smokeContext, binding.binding.id);
+    let phoneConnection = await connectEncryptedPhone(smokeContext, binding.bindingId);
     phoneConnection.websocket.send(JSON.stringify({
-      toDeviceId: daemonDevice.id,
+      toDeviceId: binding.daemonDeviceId,
       payload: phoneConnection.e2eSession.encrypt('get_state', { type: 'get_state', requestId: 'state-1' }),
     }));
     const stateResponse = await waitForEncryptedDaemonResponse(
@@ -137,7 +135,7 @@ async function main(): Promise<void> {
     }
 
     phoneConnection.websocket.send(JSON.stringify({
-      toDeviceId: daemonDevice.id,
+      toDeviceId: binding.daemonDeviceId,
       payload: phoneConnection.e2eSession.encrypt('terminal_input', {
         type: 'terminal_input',
         requestId: 'input-1',
@@ -169,9 +167,9 @@ async function main(): Promise<void> {
     phoneConnection.websocket.close();
     await sleep(200);
     await waitForDaemonRelay(env);
-    phoneConnection = await connectEncryptedPhone(smokeContext, binding.binding.id);
+    phoneConnection = await connectEncryptedPhone(smokeContext, binding.bindingId);
     phoneConnection.websocket.send(JSON.stringify({
-      toDeviceId: daemonDevice.id,
+      toDeviceId: binding.daemonDeviceId,
       payload: phoneConnection.e2eSession.encrypt('terminal_output', {
         type: 'terminal_output',
         requestId: 'replay-1',
@@ -190,7 +188,7 @@ async function main(): Promise<void> {
     }
 
     phoneConnection.websocket.close();
-    console.log(`daemon relay e2e control reconnect smoke passed binding=${binding.binding.id}`);
+    console.log(`daemon relay e2e control reconnect smoke passed binding=${binding.bindingId}`);
   } finally {
     if (env) {
       try {
@@ -201,6 +199,117 @@ async function main(): Promise<void> {
     }
     await rm(tmp, { recursive: true, force: true });
   }
+}
+
+async function bindThroughCli(env: NodeJS.ProcessEnv, phonePublicKey: string): Promise<BindingResult> {
+  const bind = runNudge(env, [
+    'bind',
+    'phone',
+    '--relay-url',
+    baseUrl,
+    '--wait',
+    '--yes',
+    '--timeout-seconds',
+    '20',
+  ]);
+  const started = await waitForPendingBinding(env);
+  const claimed = await postJson<BindingResponse>('/api/bind/claim', {
+    code: started.code,
+    phoneDeviceId: (await registerDevice('phone', phonePublicKey)).id,
+  });
+  await bind;
+  const state = await readSessionState(env);
+  if (state.binding?.status !== 'active') {
+    throw new Error(`expected active binding after CLI bind, got ${JSON.stringify(state.binding)}`);
+  }
+  if (!state.binding.phone_public_key) {
+    throw new Error('expected CLI bind to persist phone public key from relay confirm');
+  }
+  return {
+    bindingId: started.bindingId,
+    daemonDeviceId: started.daemonDeviceId,
+    phoneDeviceId: claimed.binding.phoneDeviceId ?? state.binding.bound_phone_id,
+  };
+}
+
+async function waitForPendingBinding(env: NodeJS.ProcessEnv): Promise<{
+  bindingId: string;
+  code: string;
+  daemonDeviceId: string;
+}> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      const state = await readSessionState(env);
+      if (state.binding?.status === 'pending') {
+        return {
+          bindingId: state.binding.binding_id,
+          code: state.binding.code,
+          daemonDeviceId: state.binding.daemon_device_id,
+        };
+      }
+    } catch {
+      // daemon may still be starting
+    }
+    await sleep(100);
+  }
+  throw new Error('timed out waiting for pending binding from CLI');
+}
+
+async function assertRelayEntitlementPersisted(env: NodeJS.ProcessEnv): Promise<void> {
+  const state = await readSessionState(env);
+  if (
+    state.entitlement?.plan !== 'free' ||
+    state.entitlement?.max_bound_computers !== 1 ||
+    state.entitlement?.max_tabs_per_computer !== 1
+  ) {
+    throw new Error(`relay entitlement was not persisted in daemon state: ${JSON.stringify(state.entitlement)}`);
+  }
+}
+
+async function readSessionState(env: NodeJS.ProcessEnv): Promise<{
+  entitlement?: {
+    plan?: string;
+    max_bound_computers?: number;
+    max_tabs_per_computer?: number;
+    updated_at?: string;
+  };
+  binding?: {
+    binding_id: string;
+    code: string;
+    daemon_device_id: string;
+    status: string;
+    bound_phone_id: string;
+    phone_public_key?: string;
+  };
+}> {
+  const statePath = env.NUDGE_STATE_PATH;
+  if (!statePath) {
+    throw new Error('NUDGE_STATE_PATH is required');
+  }
+  return JSON.parse(await readFile(statePath, 'utf8')) as {
+    entitlement?: {
+      plan?: string;
+      max_bound_computers?: number;
+      max_tabs_per_computer?: number;
+      updated_at?: string;
+    };
+    binding?: {
+      binding_id: string;
+      code: string;
+      daemon_device_id: string;
+      status: string;
+      bound_phone_id: string;
+      phone_public_key?: string;
+    };
+  };
+}
+
+async function writeSessionState(env: NodeJS.ProcessEnv, state: unknown): Promise<void> {
+  const statePath = env.NUDGE_STATE_PATH;
+  if (!statePath) {
+    throw new Error('NUDGE_STATE_PATH is required');
+  }
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
 async function connectEncryptedPhone(

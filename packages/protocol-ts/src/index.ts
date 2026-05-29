@@ -6,6 +6,10 @@ export interface Entitlement {
   maxTabsPerComputer: number;
 }
 
+export interface SetEntitlement {
+  entitlement: Entitlement;
+}
+
 export interface Tab {
   id: string;
   title: string;

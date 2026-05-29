@@ -220,6 +220,7 @@ Tasks:
 - Forward messages between bound phone and daemon.
 - Forward phone terminal profile updates as encrypted daemon-bound control messages.
 - Ensure terminal payloads are not logged.
+- Maintain spawned relay + daemon + simulated phone integration tests for bind, E2E control, live terminal output, reconnect replay, and entitlement sync.
 
 Current implementation status:
 
@@ -239,6 +240,7 @@ Current implementation status:
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, caches the phone public key after binding confirmation, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity and stores the daemon public key from binding claim/status responses.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
+- CLI persists relay-provided entitlement from binding confirmation into the daemon session through local IPC, so the daemon has the relay's current tab limit when enforcing local tab creation.
 - Daemon/iOS live relay paths perform a phone-initiated E2E handshake when binding public keys are available, wrap phone-to-daemon control requests, daemon responses, and post-handshake live terminal updates in encrypted envelopes, and fall back to plaintext only for legacy bindings without peer public keys.
 - A spawned-process E2E smoke now starts relay plus daemon and drives a simulated websocket phone client through E2E handshake, encrypted state request, encrypted terminal input, encrypted live terminal output, and reconnect replay. Managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
@@ -249,6 +251,7 @@ Exit criteria:
 - relay routes state request/response.
 - relay refuses unbound phone.
 - relay refuses a second active computer binding for free entitlement.
+- CLI stores relay-provided entitlement in daemon state after binding confirmation.
 - spawned-process smoke starts relay and daemon, binds a simulated phone, performs E2E handshake, sends encrypted terminal input, receives encrypted daemon response/live output, reconnects the simulated phone, and replays encrypted terminal output.
 
 ## Phase 5: Binding CLI
@@ -275,6 +278,7 @@ Tasks:
 - Show pending phone info.
 - Ask for confirmation in CLI.
 - Implement `nudge bind revoke`.
+- Persist relay-provided entitlement into daemon state after binding confirmation.
 - Daemon stores bound phone id.
 - Daemon stores latest phone terminal profile locally.
 - Relay stores binding state.
@@ -498,6 +502,7 @@ Daemon tests:
 - tab ordering
 - create/rename/close
 - free entitlement rejects second tab
+- relay-provided entitlement can raise/lower daemon tab limits
 - detach does not kill PTY
 - reconnect snapshot
 - metadata restore after daemon restart
@@ -519,6 +524,7 @@ CLI tests:
 - width toggle shortcut
 - width status indicator
 - binding QR command
+- binding confirmation persists relay entitlement into daemon state
 - service install command dry run
 
 Relay tests:
@@ -538,6 +544,8 @@ Relay tests:
 - revocation
 - no terminal payload logging
 - spawned-process relay + daemon + simulated phone integration test for E2E handshake, encrypted terminal input, encrypted daemon response, and encrypted live terminal output
+- spawned-process relay + daemon + simulated phone integration test for reconnect replay after mobile websocket reconnect
+- integration coverage for binding entitlement sync from relay confirm into daemon state
 
 Agent tests:
 
