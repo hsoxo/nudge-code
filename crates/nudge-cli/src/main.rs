@@ -7,7 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -18,6 +21,7 @@ use nudge_protocol::v1;
 use qrcode::{QrCode, render::unicode};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -599,6 +603,15 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
                     }
                     last_frame.clear();
                 }
+                Event::Mouse(mouse) => {
+                    if let Some(tab_id) = clicked_tab_id(&state, &selected_tab_id, mouse) {
+                        selected_tab_id = tab_id;
+                        if !selected_tab_needs_restart(&state, &selected_tab_id) {
+                            resize_selected_tab(&selected_tab_id).await?;
+                        }
+                        last_frame.clear();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1029,15 +1042,21 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw terminal mode")?;
-        execute!(stdout(), EnterAlternateScreen, Hide, Clear(ClearType::All))
-            .context("failed to enter alternate screen")?;
+        execute!(
+            stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Hide,
+            Clear(ClearType::All)
+        )
+        .context("failed to enter alternate screen")?;
         Ok(Self)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(stdout(), Show, DisableMouseCapture, LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
 }
@@ -1068,7 +1087,14 @@ async fn draw_frame(
     let mut output = stdout();
     let (terminal_cols, terminal_rows) = size().unwrap_or((80, 24));
     execute!(output, MoveTo(0, 0), Clear(ClearType::All)).context("failed to clear terminal")?;
-    write!(output, "{}", tab_bar(state, selected_tab_id))?;
+    write!(
+        output,
+        "{}",
+        fit_line(
+            &tab_bar_layout(state, selected_tab_id).text,
+            terminal_cols as usize
+        )
+    )?;
     let content_rows = terminal_rows.saturating_sub(2) as usize;
     for (index, line) in render.text.lines().take(content_rows).enumerate() {
         execute!(output, MoveTo(0, (index + 1) as u16))?;
@@ -1089,21 +1115,64 @@ async fn draw_frame(
     Ok(())
 }
 
-fn tab_bar(state: &v1::SessionState, selected_tab_id: &str) -> String {
-    let mut parts = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabHitBox {
+    tab_id: String,
+    start_col: u16,
+    end_col: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabBarLayout {
+    text: String,
+    hit_boxes: Vec<TabHitBox>,
+}
+
+fn tab_bar_layout(state: &v1::SessionState, selected_tab_id: &str) -> TabBarLayout {
+    let mut text = String::from("Nudge ");
+    let mut hit_boxes = Vec::new();
     for tab in &state.tabs {
-        if tab.id == selected_tab_id {
-            parts.push(format!("[{}]", tab.title));
-        } else {
-            parts.push(format!(" {} ", tab.title));
+        if text != "Nudge " {
+            text.push(' ');
         }
+        let start_col = char_count_as_u16(&text);
+        if tab.id == selected_tab_id {
+            text.push_str(&format!("[{}]", tab.title));
+        } else {
+            text.push_str(&format!(" {} ", tab.title));
+        }
+        let end_col = char_count_as_u16(&text);
+        hit_boxes.push(TabHitBox {
+            tab_id: tab.id.clone(),
+            start_col,
+            end_col,
+        });
     }
-    format!("Nudge {}", parts.join(" "))
+    TabBarLayout { text, hit_boxes }
+}
+
+fn char_count_as_u16(text: &str) -> u16 {
+    UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+}
+
+fn clicked_tab_id(
+    state: &v1::SessionState,
+    selected_tab_id: &str,
+    mouse: MouseEvent,
+) -> Option<String> {
+    if !matches!(mouse.kind, MouseEventKind::Down(_)) || mouse.row != 0 {
+        return None;
+    }
+    tab_bar_layout(state, selected_tab_id)
+        .hit_boxes
+        .into_iter()
+        .find(|hit_box| mouse.column >= hit_box.start_col && mouse.column < hit_box.end_col)
+        .map(|hit_box| hit_box.tab_id)
 }
 
 fn status_line(width_mode: &str, tab_status: &str, rows: u32, cols: u32) -> String {
     format!(
-        "Ctrl-g c new | x close | n/p switch | r restart | w width | d detach | status={tab_status} width={width_mode} size={rows}x{cols}"
+        "Ctrl-g c new | x close | n/p switch | r rename | R restart | w width | d detach | status={tab_status} width={width_mode} size={rows}x{cols}"
     )
 }
 
@@ -1135,6 +1204,9 @@ async fn handle_prefix_key(key: KeyEvent, selected_tab_id: &mut String) -> Resul
                 .context("daemon session has no tabs")?;
         }
         KeyCode::Char('r') => {
+            rename_selected_tab(selected_tab_id).await?;
+        }
+        KeyCode::Char('R') => {
             restart_tab(selected_tab_id).await?;
             resize_selected_tab(selected_tab_id).await?;
         }
@@ -1256,6 +1328,70 @@ async fn close_tab(tab_id: &str) -> Result<v1::SessionState> {
     })))
     .await?;
     session_from_response(response)
+}
+
+async fn rename_selected_tab(tab_id: &str) -> Result<()> {
+    let state = get_session_state().await?;
+    let tab = state
+        .tabs
+        .iter()
+        .find(|tab| tab.id == tab_id)
+        .with_context(|| format!("tab {tab_id} was not found"))?;
+    if let Some(title) = prompt_tab_title(&tab.title)? {
+        if title != tab.title {
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::RenameTab(v1::RenameTab {
+                    tab_id: tab_id.to_string(),
+                    title,
+                })))
+                .await?;
+            let _ = session_from_response(response)?;
+        }
+    }
+    Ok(())
+}
+
+fn prompt_tab_title(current_title: &str) -> Result<Option<String>> {
+    let mut title = current_title.to_string();
+    loop {
+        draw_rename_prompt(&title)?;
+        if let Event::Key(key) = event::read().context("failed to read rename prompt input")? {
+            match key.code {
+                KeyCode::Enter => {
+                    let title = title.trim().to_string();
+                    return Ok(if title.is_empty() { None } else { Some(title) });
+                }
+                KeyCode::Esc => return Ok(None),
+                KeyCode::Backspace => {
+                    title.pop();
+                }
+                KeyCode::Char('c') | KeyCode::Char('g')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Ok(None);
+                }
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    title.push(character);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn draw_rename_prompt(title: &str) -> Result<()> {
+    let mut output = stdout();
+    let (_, terminal_rows) = size().unwrap_or((80, 24));
+    execute!(
+        output,
+        MoveTo(0, terminal_rows.saturating_sub(1)),
+        Clear(ClearType::CurrentLine)
+    )?;
+    write!(output, "Rename tab: {title}")?;
+    output.flush().context("failed to flush rename prompt")?;
+    Ok(())
 }
 
 async fn restart_tab(tab_id: &str) -> Result<()> {
@@ -1887,4 +2023,91 @@ fn now_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    fn test_state() -> v1::SessionState {
+        v1::SessionState {
+            tabs: vec![
+                test_tab("tab-1", "one"),
+                test_tab("tab-2", "two"),
+                test_tab("tab-3", "three"),
+            ],
+            entitlement: None,
+            phone_profile: None,
+            binding: None,
+        }
+    }
+
+    fn test_tab(id: &str, title: &str) -> v1::Tab {
+        v1::Tab {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: "running".to_string(),
+            width_mode: "computer".to_string(),
+            rows: 24,
+            cols: 80,
+            agent_status: None,
+        }
+    }
+
+    fn mouse_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn tab_bar_layout_exposes_clickable_hit_boxes() {
+        let layout = tab_bar_layout(&test_state(), "tab-2");
+
+        assert_eq!(layout.text, "Nudge  one  [two]  three ");
+        assert_eq!(
+            layout.hit_boxes,
+            vec![
+                TabHitBox {
+                    tab_id: "tab-1".to_string(),
+                    start_col: 6,
+                    end_col: 11,
+                },
+                TabHitBox {
+                    tab_id: "tab-2".to_string(),
+                    start_col: 12,
+                    end_col: 17,
+                },
+                TabHitBox {
+                    tab_id: "tab-3".to_string(),
+                    start_col: 18,
+                    end_col: 25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clicked_tab_id_selects_tab_from_top_row_only() {
+        let state = test_state();
+
+        assert_eq!(
+            clicked_tab_id(&state, "tab-2", mouse_down(13, 0)),
+            Some("tab-2".to_string())
+        );
+        assert_eq!(clicked_tab_id(&state, "tab-2", mouse_down(13, 1)), None);
+        assert_eq!(clicked_tab_id(&state, "tab-2", mouse_down(5, 0)), None);
+    }
+
+    #[test]
+    fn status_line_documents_rename_and_restart_keys() {
+        let line = status_line("computer", "running", 24, 80);
+
+        assert!(line.contains("r rename"));
+        assert!(line.contains("R restart"));
+    }
 }

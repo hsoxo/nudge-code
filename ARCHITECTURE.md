@@ -218,6 +218,7 @@ Ctrl-g x        close tab
 Ctrl-g n        next tab
 Ctrl-g p        previous tab
 Ctrl-g r        rename tab
+Ctrl-g R        restart tab
 Ctrl-g d        detach
 mouse click     select tab
 ```
