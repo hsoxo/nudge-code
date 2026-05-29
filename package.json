@@ -6,6 +6,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "bind:local": "scripts/run-local-bind.sh",
     "check": "npm run check --workspaces --if-present",
     "check:handoff": "scripts/check-handoff-readiness.sh",
     "check:local-first": "scripts/check-local-first-readiness.sh",

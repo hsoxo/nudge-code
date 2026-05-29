@@ -31,6 +31,11 @@ cd apps/mobile-ios && xcodegen generate --spec project.yml
 
 For the current local-first target, use [docs/local-first-run.md](/Users/hhe/Projects/code-mule/docs/local-first-run.md). It keeps relay on the development machine and supports either simulator, same-network phone such as `http://10.10.10.xxx:8787`, or a temporary Cloudflare Tunnel URL.
 
+```sh
+npm run relay:local
+NUDGE_RELAY_URL=http://10.10.10.xxx:8787 npm run bind:local
+```
+
 ## Current Local Daemon Checks
 
 ```sh

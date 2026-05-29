@@ -25,6 +25,8 @@ npm run relay:local
 
 The script prints usable relay URLs. Use `http://127.0.0.1:8787` from the simulator. Use `http://<computer-lan-ip>:8787` from a physical phone on the same network. For a `10.10.10.xxx` network, the relay URL will look like `http://10.10.10.42:8787`. The iOS app allows local-network HTTP for this development path.
 
+`NUDGE_RELAY_URL` is the canonical relay URL for the packaged CLI and relay. Set it when the advertised URL differs from localhost, such as a LAN IP or Cloudflare Tunnel URL.
+
 To override the port:
 
 ```sh
@@ -46,9 +48,28 @@ Use the printed `https://...trycloudflare.com` URL as the relay URL for binding.
 In another terminal, build the computer binary and start binding:
 
 ```sh
-cargo build -p nudge-cli
-target/debug/nudge bind phone --relay-url <relay-url> --wait
+npm run bind:local
 ```
+
+By default this uses `http://127.0.0.1:8787`, which is correct for simulator testing. For a physical phone on your `10.10.10.xxx` network, use the LAN URL printed by `npm run relay:local`:
+
+```sh
+NUDGE_RELAY_URL=http://10.10.10.xxx:8787 npm run bind:local
+```
+
+You can also pass the relay URL as the first argument:
+
+```sh
+npm run bind:local -- http://10.10.10.xxx:8787
+```
+
+For a Cloudflare quick tunnel, use the printed HTTPS URL:
+
+```sh
+NUDGE_RELAY_URL=https://example.trycloudflare.com npm run bind:local
+```
+
+The bind helper checks `<relay-url>/healthz`, starts `target/debug/nudge bind phone --wait`, and prints the `app_pairing_url=nudge://pair?...` that the app can open directly.
 
 On the iOS simulator or phone:
 

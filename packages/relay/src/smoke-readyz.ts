@@ -10,6 +10,7 @@ interface ReadinessResponse {
     hostedMode: boolean;
     statePersistence: boolean;
     host: string;
+    advertisedRelayUrl: string | null;
     requireWebSocketSignature: boolean;
     requireWebSocketChallenge: boolean;
     requireE2EPayload: boolean;
@@ -44,6 +45,9 @@ async function main(): Promise<void> {
       }
       if (ready.config.host !== '127.0.0.1') {
         throw new Error(`expected configured relay host, got ${JSON.stringify(ready)}`);
+      }
+      if (ready.config.advertisedRelayUrl !== 'http://127.0.0.1:8798') {
+        throw new Error(`expected advertised relay URL, got ${JSON.stringify(ready)}`);
       }
       if (!ready.config.statePersistence) {
         throw new Error(`expected persistent state config, got ${JSON.stringify(ready)}`);
@@ -91,6 +95,7 @@ async function startRelay(env: NodeJS.ProcessEnv): Promise<ChildProcess> {
       ...env,
       NUDGE_RELAY_PORT: String(port),
       NUDGE_RELAY_HOST: '127.0.0.1',
+      NUDGE_RELAY_URL: `http://127.0.0.1:${port}`,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });

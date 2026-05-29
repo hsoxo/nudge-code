@@ -24,6 +24,8 @@ use tokio::process::Command as TokioCommand;
 use unicode_width::UnicodeWidthStr;
 use vt100::Parser as TerminalParser;
 
+const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8787";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "nudge",
@@ -271,8 +273,9 @@ enum ServiceCommand {
 enum BindCommand {
     /// Start phone binding and print the pairing code.
     Phone {
-        /// Relay HTTP base URL.
-        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        /// Relay HTTP base URL. Defaults to NUDGE_RELAY_URL or http://127.0.0.1:8787.
+        #[arg(long)]
+        #[arg(default_value_t = default_relay_url())]
         relay_url: String,
         /// Wait for a phone claim and confirm it when seen.
         #[arg(long)]
@@ -293,8 +296,9 @@ enum BindCommand {
     /// Simulate phone-side pairing code claim.
     #[command(hide = true)]
     Claim {
-        /// Relay HTTP base URL.
-        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        /// Relay HTTP base URL. Defaults to NUDGE_RELAY_URL or http://127.0.0.1:8787.
+        #[arg(long)]
+        #[arg(default_value_t = default_relay_url())]
         relay_url: String,
         /// Pairing code printed by `nudge bind phone`.
         #[arg(long)]
@@ -1131,6 +1135,10 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+fn default_relay_url() -> String {
+    std::env::var("NUDGE_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string())
 }
 
 fn app_pairing_url(relay_url: &str, code: &str) -> String {

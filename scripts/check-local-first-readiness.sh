@@ -38,11 +38,14 @@ require_file "$IOS_PLIST"
 require_file "$IOS_PROJECT_SPEC"
 require_file "$RELAY_SRC"
 require_file "$PACKAGE_JSON"
+require_executable "$ROOT_DIR/scripts/run-local-bind.sh"
 require_executable "$ROOT_DIR/scripts/run-local-relay.sh"
 require_executable "$ROOT_DIR/scripts/smoke-ios-relay-claim.sh"
 
 require_pattern "$LOCAL_DOC" "scripts/smoke-ios-relay-claim.sh"
 require_pattern "$LOCAL_DOC" "npm run relay:local"
+require_pattern "$LOCAL_DOC" "npm run bind:local"
+require_pattern "$LOCAL_DOC" "NUDGE_RELAY_URL"
 require_pattern "$LOCAL_DOC" "http://<computer-lan-ip>:8787"
 require_pattern "$LOCAL_DOC" "http://10.10.10.42:8787"
 require_pattern "$LOCAL_DOC" "cloudflared tunnel --url http://127.0.0.1:8787"
@@ -51,6 +54,12 @@ require_pattern "$IOS_PLIST" "<key>NSLocalNetworkUsageDescription</key>"
 require_pattern "$IOS_PROJECT_SPEC" "NSAllowsLocalNetworking: true"
 require_pattern "$IOS_PROJECT_SPEC" "NSLocalNetworkUsageDescription"
 require_pattern "$RELAY_SRC" "process.env.NUDGE_RELAY_HOST ?? '0.0.0.0'"
+require_pattern "$RELAY_SRC" "process.env.NUDGE_RELAY_URL"
+require_pattern "$PACKAGE_JSON" "\"bind:local\""
 require_pattern "$PACKAGE_JSON" "\"relay:local\""
+
+NUDGE_BIND_LOCAL_DRY_RUN=1 \
+NUDGE_RELAY_URL=http://10.10.10.42:8787 \
+"$ROOT_DIR/scripts/run-local-bind.sh" --yes >/dev/null
 
 echo "local-first readiness check passed"
