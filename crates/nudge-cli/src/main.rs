@@ -13,6 +13,7 @@ use crossterm::terminal::{
 };
 use nudge_daemon::{BindingState, BindingStatus, DaemonConfig};
 use nudge_protocol::v1;
+use qrcode::{QrCode, render::unicode};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 
@@ -192,6 +193,15 @@ enum BindCommand {
         /// Relay HTTP base URL.
         #[arg(long, default_value = "http://127.0.0.1:8787")]
         relay_url: String,
+        /// Wait for a phone claim and confirm it when seen.
+        #[arg(long)]
+        wait: bool,
+        /// Do not prompt before confirming a claimed phone.
+        #[arg(long)]
+        yes: bool,
+        /// Seconds to wait for phone claim when --wait is set.
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
     },
     /// Revoke the currently stored phone binding.
     Revoke {
@@ -248,7 +258,12 @@ async fn main() -> Result<()> {
             ..
         }) => stop_daemon().await?,
         Some(Command::Bind { command }) => match command {
-            BindCommand::Phone { relay_url } => bind_phone(&relay_url).await?,
+            BindCommand::Phone {
+                relay_url,
+                wait,
+                yes,
+                timeout_seconds,
+            } => bind_phone(&relay_url, wait, yes, timeout_seconds).await?,
             BindCommand::Revoke { relay_url } => revoke_binding(relay_url.as_deref()).await?,
             BindCommand::Claim {
                 relay_url,
@@ -551,7 +566,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
     Ok(())
 }
 
-async fn bind_phone(relay_url: &str) -> Result<()> {
+async fn bind_phone(relay_url: &str, wait: bool, yes: bool, timeout_seconds: u64) -> Result<()> {
     let relay_url = normalize_relay_url(relay_url);
     ensure_daemon().await?;
     let session = nudge_daemon::load_session()?;
@@ -595,12 +610,15 @@ async fn bind_phone(relay_url: &str) -> Result<()> {
     println!("daemon_device_id={}", binding.daemon_device_id);
     println!("binding_id={}", binding.binding_id);
     println!("pairing_code={}", binding.code);
-    println!(
-        "pairing_url={}/pair?code={}",
-        binding.relay_url, binding.code
-    );
+    let pairing_url = format!("{}/pair?code={}", binding.relay_url, binding.code);
+    println!("pairing_url={pairing_url}");
     println!("expires_at={}", binding.expires_at);
-    println!("waiting for phone claim; computer confirmation is required after claim");
+    print_qr_code(&pairing_url)?;
+    if wait {
+        wait_for_claim_and_confirm(&client, binding, yes, timeout_seconds).await?;
+    } else {
+        println!("run `nudge bind phone --wait` to wait for phone claim and confirm it");
+    }
     Ok(())
 }
 
@@ -625,6 +643,53 @@ async fn claim_binding(relay_url: &str, code: &str, phone_public_key: &str) -> R
     Ok(())
 }
 
+async fn wait_for_claim_and_confirm(
+    client: &reqwest::Client,
+    pending: BindingState,
+    yes: bool,
+    timeout_seconds: u64,
+) -> Result<()> {
+    println!("waiting for phone claim...");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        let binding_response = get_json::<BindingResponse>(
+            client,
+            &pending.relay_url,
+            &format!(
+                "/api/bind/status?bindingId={}&deviceId={}",
+                pending.binding_id, pending.daemon_device_id
+            ),
+        )
+        .await?;
+        match binding_response.binding.status.as_str() {
+            "claimed" => {
+                let phone_id = binding_response
+                    .binding
+                    .phone_device_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("phone claimed");
+                println!("phone_device_id={phone_id}");
+                if !yes && !confirm_prompt("Confirm this phone binding?")? {
+                    anyhow::bail!("binding confirmation cancelled");
+                }
+                confirm_binding_with_pending(client, pending).await?;
+                return Ok(());
+            }
+            "active" => {
+                confirm_binding_with_pending(client, pending).await?;
+                return Ok(());
+            }
+            "revoked" => anyhow::bail!("binding was revoked before confirmation"),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for phone claim");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 async fn confirm_binding(relay_url: Option<&str>) -> Result<()> {
     ensure_daemon().await?;
     let pending = current_binding()?;
@@ -643,9 +708,25 @@ async fn confirm_binding(relay_url: Option<&str>) -> Result<()> {
         .map(normalize_relay_url)
         .unwrap_or_else(|| pending.relay_url.clone());
     let client = reqwest::Client::new();
+    confirm_binding_with_client(&client, pending, &relay_url).await
+}
+
+async fn confirm_binding_with_pending(
+    client: &reqwest::Client,
+    pending: BindingState,
+) -> Result<()> {
+    let relay_url = pending.relay_url.clone();
+    confirm_binding_with_client(client, pending, &relay_url).await
+}
+
+async fn confirm_binding_with_client(
+    client: &reqwest::Client,
+    pending: BindingState,
+    relay_url: &str,
+) -> Result<()> {
     let binding_response = post_json::<ConfirmBindingRequest, BindingResponse>(
-        &client,
-        &relay_url,
+        client,
+        relay_url,
         "/api/bind/confirm",
         &ConfirmBindingRequest {
             binding_id: pending.binding_id.clone(),
@@ -658,7 +739,7 @@ async fn confirm_binding(relay_url: Option<&str>) -> Result<()> {
         .phone_device_id
         .context("relay confirmed binding without phone device id")?;
     let mut active = pending.active(phone_id.clone());
-    active.relay_url = relay_url;
+    active.relay_url = relay_url.to_string();
     active.binding_id = binding_response.binding.id;
     active.expires_at = binding_response.binding.expires_at;
     set_binding_state(active.clone()).await?;
@@ -798,6 +879,32 @@ where
     serde_json::from_slice(&bytes).with_context(|| format!("failed to parse response from {url}"))
 }
 
+async fn get_json<Response>(
+    client: &reqwest::Client,
+    relay_url: &str,
+    path: &str,
+) -> Result<Response>
+where
+    Response: for<'de> Deserialize<'de>,
+{
+    let url = format!("{relay_url}{path}");
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to call {url}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read response from {url}"))?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes);
+        anyhow::bail!("relay returned HTTP {status} from {path}: {body}");
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse response from {url}"))
+}
+
 async fn set_binding_state(binding: BindingState) -> Result<v1::SessionState> {
     let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetBindingState(
         v1::SetBindingState {
@@ -834,6 +941,31 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+fn print_qr_code(value: &str) -> Result<()> {
+    let code = QrCode::new(value.as_bytes()).context("failed to generate pairing QR code")?;
+    let image = code
+        .render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .module_dimensions(2, 1)
+        .build();
+    println!("{image}");
+    Ok(())
+}
+
+fn confirm_prompt(prompt: &str) -> Result<bool> {
+    use std::io::{Write, stdin, stdout};
+
+    print!("{prompt} [y/N] ");
+    stdout()
+        .flush()
+        .context("failed to flush confirmation prompt")?;
+    let mut answer = String::new();
+    stdin()
+        .read_line(&mut answer)
+        .context("failed to read confirmation prompt")?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 fn parse_binding_status(status: &str) -> Result<BindingStatus> {

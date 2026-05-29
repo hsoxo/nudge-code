@@ -234,9 +234,10 @@ Goals:
 Current implementation status:
 
 - `nudge bind phone` starts relay pairing, stores a pending binding in daemon session state, and prints a fallback pairing URL/code.
+- `nudge bind phone` renders a terminal QR code and can `--wait --yes` for simulated phone claim and computer confirmation.
 - Hidden smoke helpers can simulate phone claim and computer confirmation until the native iOS binding UI exists.
 - `nudge bind revoke` revokes the relay binding and clears local binding state.
-- Terminal QR rendering, interactive confirmation prompts, signed authentication, and E2E encryption remain open Phase 5/relay work.
+- Native iOS QR scanning, signed authentication, and E2E encryption remain open Phase 5/relay work.
 
 Tasks:
 

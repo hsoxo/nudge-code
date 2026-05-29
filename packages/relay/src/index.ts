@@ -160,6 +160,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
 
+  if (method === 'GET' && url.pathname === '/api/bind/status') {
+    const bindingId = url.searchParams.get('bindingId') ?? undefined;
+    const deviceId = url.searchParams.get('deviceId') ?? undefined;
+    const binding = bindingId ? bindings.get(bindingId) : undefined;
+    if (!binding || !isBindingParticipant(binding, deviceId)) {
+      writeJson(response, 404, { error: 'binding_not_found' });
+      return;
+    }
+    writeJson(response, 200, { binding });
+    return;
+  }
+
   if (method === 'POST' && url.pathname === '/api/bind/confirm') {
     const body = await readJson<{ bindingId?: string; daemonDeviceId?: string }>(request);
     const binding = body.bindingId ? bindings.get(body.bindingId) : undefined;
