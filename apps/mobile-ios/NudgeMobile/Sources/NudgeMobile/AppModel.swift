@@ -9,8 +9,10 @@ final class AppModel {
     var selectedMachineID: String?
     var selectedTabID: String?
     var bindingDraft: BindingDraft?
+    var bindingClaimState: BindingClaimState = .idle
     var phoneProfile: TerminalProfile
     var commandComposer = ""
+    private let relayClient: any RelayClient
 
     init(
         machines: [Machine] = [],
@@ -18,7 +20,8 @@ final class AppModel {
         selectedMachineID: String? = nil,
         selectedTabID: String? = nil,
         bindingDraft: BindingDraft? = nil,
-        phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48)
+        phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48),
+        relayClient: any RelayClient = HTTPRelayClient()
     ) {
         let initialMachineID = selectedMachineID ?? machines.first?.id
         let initialTabID = selectedTabID ?? tabsByMachine[initialMachineID ?? ""]?.first?.id
@@ -29,6 +32,7 @@ final class AppModel {
         self.selectedTabID = initialTabID
         self.bindingDraft = bindingDraft
         self.phoneProfile = phoneProfile
+        self.relayClient = relayClient
     }
 
     var selectedMachine: Machine? {
@@ -72,13 +76,22 @@ final class AppModel {
             return false
         }
         bindingDraft = draft
+        bindingClaimState = .idle
         return true
     }
 
-    func claimDraftBinding() {
+    func claimDraftBinding() async {
         guard let draft = bindingDraft else {
             return
         }
+        bindingClaimState = .claiming
+        do {
+            try await relayClient.claimBinding(code: draft.code, relayURL: draft.relayURL)
+        } catch {
+            bindingClaimState = .failed(error.localizedDescription)
+            return
+        }
+
         let machine = Machine(
             id: "machine-\(draft.code)",
             name: "Pending Mac",
@@ -99,6 +112,7 @@ final class AppModel {
             )
         ]
         bindingDraft = nil
+        bindingClaimState = .claimed
         selectMachine(machine)
     }
 

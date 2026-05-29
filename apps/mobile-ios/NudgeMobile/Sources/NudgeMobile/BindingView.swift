@@ -34,9 +34,21 @@ struct BindingView: View {
                     LabeledContent("Relay", value: draft.relayURL.absoluteString)
                     LabeledContent("Code", value: draft.code)
                     Button {
-                        model.claimDraftBinding()
+                        Task {
+                            await model.claimDraftBinding()
+                        }
                     } label: {
-                        Label("Claim And Wait", systemImage: "link.badge.plus")
+                        if model.bindingClaimState.isClaiming {
+                            Label("Claiming", systemImage: "hourglass")
+                        } else {
+                            Label("Claim And Wait", systemImage: "link.badge.plus")
+                        }
+                    }
+                    .disabled(model.bindingClaimState.isClaiming)
+                    if case .failed(let message) = model.bindingClaimState {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
                     }
                 }
             }

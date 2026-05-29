@@ -86,3 +86,17 @@ struct BindingDraft: Equatable, Sendable {
         self.relayURL = URL(string: "\(pairingURL.scheme ?? "https")://\(pairingURL.host ?? "nudgecode.dev")") ?? pairingURL
     }
 }
+
+enum BindingClaimState: Equatable, Sendable {
+    case idle
+    case claiming
+    case claimed
+    case failed(String)
+
+    var isClaiming: Bool {
+        if case .claiming = self {
+            return true
+        }
+        return false
+    }
+}
