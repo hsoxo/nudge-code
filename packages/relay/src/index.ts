@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -45,6 +45,20 @@ interface PersistedRelayState {
   bindings: Binding[];
   updatedAt: string;
 }
+
+type AuditEventType =
+  | 'device_registered'
+  | 'binding_started'
+  | 'binding_claimed'
+  | 'binding_confirmed'
+  | 'binding_revoked'
+  | 'pairing_claim_rejected'
+  | 'socket_challenge_issued'
+  | 'socket_authorized'
+  | 'socket_rejected'
+  | 'message_routed'
+  | 'message_queued'
+  | 'message_poll';
 
 type RateLimitResult =
   | { ok: true }
@@ -96,6 +110,7 @@ const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const requireWebSocketChallenge = process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
+const relayAuditPath = process.env.NUDGE_RELAY_AUDIT_PATH;
 const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
 const socketChallengeTtlMs = readPositiveIntEnv('NUDGE_SOCKET_CHALLENGE_TTL_MS', 60_000);
 const pairingClaimWindowMs = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_RATE_WINDOW_MS', 10 * 60 * 1000);
@@ -133,12 +148,23 @@ server.on('upgrade', (request, socket, head) => {
   const expectedKind: DeviceKind = url.pathname === '/ws/daemon' ? 'daemon' : 'phone';
   const authorization = authorizeSocket(expectedKind, url.searchParams);
   if (!authorization.ok) {
+    audit('socket_rejected', {
+      deviceKind: expectedKind,
+      deviceId: url.searchParams.get('deviceId') ?? undefined,
+      bindingId: url.searchParams.get('bindingId') ?? undefined,
+      error: authorization.error,
+    });
     socket.write(`HTTP/1.1 ${authorization.statusCode} ${authorization.error}\r\n\r\n`);
     socket.destroy();
     return;
   }
 
   websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+    audit('socket_authorized', {
+      deviceKind: authorization.device.kind,
+      deviceId: authorization.device.id,
+      bindingId: authorization.binding.id,
+    });
     bindWebSocket(websocket, authorization.device, authorization.binding);
   });
 });
@@ -175,6 +201,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     };
     devices.set(device.id, device);
     persistRelayState();
+    audit('device_registered', { deviceKind: device.kind, deviceId: device.id });
     writeJson(response, 201, { device });
     return;
   }
@@ -199,6 +226,12 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       deviceId: device.id,
       bindingId: binding.id,
       ttlMs: socketChallengeTtlMs,
+    });
+    audit('socket_challenge_issued', {
+      deviceKind: device.kind,
+      deviceId: device.id,
+      bindingId: binding.id,
+      challengeId: challenge.id,
     });
     writeJson(response, 201, {
       challenge: {
@@ -231,6 +264,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     };
     bindings.set(binding.id, binding);
     persistRelayState();
+    audit('binding_started', {
+      bindingId: binding.id,
+      daemonDeviceId: daemon.id,
+      expiresAt: binding.expiresAt,
+    });
     writeJson(response, 201, { binding });
     return;
   }
@@ -241,6 +279,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const rateLimit = checkPairingClaimRateLimit(request, pairingCode);
     if (!rateLimit.ok) {
       response.setHeader('retry-after', String(rateLimit.retryAfterSeconds));
+      audit('pairing_claim_rejected', {
+        deviceId: body.phoneDeviceId,
+        error: 'pairing_rate_limited',
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
+      });
       writeJson(response, 429, {
         error: 'pairing_rate_limited',
         retryAfterSeconds: rateLimit.retryAfterSeconds,
@@ -249,19 +292,36 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     const phone = body.phoneDeviceId ? devices.get(body.phoneDeviceId) : undefined;
     if (!phone || phone.kind !== 'phone') {
+      audit('pairing_claim_rejected', {
+        deviceId: body.phoneDeviceId,
+        error: 'phone_not_registered',
+      });
       writeJson(response, 404, { error: 'phone_not_registered' });
       return;
     }
     if (activeBindingsForPhone(phone.id).length >= FREE_ENTITLEMENT.maxBoundComputers) {
+      audit('pairing_claim_rejected', {
+        deviceId: phone.id,
+        error: 'free_entitlement_computer_limit',
+      });
       writeJson(response, 409, { error: 'free_entitlement_computer_limit' });
       return;
     }
     const binding = findBindingByCode(pairingCode);
     if (!binding || binding.status !== 'pending') {
+      audit('pairing_claim_rejected', {
+        deviceId: phone.id,
+        error: 'pairing_code_not_found',
+      });
       writeJson(response, 404, { error: 'pairing_code_not_found' });
       return;
     }
     if (Date.parse(binding.expiresAt) < Date.now()) {
+      audit('pairing_claim_rejected', {
+        bindingId: binding.id,
+        deviceId: phone.id,
+        error: 'pairing_code_expired',
+      });
       writeJson(response, 410, { error: 'pairing_code_expired' });
       return;
     }
@@ -269,6 +329,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     binding.status = 'claimed';
     binding.claimedAt = now();
     persistRelayState();
+    audit('binding_claimed', {
+      bindingId: binding.id,
+      daemonDeviceId: binding.daemonDeviceId,
+      phoneDeviceId: phone.id,
+    });
     writeJson(response, 200, { binding });
     return;
   }
@@ -303,6 +368,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     binding.status = 'active';
     binding.confirmedAt = now();
     persistRelayState();
+    audit('binding_confirmed', {
+      bindingId: binding.id,
+      daemonDeviceId: binding.daemonDeviceId,
+      phoneDeviceId: binding.phoneDeviceId,
+    });
     writeJson(response, 200, { binding, entitlement: FREE_ENTITLEMENT });
     return;
   }
@@ -319,6 +389,12 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     closeBindingSockets(binding, 'binding_revoked');
     clearBindingQueues(binding);
     persistRelayState();
+    audit('binding_revoked', {
+      bindingId: binding.id,
+      daemonDeviceId: binding.daemonDeviceId,
+      phoneDeviceId: binding.phoneDeviceId,
+      actorDeviceId: body.deviceId,
+    });
     writeJson(response, 200, { binding });
     return;
   }
@@ -356,10 +432,24 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const targetSocket = sockets.get(message.toDeviceId);
     if (targetSocket && targetSocket.readyState === targetSocket.OPEN) {
       targetSocket.send(JSON.stringify({ type: 'message', message }));
+      audit('message_routed', {
+        bindingId: binding.id,
+        fromDeviceId: message.fromDeviceId,
+        toDeviceId: message.toDeviceId,
+        ephemeral: message.ephemeral,
+        payloadType: payloadType(message.payload),
+      });
     } else if (!message.ephemeral) {
       const queue = messages.get(message.toDeviceId) ?? [];
       queue.push(message);
       messages.set(message.toDeviceId, queue);
+      audit('message_queued', {
+        bindingId: binding.id,
+        fromDeviceId: message.fromDeviceId,
+        toDeviceId: message.toDeviceId,
+        ephemeral: message.ephemeral,
+        payloadType: payloadType(message.payload),
+      });
     }
     writeJson(response, 202, { accepted: true, messageId: message.id });
     return;
@@ -373,6 +463,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     const queue = messages.get(deviceId) ?? [];
     messages.set(deviceId, []);
+    audit('message_poll', { deviceId, count: queue.length });
     writeJson(response, 200, { messages: queue });
     return;
   }
@@ -512,10 +603,24 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
     const targetSocket = sockets.get(relayMessage.toDeviceId);
     if (targetSocket && targetSocket.readyState === targetSocket.OPEN) {
       targetSocket.send(JSON.stringify({ type: 'message', message: relayMessage }));
+      audit('message_routed', {
+        bindingId: binding.id,
+        fromDeviceId: device.id,
+        toDeviceId: relayMessage.toDeviceId,
+        ephemeral: relayMessage.ephemeral,
+        payloadType: payloadType(relayMessage.payload),
+      });
     } else if (!relayMessage.ephemeral) {
       const queue = messages.get(relayMessage.toDeviceId) ?? [];
       queue.push(relayMessage);
       messages.set(relayMessage.toDeviceId, queue);
+      audit('message_queued', {
+        bindingId: binding.id,
+        fromDeviceId: device.id,
+        toDeviceId: relayMessage.toDeviceId,
+        ephemeral: relayMessage.ephemeral,
+        payloadType: payloadType(relayMessage.payload),
+      });
     }
     websocket.send(JSON.stringify({ type: 'accepted', messageId: relayMessage.id }));
   });
@@ -553,6 +658,43 @@ function bindingDeviceIds(binding: Binding): string[] {
 
 function makePairingCode(): string {
   return randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase();
+}
+
+function payloadType(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+  const type = (payload as { type?: unknown }).type;
+  return typeof type === 'string' ? type : undefined;
+}
+
+function audit(type: AuditEventType, fields: Record<string, unknown> = {}): void {
+  if (!relayAuditPath) {
+    return;
+  }
+  const event = {
+    ts: now(),
+    type,
+    ...redactAuditFields(fields),
+  };
+  mkdirSync(dirname(relayAuditPath), { recursive: true });
+  appendFileSync(relayAuditPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+  chmodSync(relayAuditPath, 0o600);
+}
+
+function redactAuditFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const redacted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (key === 'code' || key === 'publicKey' || key === 'payload' || key === 'message') {
+      redacted[key] = '[redacted]';
+      continue;
+    }
+    redacted[key] = value;
+  }
+  return redacted;
 }
 
 function now(): string {

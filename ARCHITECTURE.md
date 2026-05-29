@@ -613,6 +613,7 @@ Baseline:
 - relay enforces route authorization
 - terminal/control payloads are end-to-end encrypted between phone and daemon
 - terminal data is not logged
+- optional relay audit logging writes metadata-only JSONL events to `NUDGE_RELAY_AUDIT_PATH`
 
 E2E envelope:
 
@@ -627,7 +628,7 @@ Preferred future hardening:
 
 - key rotation
 - device revocation list
-- audit log for binding and approval actions
+- extend audit coverage for approval actions after approval flows are first-class protocol messages
 - push notification signing
 
 ## Terminal Lifecycle

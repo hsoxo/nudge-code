@@ -466,6 +466,8 @@ Current implementation status:
 - Signed websocket auth supports relay-issued one-shot challenges; daemon and iOS both request and sign challenges before websocket connect, and relay can reject legacy timestamp/nonce auth when challenge enforcement is enabled.
 - Binding revocation propagates to active daemon and iOS sessions through relay websocket errors; both clients stop reconnecting and surface revoked state locally.
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
+- Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
+- Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
 - The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 
 Exit criteria:
@@ -513,6 +515,7 @@ Relay tests:
 - replayed encrypted payload rejected
 - pairing challenge expiration
 - pairing claim rate limiting
+- audit log redaction for terminal payloads, pairing codes, and public keys
 - one-phone-per-computer enforcement
 - free entitlement one-computer binding enforcement
 - route authorization
