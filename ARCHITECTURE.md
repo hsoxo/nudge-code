@@ -618,6 +618,7 @@ Baseline:
 - relay enforces route authorization
 - hosted relay disables legacy HTTP message send/poll endpoints with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`
 - `/readyz` exposes hosted relay hardening warnings and runtime counters for deployment checks
+- hosted relay can persist device and binding metadata through `NUDGE_RELAY_DATABASE_URL` using Postgres JSONB state storage; `NUDGE_RELAY_STATE_PATH` remains the local single-process fallback
 - terminal/control payloads are end-to-end encrypted between phone and daemon
 - terminal data is not logged
 - optional relay audit logging writes metadata-only JSONL events to `NUDGE_RELAY_AUDIT_PATH`

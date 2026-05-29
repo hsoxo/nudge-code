@@ -17,16 +17,19 @@
     "smoke:persistence": "node dist/smoke-persistence.js",
     "smoke:rate-limit": "node dist/smoke-rate-limit.js",
     "smoke:readyz": "node dist/smoke-readyz.js",
+    "smoke:state-store": "node dist/smoke-state-store.js",
     "smoke:websocket": "node dist/smoke-websocket.js",
     "start": "node dist/index.js"
   },
   "dependencies": {
     "@nudge/protocol-ts": "0.0.0",
     "@types/ws": "^8.18.1",
+    "pg": "^8.21.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.2",
+    "@types/pg": "^8.20.0",
     "typescript": "^5.9.3"
   }
 }
