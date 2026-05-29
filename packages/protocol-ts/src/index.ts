@@ -50,6 +50,19 @@ export interface TerminalOutput {
   data: Uint8Array;
 }
 
+export interface CreateTab {
+  title: string;
+}
+
+export interface RenameTab {
+  tabId: string;
+  title: string;
+}
+
+export interface CloseTab {
+  tabId: string;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,

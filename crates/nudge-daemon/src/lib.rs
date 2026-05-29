@@ -65,6 +65,10 @@ pub struct Entitlement {
 pub enum SessionError {
     #[error("free entitlement allows {max} tab; close a tab or upgrade to create more")]
     TabLimitReached { max: u32 },
+    #[error("tab {tab_id} was not found")]
+    TabNotFound { tab_id: String },
+    #[error("cannot close the last tab in the session")]
+    CannotCloseLastTab,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,6 +155,40 @@ impl MachineSession {
         Ok(self.tabs.last().expect("tab was just pushed"))
     }
 
+    pub fn rename_tab(
+        &mut self,
+        tab_id: &str,
+        title: String,
+    ) -> std::result::Result<(), SessionError> {
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| SessionError::TabNotFound {
+                tab_id: tab_id.to_string(),
+            })?;
+        tab.title = title;
+        tab.last_activity_at = now_string();
+        self.updated_at = now_string();
+        Ok(())
+    }
+
+    pub fn close_tab(&mut self, tab_id: &str) -> std::result::Result<(), SessionError> {
+        if self.tabs.len() <= 1 {
+            return Err(SessionError::CannotCloseLastTab);
+        }
+        let index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or_else(|| SessionError::TabNotFound {
+                tab_id: tab_id.to_string(),
+            })?;
+        self.tabs.remove(index);
+        self.updated_at = now_string();
+        Ok(())
+    }
+
     pub fn to_proto(&self) -> v1::SessionState {
         v1::SessionState {
             tabs: self.tabs.iter().map(TerminalTab::to_proto).collect(),
@@ -222,6 +260,22 @@ pub fn create_tab(title: String) -> Result<MachineSession> {
     let store = StateStore::from_env_or_default()?;
     let mut session = store.load_or_create()?;
     session.create_tab(title)?;
+    store.save(&session)?;
+    Ok(session)
+}
+
+pub fn rename_tab(tab_id: &str, title: String) -> Result<MachineSession> {
+    let store = StateStore::from_env_or_default()?;
+    let mut session = store.load_or_create()?;
+    session.rename_tab(tab_id, title)?;
+    store.save(&session)?;
+    Ok(session)
+}
+
+pub fn close_tab(tab_id: &str) -> Result<MachineSession> {
+    let store = StateStore::from_env_or_default()?;
+    let mut session = store.load_or_create()?;
+    session.close_tab(tab_id)?;
     store.save(&session)?;
     Ok(session)
 }
@@ -319,6 +373,44 @@ impl DaemonRuntime {
 
     async fn session_state(&self) -> v1::SessionState {
         self.session.lock().await.to_proto()
+    }
+
+    async fn create_tab(&self, title: String) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            let tab = session.create_tab(title)?;
+            self.ptys.lock().await.push(RuntimeTab {
+                tab_id: tab.id.clone(),
+                pty: None,
+            });
+            self.state_store.save(&session)?;
+        }
+        self.ensure_ptys().await?;
+        Ok(self.session_state().await)
+    }
+
+    async fn rename_tab(&self, tab_id: &str, title: String) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.rename_tab(tab_id, title)?;
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
+    async fn close_tab(&self, tab_id: &str) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.close_tab(tab_id)?;
+            self.state_store.save(&session)?;
+        }
+        {
+            let mut ptys = self.ptys.lock().await;
+            if let Some(index) = ptys.iter().position(|tab| tab.tab_id == tab_id) {
+                ptys.remove(index);
+            }
+        }
+        Ok(self.session_state().await)
     }
 
     async fn ensure_ptys(&self) -> Result<()> {
@@ -516,6 +608,17 @@ async fn handle_payload(
                 data,
             }))
         }
+        Some(v1::envelope::Payload::CreateTab(request)) => Some(
+            v1::envelope::Payload::SessionState(runtime.create_tab(request.title).await?),
+        ),
+        Some(v1::envelope::Payload::RenameTab(request)) => {
+            Some(v1::envelope::Payload::SessionState(
+                runtime.rename_tab(&request.tab_id, request.title).await?,
+            ))
+        }
+        Some(v1::envelope::Payload::CloseTab(request)) => Some(
+            v1::envelope::Payload::SessionState(runtime.close_tab(&request.tab_id).await?),
+        ),
         Some(_) => Some(v1::envelope::Payload::Error(v1::Error {
             code: "unsupported_message".to_string(),
             message: "daemon cannot handle this message yet".to_string(),
@@ -626,5 +729,23 @@ mod tests {
         let proto = session.to_proto();
         assert_eq!(proto.tabs.len(), 1);
         assert_eq!(proto.entitlement, Some(nudge_protocol::free_entitlement()));
+    }
+
+    #[test]
+    fn rename_tab_updates_existing_tab() {
+        let mut session = MachineSession::new_default();
+        session
+            .rename_tab("default", "agent".to_string())
+            .expect("default tab should be renamed");
+        assert_eq!(session.tabs[0].title, "agent");
+    }
+
+    #[test]
+    fn close_rejects_last_tab() {
+        let mut session = MachineSession::new_default();
+        let error = session
+            .close_tab("default")
+            .expect_err("closing the last tab should be rejected");
+        assert!(matches!(error, SessionError::CannotCloseLastTab));
     }
 }

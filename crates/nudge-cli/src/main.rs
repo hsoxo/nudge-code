@@ -41,6 +41,22 @@ enum Command {
         #[arg(long, default_value = "shell")]
         title: String,
     },
+    /// Rename a tab through daemon IPC.
+    #[command(hide = true)]
+    RenameTab {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+        /// New tab title.
+        title: String,
+    },
+    /// Close a tab through daemon IPC.
+    #[command(hide = true)]
+    CloseTab {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+    },
     /// Send bytes to a tab pty.
     #[command(hide = true)]
     PtyInput {
@@ -131,8 +147,32 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::CreateTab { title }) => {
-            let session = nudge_daemon::create_tab(title)?;
-            println!("tab created; tabs={}", session.tabs.len());
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::CreateTab(v1::CreateTab {
+                    title,
+                })))
+                .await?;
+            print_session_response(response, "tab created")?;
+        }
+        Some(Command::RenameTab { tab_id, title }) => {
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::RenameTab(v1::RenameTab {
+                    tab_id,
+                    title,
+                })))
+                .await?;
+            print_session_response(response, "tab renamed")?;
+        }
+        Some(Command::CloseTab { tab_id }) => {
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::CloseTab(v1::CloseTab {
+                    tab_id,
+                })))
+                .await?;
+            print_session_response(response, "tab closed")?;
         }
         Some(Command::PtyInput {
             tab_id,
@@ -197,6 +237,20 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_session_response(response: v1::Envelope, ok_message: &str) -> Result<()> {
+    match response.payload {
+        Some(v1::envelope::Payload::SessionState(state)) => {
+            println!("{ok_message}");
+            print_session_state(&state);
+            Ok(())
+        }
+        Some(v1::envelope::Payload::Error(error)) => {
+            anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+        }
+        _ => anyhow::bail!("daemon returned an unexpected session response"),
+    }
 }
 
 async fn ensure_daemon() -> Result<()> {

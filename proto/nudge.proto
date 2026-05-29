@@ -17,6 +17,9 @@ message Envelope {
     TerminalInput terminal_input = 19;
     TerminalOutputRequest terminal_output_request = 20;
     TerminalOutput terminal_output = 21;
+    CreateTab create_tab = 22;
+    RenameTab rename_tab = 23;
+    CloseTab close_tab = 24;
   }
 }
 
@@ -60,6 +63,19 @@ message TerminalOutputRequest {
 message TerminalOutput {
   string tab_id = 1;
   bytes data = 2;
+}
+
+message CreateTab {
+  string title = 1;
+}
+
+message RenameTab {
+  string tab_id = 1;
+  string title = 2;
+}
+
+message CloseTab {
+  string tab_id = 1;
 }
 
 message SessionState {
