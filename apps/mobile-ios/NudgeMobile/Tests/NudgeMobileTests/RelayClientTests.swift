@@ -44,7 +44,7 @@ struct RelayClientTests {
         #expect(bodies[1].contains(#""phoneDeviceId":"phone_1""#))
     }
 
-    @Test func liveRelayClaimBindingWhenConfigured() async throws {
+    @Test func liveRelayClaimAndTerminalSessionWhenConfigured() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["NUDGE_IOS_INTEGRATION"] == "1" else {
             return
@@ -52,8 +52,9 @@ struct RelayClientTests {
         let relayURLValue = try #require(environment["NUDGE_IOS_RELAY_URL"])
         let relayURL = try #require(URL(string: relayURLValue))
         let pairingCode = try #require(environment["NUDGE_IOS_PAIRING_CODE"])
-        let phonePublicKey = environment["NUDGE_IOS_PHONE_PUBLIC_KEY"] ?? "nudge-ios-live-claim-phone-key"
-        let client = HTTPRelayClient(identityStore: MemoryPhoneIdentityStore(publicKey: phonePublicKey))
+        let identityStore = try liveIntegrationIdentityStore(environment: environment)
+        let phonePublicKey = try identityStore.loadOrCreate().publicKey
+        let client = HTTPRelayClient(identityStore: identityStore)
 
         let claim = try await client.claimBinding(code: pairingCode, relayURL: relayURL)
 
@@ -62,6 +63,43 @@ struct RelayClientTests {
         #expect(!claim.daemonDeviceID.isEmpty)
         #expect(!claim.phoneDeviceID.isEmpty)
         #expect(claim.phonePublicKey == phonePublicKey)
+
+        let activeClaim = try await waitForActiveBinding(
+            client: client,
+            claim: claim,
+            relayURL: relayURL
+        )
+        #expect(activeClaim.status == .active)
+        #expect(activeClaim.daemonPublicKey != nil)
+        #expect(activeClaim.phonePublicKey == phonePublicKey)
+
+        try await waitForRelayDaemonSocket(relayURL: relayURL)
+
+        let machine = Machine(
+            id: activeClaim.daemonDeviceID,
+            name: "Live Relay Smoke",
+            relayURL: relayURL,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: MachineBinding(claim: activeClaim)
+        )
+        let session = try await client.openSession(machine: machine)
+        defer {
+            session.close()
+        }
+
+        try await session.requestSessionState()
+        let state = try await receiveSessionState(from: session)
+        let tab = try #require(state.tabs.first)
+        #expect(tab.id == "default")
+
+        try await session.requestTerminalOutput(tabID: tab.id, maxBytes: 8192)
+        let replay = try await receiveTerminalOutput(from: session, requireReplay: true)
+        #expect(replay.tabID == tab.id)
+
+        let marker = "NUDGE_IOS_RELAY_SESSION_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        try await session.sendTerminalInput(tabID: tab.id, text: "echo \(marker)", enter: true)
+        try await waitForInputAcceptedAndTerminalOutput(from: session, containing: marker)
     }
 
     @Test func fetchBindingStatusUsesPhoneDeviceAsParticipant() async throws {
@@ -670,18 +708,158 @@ struct RelayClientTests {
             data: #"{"challenge":{"id":"challenge_1","message":"nudge.relay.websocket.challenge.v1\nphone_1\nbind_1\nchallenge_1\n2026-05-29T00:01:00Z","expiresAt":"2026-05-29T00:01:00Z"}}"#.data(using: .utf8)!
         )
     }
+
+    private func liveIntegrationIdentityStore(environment: [String: String]) throws -> MemoryPhoneIdentityStore {
+        let signingKeyData: Data
+        if let signingKeyBase64 = environment["NUDGE_IOS_PHONE_SIGNING_KEY_BASE64"] {
+            signingKeyData = try #require(Data(base64Encoded: signingKeyBase64))
+            #expect(signingKeyData.count == 32)
+        } else {
+            signingKeyData = Data(repeating: 7, count: 32)
+        }
+        let signingKey = try Curve25519.Signing.PrivateKey(rawRepresentation: signingKeyData)
+        return MemoryPhoneIdentityStore(
+            publicKey: signingKey.publicKey.rawRepresentation.base64EncodedString(),
+            signingKey: signingKeyData,
+            usesRealSignature: true
+        )
+    }
+
+    private func waitForActiveBinding(
+        client: HTTPRelayClient,
+        claim: BindingClaim,
+        relayURL: URL
+    ) async throws -> BindingClaim {
+        var current = claim
+        for _ in 0..<300 {
+            current = try await client.fetchBindingStatus(
+                binding: MachineBinding(claim: current),
+                relayURL: relayURL
+            )
+            if current.status == .active {
+                return current
+            }
+            if current.status == .revoked {
+                throw LiveRelayIntegrationError.bindingRevoked
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LiveRelayIntegrationError.timeout("timed out waiting for active binding")
+    }
+
+    private func waitForRelayDaemonSocket(relayURL: URL) async throws {
+        let readyURL = relayURL.appending(path: "/readyz")
+        for _ in 0..<150 {
+            if let (data, response) = try? await URLSession.shared.data(from: readyURL),
+               let httpResponse = response as? HTTPURLResponse,
+               (200..<300).contains(httpResponse.statusCode),
+               let readiness = try? JSONDecoder().decode(RelayReadiness.self, from: data),
+               readiness.sockets >= 1 {
+                return
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LiveRelayIntegrationError.timeout("timed out waiting for daemon relay websocket")
+    }
+
+    private func receiveSessionState(from session: any RelaySession) async throws -> RemoteSessionState {
+        for _ in 0..<40 {
+            let event = try await receiveRelayEvent(from: session)
+            if case .sessionState(let state) = event {
+                return state
+            }
+        }
+        throw LiveRelayIntegrationError.timeout("timed out waiting for session state")
+    }
+
+    private func receiveTerminalOutput(
+        from session: any RelaySession,
+        requireReplay: Bool = false
+    ) async throws -> TerminalOutput {
+        for _ in 0..<40 {
+            let event = try await receiveRelayEvent(from: session)
+            if case .terminalOutput(let output) = event,
+               !requireReplay || output.isReplay {
+                return output
+            }
+        }
+        throw LiveRelayIntegrationError.timeout("timed out waiting for terminal output")
+    }
+
+    private func waitForInputAcceptedAndTerminalOutput(
+        from session: any RelaySession,
+        containing expectedText: String
+    ) async throws {
+        var accepted = false
+        var outputText = ""
+        for _ in 0..<80 {
+            let event = try await receiveRelayEvent(from: session)
+            switch event {
+            case .terminalInputAccepted:
+                accepted = true
+            case .terminalOutput(let output):
+                outputText += output.text
+            case .terminalSnapshot(let snapshot):
+                outputText += snapshot.text
+            case .sessionState, .agentStatus:
+                break
+            }
+            if accepted && outputText.contains(expectedText) {
+                return
+            }
+        }
+        throw LiveRelayIntegrationError.timeout("timed out waiting for accepted input and live output")
+    }
+
+    private func receiveRelayEvent(from session: any RelaySession) async throws -> RelaySessionEvent {
+        try await withTimeout(seconds: 10) {
+            try await session.receiveEvent()
+        }
+    }
+
+    private func withTimeout<T: Sendable>(
+        seconds: UInt64,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                throw LiveRelayIntegrationError.timeout("operation timed out")
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+}
+
+private struct RelayReadiness: Decodable {
+    var sockets: Int
+}
+
+private enum LiveRelayIntegrationError: Error {
+    case bindingRevoked
+    case timeout(String)
 }
 
 private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
     var publicKey: String
     var signingKey: Data = Data(repeating: 3, count: 32)
+    var usesRealSignature = false
 
     func loadOrCreate() throws -> PhoneIdentity {
         PhoneIdentity(publicKey: publicKey)
     }
 
     func sign(_ message: Data) throws -> Data {
-        Data("signed:\(String(data: message, encoding: .utf8) ?? "")".utf8)
+        if usesRealSignature {
+            let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: signingKey)
+            return try privateKey.signature(for: message)
+        }
+        return Data("signed:\(String(data: message, encoding: .utf8) ?? "")".utf8)
     }
 
     func signingPrivateKeyRaw() throws -> Data {

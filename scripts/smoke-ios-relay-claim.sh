@@ -17,6 +17,7 @@ RELAY_BIN="$ROOT_DIR/packages/relay/dist/index.js"
 PAIRING_FILE="$TMP_DIR/pairing.txt"
 BIND_LOG="$LOG_DIR/bind.log"
 RELAY_LOG="$LOG_DIR/relay.log"
+PHONE_SIGNING_KEY_BASE64="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
 SIMULATOR_UDID="${NUDGE_IOS_SMOKE_SIMULATOR_UDID:-}"
 
 cleanup() {
@@ -35,6 +36,7 @@ cleanup() {
     xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_RELAY_URL >/dev/null 2>&1 || true
     xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_PAIRING_CODE >/dev/null 2>&1 || true
     xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_PHONE_PUBLIC_KEY >/dev/null 2>&1 || true
+    xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_PHONE_SIGNING_KEY_BASE64 >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP_DIR"
 }
@@ -155,14 +157,14 @@ PAIRING_CODE="${PAIRING_URL##*code=}"
 xcrun simctl spawn "$SIMULATOR_UDID" launchctl setenv NUDGE_IOS_INTEGRATION 1
 xcrun simctl spawn "$SIMULATOR_UDID" launchctl setenv NUDGE_IOS_RELAY_URL "$RELAY_URL"
 xcrun simctl spawn "$SIMULATOR_UDID" launchctl setenv NUDGE_IOS_PAIRING_CODE "$PAIRING_CODE"
-xcrun simctl spawn "$SIMULATOR_UDID" launchctl setenv NUDGE_IOS_PHONE_PUBLIC_KEY "nudge-ios-live-claim-phone-key"
+xcrun simctl spawn "$SIMULATOR_UDID" launchctl setenv NUDGE_IOS_PHONE_SIGNING_KEY_BASE64 "$PHONE_SIGNING_KEY_BASE64"
 
 (
   cd "$ROOT_DIR/apps/mobile-ios"
   NUDGE_IOS_INTEGRATION=1 \
   NUDGE_IOS_RELAY_URL="$RELAY_URL" \
   NUDGE_IOS_PAIRING_CODE="$PAIRING_CODE" \
-  NUDGE_IOS_PHONE_PUBLIC_KEY="nudge-ios-live-claim-phone-key" \
+  NUDGE_IOS_PHONE_SIGNING_KEY_BASE64="$PHONE_SIGNING_KEY_BASE64" \
   xcodebuild test \
     -project "$XCODE_PROJECT" \
     -scheme NudgeMobile \
