@@ -5,6 +5,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="${NUDGE_VERSION:-latest}"
 OUT_DIR="${NUDGE_RELEASE_OUT_DIR:-$ROOT_DIR/dist/releases/$VERSION}"
 BINARY="${NUDGE_BINARY:-$ROOT_DIR/target/release/nudge}"
+SIGNING_KEY="${NUDGE_SIGNING_KEY:-}"
 
 case "${NUDGE_TARGET_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}" in
   darwin|macos) TARGET_OS="macos" ;;
@@ -47,3 +48,16 @@ fi
 
 echo "artifact=$OUT_DIR/$ARTIFACT"
 echo "checksum=$OUT_DIR/$ARTIFACT.sha256"
+
+if [ -n "$SIGNING_KEY" ]; then
+  if [ ! -f "$SIGNING_KEY" ]; then
+    echo "signing key not found: $SIGNING_KEY" >&2
+    exit 1
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl is required to sign release artifacts" >&2
+    exit 1
+  fi
+  openssl dgst -sha256 -sign "$SIGNING_KEY" -out "$OUT_DIR/$ARTIFACT.sig" "$OUT_DIR/$ARTIFACT"
+  echo "signature=$OUT_DIR/$ARTIFACT.sig"
+fi

@@ -6,6 +6,9 @@ ARCH="$(uname -m)"
 VERSION="${NUDGE_VERSION:-latest}"
 INSTALL_DIR="${NUDGE_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${NUDGE_RELEASE_BASE_URL:-https://nudgecode.dev/releases}"
+PUBLIC_KEY="${NUDGE_PUBLIC_KEY:-}"
+PUBLIC_KEY_FILE="${NUDGE_PUBLIC_KEY_FILE:-}"
+REQUIRE_SIGNATURE="${NUDGE_REQUIRE_SIGNATURE:-0}"
 
 download() {
   from="$1"
@@ -50,6 +53,20 @@ verify_checksum() {
   fi
 }
 
+verify_signature() {
+  archive="$1"
+  signature_file="$2"
+  public_key_file="$3"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl is required to verify $archive signature" >&2
+    exit 1
+  fi
+  if ! openssl dgst -sha256 -verify "$public_key_file" -signature "$signature_file" "$archive" >/dev/null 2>&1; then
+    echo "signature verification failed for $archive" >&2
+    exit 1
+  fi
+}
+
 case "$OS" in
   darwin) TARGET_OS="macos" ;;
   linux) TARGET_OS="linux" ;;
@@ -65,6 +82,7 @@ esac
 ARTIFACT="nudge-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
 URL="${BASE_URL}/${VERSION}/${ARTIFACT}"
 CHECKSUM_URL="${URL}.sha256"
+SIGNATURE_URL="${URL}.sig"
 
 if [ "${NUDGE_INSTALL_DRY_RUN:-0}" = "1" ]; then
   echo "nudge install dry run"
@@ -72,6 +90,14 @@ if [ "${NUDGE_INSTALL_DRY_RUN:-0}" = "1" ]; then
   echo "install_dir=${INSTALL_DIR}"
   echo "url=${URL}"
   echo "checksum_url=${CHECKSUM_URL}"
+  echo "signature_url=${SIGNATURE_URL}"
+  if [ -n "$PUBLIC_KEY" ] || [ -n "$PUBLIC_KEY_FILE" ]; then
+    echo "signature_verification=enabled"
+  elif [ "$REQUIRE_SIGNATURE" = "1" ]; then
+    echo "signature_verification=required_missing_public_key"
+  else
+    echo "signature_verification=disabled"
+  fi
   exit 0
 fi
 
@@ -90,6 +116,21 @@ if [ "${NUDGE_SKIP_CHECKSUM:-0}" != "1" ]; then
   CHECKSUM_FILE="$TMP_DIR/$ARTIFACT.sha256"
   download "$CHECKSUM_URL" "$CHECKSUM_FILE"
   verify_checksum "$ARCHIVE" "$CHECKSUM_FILE"
+fi
+
+if [ -n "$PUBLIC_KEY" ] || [ -n "$PUBLIC_KEY_FILE" ]; then
+  SIGNATURE_FILE="$TMP_DIR/$ARTIFACT.sig"
+  VERIFY_KEY_FILE="$TMP_DIR/nudge-release-public.pem"
+  download "$SIGNATURE_URL" "$SIGNATURE_FILE"
+  if [ -n "$PUBLIC_KEY_FILE" ]; then
+    cp "$PUBLIC_KEY_FILE" "$VERIFY_KEY_FILE"
+  else
+    printf '%s\n' "$PUBLIC_KEY" > "$VERIFY_KEY_FILE"
+  fi
+  verify_signature "$ARCHIVE" "$SIGNATURE_FILE" "$VERIFY_KEY_FILE"
+elif [ "$REQUIRE_SIGNATURE" = "1" ]; then
+  echo "NUDGE_REQUIRE_SIGNATURE=1 requires NUDGE_PUBLIC_KEY or NUDGE_PUBLIC_KEY_FILE" >&2
+  exit 1
 fi
 
 tar -xzf "$ARCHIVE" -C "$TMP_DIR"

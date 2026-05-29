@@ -436,7 +436,7 @@ Current implementation status:
 - Linux service support writes `~/.config/systemd/user/nudge.service` and uses `systemctl --user enable --now`.
 - `nudge service uninstall --dry-run`, `nudge service status`, and `nudge service logs` have first-pass command wiring.
 - `nudge update` re-runs the native installer from `https://nudgecode.dev/install.sh` by default, supports dry-run, version override, install-dir override, checksum skip forwarding, and local installer paths for tests.
-- GitHub Actions release workflow scaffolding builds and uploads macOS/Linux release artifacts with `.sha256` files and publishes them on tag pushes. Signature verification beyond SHA-256 checksums and hosted `nudgecode.dev` install URL publishing remain open.
+- GitHub Actions release workflow scaffolding builds and uploads macOS/Linux release artifacts with `.sha256` files and publishes them on tag pushes. The packager can additionally emit RSA/SHA-256 `.sig` files when `NUDGE_SIGNING_KEY` is set, the installer can require and verify those signatures with a supplied public key, and CI can sign artifacts when `NUDGE_RELEASE_SIGNING_KEY_PEM` is configured. Hosted `nudgecode.dev` install URL publishing and production signing key distribution remain open.
 
 Tasks:
 

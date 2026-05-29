@@ -50,6 +50,16 @@ jobs:
       - name: Build nudge
         run: cargo build --release -p nudge-cli
 
+      - name: Prepare release signing key
+        env:
+          NUDGE_RELEASE_SIGNING_KEY_PEM: ${{ secrets.NUDGE_RELEASE_SIGNING_KEY_PEM }}
+        run: |
+          if [ -n "$NUDGE_RELEASE_SIGNING_KEY_PEM" ]; then
+            printf '%s\n' "$NUDGE_RELEASE_SIGNING_KEY_PEM" > "$RUNNER_TEMP/nudge-release-signing-key.pem"
+            chmod 600 "$RUNNER_TEMP/nudge-release-signing-key.pem"
+            echo "NUDGE_SIGNING_KEY=$RUNNER_TEMP/nudge-release-signing-key.pem" >> "$GITHUB_ENV"
+          fi
+
       - name: Package release artifact
         run: scripts/package-release.sh
         env:
@@ -67,9 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}
-          path: |
-            dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz
-            dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz.sha256
+          path: dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz*
           if-no-files-found: error
 
   publish-github-release:
