@@ -14,6 +14,7 @@
     "smoke:e2e": "node dist/smoke-e2e-enforcement.js",
     "smoke:free-entitlement": "node dist/smoke-free-entitlement.js",
     "smoke:http-disabled": "node dist/smoke-http-messages-disabled.js",
+    "smoke:key-rotation": "node dist/smoke-key-rotation.js",
     "smoke:persistence": "node dist/smoke-persistence.js",
     "smoke:rate-limit": "node dist/smoke-rate-limit.js",
     "smoke:readyz": "node dist/smoke-readyz.js",

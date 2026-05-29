@@ -16,6 +16,16 @@ export interface SocketSignatureInput {
   challengeStore?: SocketChallengeStore;
 }
 
+export interface DeviceKeyRotationInput {
+  device: SocketSignatureDevice;
+  newPublicKey: string | undefined;
+  signedAt: string | undefined;
+  nonce: string | undefined;
+  signature: string | undefined;
+  nowMs?: number;
+  nonceStore?: SocketNonceStore;
+}
+
 export type SignatureAuthorization =
   | { ok: true }
   | { ok: false; error: string };
@@ -113,6 +123,58 @@ export function verifySocketSignature(input: SocketSignatureInput): SignatureAut
     return { ok: true };
   } catch {
     return { ok: false, error: 'invalid_socket_public_key' };
+  }
+}
+
+export function verifyDeviceKeyRotation(input: DeviceKeyRotationInput): SignatureAuthorization {
+  if (!input.newPublicKey || !input.signedAt || !input.nonce || !input.signature) {
+    return { ok: false, error: 'missing_device_key_rotation_signature' };
+  }
+  if (input.newPublicKey === input.device.publicKey) {
+    return { ok: false, error: 'unchanged_device_public_key' };
+  }
+  if (!/^\d+$/.test(input.signedAt)) {
+    return { ok: false, error: 'invalid_device_key_rotation_timestamp' };
+  }
+  const signedAtMs = Number.parseInt(input.signedAt, 10);
+  const nowMs = input.nowMs ?? Date.now();
+  if (!Number.isSafeInteger(signedAtMs) || Math.abs(nowMs - signedAtMs) > 5 * 60 * 1000) {
+    return { ok: false, error: 'stale_device_key_rotation_signature' };
+  }
+  if (input.nonce.length < 16 || input.nonce.length > 128) {
+    return { ok: false, error: 'invalid_device_key_rotation_nonce' };
+  }
+
+  let signatureBytes: Buffer;
+  try {
+    signatureBytes = Buffer.from(input.signature, 'base64');
+  } catch {
+    return { ok: false, error: 'invalid_device_key_rotation_signature' };
+  }
+  if (signatureBytes.length === 0) {
+    return { ok: false, error: 'invalid_device_key_rotation_signature' };
+  }
+
+  try {
+    createPublicKeyFromBase64(input.newPublicKey);
+    const currentKey = createPublicKeyFromBase64(input.device.publicKey);
+    const message = deviceKeyRotationMessage({
+      deviceId: input.device.id,
+      currentPublicKey: input.device.publicKey,
+      newPublicKey: input.newPublicKey,
+      signedAt: input.signedAt,
+      nonce: input.nonce,
+    });
+    if (!verify(null, Buffer.from(message), currentKey, signatureBytes)) {
+      return { ok: false, error: 'invalid_device_key_rotation_signature' };
+    }
+    const nonceKey = `${input.device.id}\nkey-rotation\n${input.nonce}`;
+    if (input.nonceStore && !input.nonceStore.use(nonceKey, signedAtMs + 5 * 60 * 1000, nowMs)) {
+      return { ok: false, error: 'replayed_device_key_rotation_nonce' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'invalid_device_key_rotation_public_key' };
   }
 }
 
@@ -265,6 +327,23 @@ export function socketChallengeMessage(parts: {
     parts.bindingId,
     parts.challengeId,
     parts.expiresAt,
+  ].join('\n');
+}
+
+export function deviceKeyRotationMessage(parts: {
+  deviceId: string;
+  currentPublicKey: string;
+  newPublicKey: string;
+  signedAt: string;
+  nonce: string;
+}): string {
+  return [
+    'nudge.relay.device_key_rotation.v1',
+    parts.deviceId,
+    parts.currentPublicKey,
+    parts.newPublicKey,
+    parts.signedAt,
+    parts.nonce,
   ].join('\n');
 }
 

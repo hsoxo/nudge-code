@@ -4,7 +4,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
-import { MemorySocketChallengeStore, MemorySocketNonceStore, verifySocketSignature } from './auth.js';
+import {
+  MemorySocketChallengeStore,
+  MemorySocketNonceStore,
+  verifyDeviceKeyRotation,
+  verifySocketSignature,
+} from './auth.js';
 import {
   createRelayStateStore,
   type Binding,
@@ -25,6 +30,7 @@ interface RelayMessage {
 
 type AuditEventType =
   | 'device_registered'
+  | 'device_key_rotated'
   | 'device_revoked'
   | 'binding_started'
   | 'binding_claimed'
@@ -220,6 +226,42 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       device,
       revokedBindings: revokedBindings.map(bindingResponse),
     });
+    return;
+  }
+
+  if (method === 'POST' && url.pathname === '/api/devices/rotate-key') {
+    const body = await readJson<{
+      deviceId?: string;
+      newPublicKey?: string;
+      signedAt?: string;
+      nonce?: string;
+      signature?: string;
+    }>(request);
+    const device = body.deviceId ? devices.get(body.deviceId) : undefined;
+    if (!device) {
+      writeJson(response, 404, { error: 'device_not_registered' });
+      return;
+    }
+    if (!isDeviceActive(device)) {
+      writeJson(response, 403, { error: 'device_revoked' });
+      return;
+    }
+    const authorization = verifyDeviceKeyRotation({
+      device,
+      newPublicKey: body.newPublicKey,
+      signedAt: body.signedAt,
+      nonce: body.nonce,
+      signature: body.signature,
+      nonceStore,
+    });
+    if (!authorization.ok) {
+      writeJson(response, 401, { error: authorization.error });
+      return;
+    }
+    device.publicKey = body.newPublicKey!;
+    await persistRelayState();
+    audit('device_key_rotated', { deviceKind: device.kind, deviceId: device.id });
+    writeJson(response, 200, { device });
     return;
   }
 

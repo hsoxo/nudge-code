@@ -227,6 +227,7 @@ Current implementation status:
 - Relay has device registration, bind start/claim/confirm/revoke, daemon/mobile websocket endpoints, participant route authorization, free one-computer binding enforcement, and message forwarding.
 - Relay revocation closes active participant websockets, rejects new websocket attaches for revoked bindings, and drops queued messages for the revoked binding.
 - Relay device revocation marks the device revoked, revokes every non-revoked binding involving it, closes participant websockets with `device_revoked`, clears queued messages to/from that device, rejects future websocket challenges/attaches and message routes for the revoked device, and records a metadata-only `device_revoked` audit event.
+- Relay device key rotation is available through `POST /api/devices/rotate-key`; a device signs the rotation transcript with its current Ed25519 key, the relay validates the new key, rejects replayed rotation nonces, updates the stored public key, and records a metadata-only `device_key_rotated` audit event. Relay smoke verifies the old key stops authorizing websocket attaches and the new key works.
 - Relay can persist devices and bindings to a local JSON file when `NUDGE_RELAY_STATE_PATH` is set, or to a managed Postgres database when `NUDGE_RELAY_DATABASE_URL` is set. The Postgres path stores relay metadata as one JSONB state document for the first hosted instance; queued messages remain process-local so terminal/control payloads are not written to disk by default.
 - Relay supports Ed25519 signed websocket auth query parameters with in-memory nonce replay rejection in compatibility mode, and can require signatures with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
 - Relay issues short-lived, one-shot websocket auth challenges through `POST /api/ws/challenge`; daemon and iOS sign those challenges before opening their websocket, and hosted deployments can require them with `NUDGE_RELAY_REQUIRE_WS_CHALLENGE=1`.
@@ -492,6 +493,7 @@ Current implementation status:
 - Signed websocket auth supports relay-issued one-shot challenges; daemon and iOS both request and sign challenges before websocket connect, and relay can reject legacy timestamp/nonce auth when challenge enforcement is enabled.
 - Binding revocation propagates to active daemon and iOS sessions through relay websocket errors; both clients stop reconnecting and surface revoked state locally.
 - Device revocation is implemented in the relay for self-revocation or peer revocation by a currently bound participant; it revokes all associated bindings, closes participant websockets with `device_revoked`, clears queued messages to/from that device, rejects future route use by the revoked device, and is covered by relay websocket smoke.
+- Device key rotation is implemented at the relay API/auth layer with current-key-signed rotation transcripts, nonce replay rejection, public-key validation, and websocket attach coverage after rotation. Daemon/iOS automatic rotation UX remains future hardening.
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
 - Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
 - Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
@@ -499,7 +501,7 @@ Current implementation status:
 - Relay E2E payload enforcement can be enabled with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; it rejects plaintext relay payloads and forwards only E2E handshake setup or opaque encrypted envelope payloads.
 - Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon and iOS cover encryption, replay rejection, relay JSON conversion, transcript signature validation, and live relay request/response encryption.
 - Relay hosted mode can be enabled with `NUDGE_RELAY_HOSTED_MODE=1` to require signed/challenged websockets, require E2E relay payloads, and disable legacy HTTP message endpoints together.
-- The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
+- The in-memory challenge, rotation nonce, and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 
 Exit criteria:
 

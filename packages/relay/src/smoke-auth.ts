@@ -1,8 +1,10 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import {
+  deviceKeyRotationMessage,
   MemorySocketChallengeStore,
   MemorySocketNonceStore,
   socketSignatureMessage,
+  verifyDeviceKeyRotation,
   verifySocketSignature,
 } from './auth.js';
 
@@ -13,8 +15,11 @@ const timestamp = String(nowMs);
 const nonce = 'nonce-1234567890';
 
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+const { publicKey: rotatedPublicKey, privateKey: rotatedPrivateKey } = generateKeyPairSync('ed25519');
 const publicKeyBase64 = publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
 const rawPublicKeyBase64 = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+const rotatedPublicKeyBase64 = rotatedPublicKey.export({ format: 'der', type: 'spki' }).toString('base64');
+const rawRotatedPublicKeyBase64 = rotatedPublicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
 const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
 const signature = sign(null, Buffer.from(message), privateKey).toString('base64');
 
@@ -39,6 +44,58 @@ expectOk(verifySocketSignature({
   requireSignature: true,
   nowMs,
 }));
+
+const keyRotationNonceStore = new MemorySocketNonceStore();
+const keyRotationNonce = 'rotation-nonce-1234567890';
+const keyRotationMessage = deviceKeyRotationMessage({
+  deviceId,
+  currentPublicKey: publicKeyBase64,
+  newPublicKey: rawRotatedPublicKeyBase64,
+  signedAt: timestamp,
+  nonce: keyRotationNonce,
+});
+const keyRotationSignature = sign(null, Buffer.from(keyRotationMessage), privateKey).toString('base64');
+expectOk(verifyDeviceKeyRotation({
+  device: { id: deviceId, publicKey: publicKeyBase64 },
+  newPublicKey: rawRotatedPublicKeyBase64,
+  signedAt: timestamp,
+  nonce: keyRotationNonce,
+  signature: keyRotationSignature,
+  nowMs,
+  nonceStore: keyRotationNonceStore,
+}));
+
+expectError(
+  verifyDeviceKeyRotation({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    newPublicKey: rawRotatedPublicKeyBase64,
+    signedAt: timestamp,
+    nonce: keyRotationNonce,
+    signature: keyRotationSignature,
+    nowMs,
+    nonceStore: keyRotationNonceStore,
+  }),
+  'replayed_device_key_rotation_nonce',
+);
+
+const badKeyRotationMessage = deviceKeyRotationMessage({
+  deviceId,
+  currentPublicKey: publicKeyBase64,
+  newPublicKey: rotatedPublicKeyBase64,
+  signedAt: timestamp,
+  nonce: 'rotation-nonce-tampered',
+});
+expectError(
+  verifyDeviceKeyRotation({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    newPublicKey: rotatedPublicKeyBase64,
+    signedAt: timestamp,
+    nonce: 'rotation-nonce-tampered',
+    signature: sign(null, Buffer.from(badKeyRotationMessage), rotatedPrivateKey).toString('base64'),
+    nowMs,
+  }),
+  'invalid_device_key_rotation_signature',
+);
 
 const nonceStore = new MemorySocketNonceStore();
 expectOk(verifySocketSignature({
