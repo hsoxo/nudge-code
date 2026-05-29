@@ -8,15 +8,15 @@ final class AppModel {
 
     var machines: [Machine]
     @ObservationIgnored private var tabsByMachineStorage: [String: [TerminalTab]]
+    private var tabsByMachineRevision = 0
     var tabsByMachine: [String: [TerminalTab]] {
         get {
-            access(keyPath: \.tabsByMachine)
+            _ = tabsByMachineRevision
             return tabsByMachineStorage
         }
         set {
-            withMutation(keyPath: \.tabsByMachine) {
-                tabsByMachineStorage = newValue
-            }
+            tabsByMachineStorage = newValue
+            markTabsChanged()
         }
     }
     var selectedMachineID: String?
@@ -527,9 +527,8 @@ final class AppModel {
     }
 
     private func replaceTabs(_ tabs: [TerminalTab], machineID: String) {
-        withMutation(keyPath: \.tabsByMachine) {
-            tabsByMachineStorage[machineID] = tabs
-        }
+        tabsByMachineStorage[machineID] = tabs
+        markTabsChanged()
     }
 
     private func replaceTab(_ tab: TerminalTab, machineID: String) {
@@ -554,17 +553,18 @@ final class AppModel {
 
     @discardableResult
     private func updateTabs(machineID: String, mutate: (inout [TerminalTab]) -> Bool) -> Bool {
-        var didUpdate = false
-        withMutation(keyPath: \.tabsByMachine) {
-            guard var tabs = tabsByMachineStorage[machineID],
-                  mutate(&tabs)
-            else {
-                return
-            }
-            tabsByMachineStorage[machineID] = tabs
-            didUpdate = true
+        guard var tabs = tabsByMachineStorage[machineID],
+              mutate(&tabs)
+        else {
+            return false
         }
-        return didUpdate
+        tabsByMachineStorage[machineID] = tabs
+        markTabsChanged()
+        return true
+    }
+
+    private func markTabsChanged() {
+        tabsByMachineRevision &+= 1
     }
 
     private func appendBase64Output(_ existingBase64: String, _ newBase64: String) -> String {
