@@ -46,14 +46,66 @@ interface PersistedRelayState {
   updatedAt: string;
 }
 
+type RateLimitResult =
+  | { ok: true }
+  | { ok: false; retryAfterSeconds: number };
+
+class FixedWindowRateLimiter {
+  private readonly attempts = new Map<string, { count: number; resetAt: number }>();
+  private pruneAt = 0;
+
+  constructor(
+    private readonly maxAttempts: number,
+    private readonly windowMs: number,
+  ) {}
+
+  hit(key: string, nowMs = Date.now()): RateLimitResult {
+    if (this.maxAttempts <= 0 || this.windowMs <= 0) {
+      return { ok: true };
+    }
+    this.prune(nowMs);
+    const existing = this.attempts.get(key);
+    if (!existing || existing.resetAt <= nowMs) {
+      this.attempts.set(key, { count: 1, resetAt: nowMs + this.windowMs });
+      return { ok: true };
+    }
+    if (existing.count >= this.maxAttempts) {
+      return {
+        ok: false,
+        retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - nowMs) / 1000)),
+      };
+    }
+    existing.count += 1;
+    return { ok: true };
+  }
+
+  private prune(nowMs: number): void {
+    if (nowMs < this.pruneAt) {
+      return;
+    }
+    this.pruneAt = nowMs + Math.min(this.windowMs, 60_000);
+    for (const [key, attempt] of this.attempts) {
+      if (attempt.resetAt <= nowMs) {
+        this.attempts.delete(key);
+      }
+    }
+  }
+}
+
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
+const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
+const pairingClaimWindowMs = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_RATE_WINDOW_MS', 10 * 60 * 1000);
+const pairingClaimIpLimit = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_IP_LIMIT', 60);
+const pairingClaimCodeLimit = readPositiveIntEnv('NUDGE_PAIRING_CLAIM_CODE_LIMIT', 10);
 const devices = new Map<string, Device>();
 const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
 const sockets = new Map<string, WebSocket>();
 const nonceStore = new MemorySocketNonceStore();
+const pairingClaimIpLimiter = new FixedWindowRateLimiter(pairingClaimIpLimit, pairingClaimWindowMs);
+const pairingClaimCodeLimiter = new FixedWindowRateLimiter(pairingClaimCodeLimit, pairingClaimWindowMs);
 
 loadRelayState();
 
@@ -151,6 +203,16 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
 
   if (method === 'POST' && url.pathname === '/api/bind/claim') {
     const body = await readJson<{ code?: string; phoneDeviceId?: string }>(request);
+    const pairingCode = normalizePairingCode(body.code);
+    const rateLimit = checkPairingClaimRateLimit(request, pairingCode);
+    if (!rateLimit.ok) {
+      response.setHeader('retry-after', String(rateLimit.retryAfterSeconds));
+      writeJson(response, 429, {
+        error: 'pairing_rate_limited',
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
+      });
+      return;
+    }
     const phone = body.phoneDeviceId ? devices.get(body.phoneDeviceId) : undefined;
     if (!phone || phone.kind !== 'phone') {
       writeJson(response, 404, { error: 'phone_not_registered' });
@@ -160,7 +222,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 409, { error: 'free_entitlement_computer_limit' });
       return;
     }
-    const binding = findBindingByCode(body.code);
+    const binding = findBindingByCode(pairingCode);
     if (!binding || binding.status !== 'pending') {
       writeJson(response, 404, { error: 'pairing_code_not_found' });
       return;
@@ -297,10 +359,39 @@ function activeBindingsForPhone(phoneDeviceId: string): Binding[] {
 }
 
 function findBindingByCode(code: string | undefined): Binding | undefined {
-  if (!code) {
+  const normalizedCode = normalizePairingCode(code);
+  if (!normalizedCode) {
     return undefined;
   }
-  return [...bindings.values()].find((binding) => binding.code === code);
+  return [...bindings.values()].find((binding) => binding.code === normalizedCode);
+}
+
+function checkPairingClaimRateLimit(request: IncomingMessage, pairingCode: string | undefined): RateLimitResult {
+  const addressResult = pairingClaimIpLimiter.hit(`ip:${clientAddress(request)}`);
+  if (!addressResult.ok) {
+    return addressResult;
+  }
+  if (!pairingCode) {
+    return { ok: true };
+  }
+  return pairingClaimCodeLimiter.hit(`code:${pairingCode}`);
+}
+
+function normalizePairingCode(code: string | undefined): string | undefined {
+  const normalized = code?.replace(/\s+/g, '').toUpperCase();
+  return normalized ? normalized : undefined;
+}
+
+function clientAddress(request: IncomingMessage): string {
+  if (trustProxyHeaders) {
+    const forwardedFor = request.headers['x-forwarded-for'];
+    const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+    const address = firstForwarded?.split(',')[0]?.trim();
+    if (address) {
+      return address;
+    }
+  }
+  return request.socket.remoteAddress ?? 'unknown';
 }
 
 function isBindingParticipant(binding: Binding, deviceId: string | undefined): deviceId is string {
@@ -430,6 +521,15 @@ function makePairingCode(): string {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {

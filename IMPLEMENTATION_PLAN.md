@@ -227,6 +227,7 @@ Current implementation status:
 - Relay revocation closes active participant websockets, rejects new websocket attaches for revoked bindings, and drops queued messages for the revoked binding.
 - Relay can persist devices and bindings to a local JSON file when `NUDGE_RELAY_STATE_PATH` is set; queued messages remain process-local so terminal/control payloads are not written to disk by default.
 - Relay supports Ed25519 signed websocket auth query parameters with in-memory nonce replay rejection in compatibility mode, and can require signatures with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
+- Relay rate-limits pairing claim attempts by client address and normalized pairing code; this protects the short pairing code from simple online guessing while keeping the limits configurable for hosted deployment.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
 - E2E encrypted envelopes, managed database storage, hosted deployment, server-issued websocket challenges, and daemon/iOS revocation UX remain open.
@@ -458,6 +459,11 @@ Tasks:
 - Add device key rotation design.
 - Add rate limits for pairing attempts.
 
+Current implementation status:
+
+- Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
+- The in-memory limiter is appropriate for the single-process hosted MVP; production multi-instance deployment should move these counters to Redis or the managed data store.
+
 Exit criteria:
 
 - relay cannot route messages between unbound devices.
@@ -502,6 +508,7 @@ Relay tests:
 - E2E envelope relay without plaintext access
 - replayed encrypted payload rejected
 - pairing challenge expiration
+- pairing claim rate limiting
 - one-phone-per-computer enforcement
 - free entitlement one-computer binding enforcement
 - route authorization

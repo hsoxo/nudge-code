@@ -294,6 +294,7 @@ Responsibilities:
 - register devices
 - issue pairing challenges
 - claim and confirm binding
+- rate-limit pairing claim attempts by client address and pairing code
 - enforce one-phone-per-computer rule
 - route messages between bound phone and computer daemon
 - expose presence
@@ -461,6 +462,13 @@ Free version limits:
 - relay rejects a second active computer binding for the same phone account/device
 - daemon rejects a second tab for a free entitlement
 - paid tiers can raise these limits without changing the session model
+
+Pairing claim rate limits:
+
+- apply to every `/api/bind/claim` attempt before code lookup
+- key by client address and normalized pairing code in the hosted MVP
+- return `429 pairing_rate_limited` and `Retry-After` when exceeded
+- move the counters to Redis or managed storage before running multiple relay instances
 
 ## Protocol
 
