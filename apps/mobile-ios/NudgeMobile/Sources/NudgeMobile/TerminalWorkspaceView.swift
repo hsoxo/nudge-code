@@ -14,7 +14,14 @@ struct TerminalWorkspaceView: View {
                 Divider()
             }
             if let tab = model.selectedTab {
-                TerminalView(tab: tab)
+                TerminalView(
+                    tab: tab,
+                    onPhoneProfileMeasured: { profile in
+                        Task {
+                            await model.updatePhoneProfile(profile)
+                        }
+                    }
+                )
                 Divider()
                 WidthModePicker(tab: tab)
                 Divider()
@@ -96,6 +103,7 @@ struct TabStripView: View {
 
 struct TerminalView: View {
     var tab: TerminalTab
+    var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
     var body: some View {
         TerminalWebView(
@@ -103,7 +111,8 @@ struct TerminalView: View {
             widthMode: tab.widthMode,
             profile: tab.profile,
             outputText: tab.pendingOutputText,
-            outputSequence: tab.outputSequence
+            outputSequence: tab.outputSequence,
+            onPhoneProfileMeasured: onPhoneProfileMeasured
         )
             .background(Color.black)
             .overlay(alignment: .topTrailing) {
@@ -119,9 +128,12 @@ struct TerminalWebView: UIViewRepresentable {
     var profile: TerminalProfile
     var outputText: String
     var outputSequence: Int
+    var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
     func makeUIView(context: Context) -> WKWebView {
-        let webView = WKWebView(frame: .zero)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(context.coordinator, name: "phoneProfile")
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.scrollView.bounces = false
         webView.navigationDelegate = context.coordinator
@@ -136,6 +148,7 @@ struct TerminalWebView: UIViewRepresentable {
             profile: profile,
             outputText: outputText,
             outputSequence: outputSequence,
+            onPhoneProfileMeasured: onPhoneProfileMeasured,
             in: webView
         )
     }
@@ -144,12 +157,17 @@ struct TerminalWebView: UIViewRepresentable {
         Coordinator()
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "phoneProfile")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         private var isLoaded = false
         private var pendingSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
         private var lastSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
         private var pendingOutput: (text: String, sequence: Int)?
         private var lastOutputSequence = 0
+        private var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
         func loadTerminal(in webView: WKWebView) {
             guard let url = TerminalWebAssets.indexURL() else {
@@ -165,8 +183,10 @@ struct TerminalWebView: UIViewRepresentable {
             profile: TerminalProfile,
             outputText: String,
             outputSequence: Int,
+            onPhoneProfileMeasured: @escaping (TerminalProfile) -> Void,
             in webView: WKWebView
         ) {
+            self.onPhoneProfileMeasured = onPhoneProfileMeasured
             let snapshot = (text: snapshotText, widthMode: widthMode, profile: profile)
             guard isLoaded else {
                 pendingSnapshot = snapshot
@@ -214,6 +234,19 @@ struct TerminalWebView: UIViewRepresentable {
             webView.evaluateJavaScript(
                 "window.nudgeTerminal && window.nudgeTerminal.writeOutput(\(encodedText));"
             )
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "phoneProfile",
+                  let body = message.body as? [String: Any],
+                  let rows = body["rows"] as? Int,
+                  let cols = body["cols"] as? Int,
+                  rows > 0,
+                  cols > 0
+            else {
+                return
+            }
+            onPhoneProfileMeasured(TerminalProfile(rows: rows, cols: cols))
         }
 
         private static func javascriptString(_ value: String) -> String {

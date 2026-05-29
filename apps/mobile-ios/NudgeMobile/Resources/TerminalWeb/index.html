@@ -62,9 +62,44 @@
     });
 
     term.open(container);
+    let lastReportedPhoneProfile = null;
+    let resizeReportHandle = 0;
 
     function cellWidth() {
       return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
+    }
+
+    function cellHeight() {
+      return term._core?._renderService?.dimensions?.css?.cell?.height || 17;
+    }
+
+    function measuredPhoneProfile() {
+      const cols = Math.max(Math.floor((container.clientWidth - 28) / cellWidth()), 1);
+      const rows = Math.max(Math.floor((container.clientHeight - 28) / cellHeight()), 1);
+      return { rows, cols };
+    }
+
+    function postPhoneProfile(profile) {
+      if (lastReportedPhoneProfile &&
+          lastReportedPhoneProfile.rows === profile.rows &&
+          lastReportedPhoneProfile.cols === profile.cols) {
+        return;
+      }
+      lastReportedPhoneProfile = profile;
+      window.webkit?.messageHandlers?.phoneProfile?.postMessage(profile);
+    }
+
+    function reportPhoneProfile() {
+      if (!container.classList.contains('phone')) {
+        return;
+      }
+      const profile = measuredPhoneProfile();
+      postPhoneProfile(profile);
+    }
+
+    function schedulePhoneProfileReport() {
+      clearTimeout(resizeReportHandle);
+      resizeReportHandle = setTimeout(reportPhoneProfile, 120);
     }
 
     function syncTerminalSize(widthMode, rows, cols) {
@@ -79,7 +114,9 @@
         container.style.removeProperty('--terminal-width');
         term.resize(safeCols, safeRows);
         requestAnimationFrame(() => {
-          term.resize(Math.max(Math.floor((container.clientWidth - 28) / cellWidth()), 1), safeRows);
+          const profile = measuredPhoneProfile();
+          term.resize(profile.cols, profile.rows);
+          postPhoneProfile(profile);
         });
       }
     }
@@ -114,6 +151,8 @@
         followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       }
     };
+
+    new ResizeObserver(schedulePhoneProfileReport).observe(container);
   </script>
 </body>
 </html>

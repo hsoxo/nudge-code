@@ -618,6 +618,70 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.widthMode == .phone)
         #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 32, cols: 48))
     }
+
+    @Test func appModelForwardsMeasuredPhoneProfileThroughOpenRelaySession() async throws {
+        let machine = activeMachine()
+        let session = RecordingRelaySession(suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            phoneProfile: TerminalProfile(rows: 32, cols: 48),
+            relayClient: client
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        try await waitUntil {
+            session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)]
+        }
+        await model.updatePhoneProfile(TerminalProfile(rows: 38, cols: 54))
+        await model.updatePhoneProfile(TerminalProfile(rows: 38, cols: 54))
+
+        #expect(session.phoneProfiles == [
+            TerminalProfile(rows: 32, cols: 48),
+            TerminalProfile(rows: 38, cols: 54)
+        ])
+        #expect(client.phoneProfileRequests.isEmpty)
+        #expect(model.phoneProfile == TerminalProfile(rows: 38, cols: 54))
+
+        syncTask.cancel()
+        await syncTask.value
+    }
+
+    @Test func appModelSendsMeasuredPhoneProfileThroughOneShotRelayWhenSessionIsClosed() async throws {
+        let machine = activeMachine()
+        let returnedTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 40, cols: 58),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let client = RecordingRelayClient(phoneProfileState: RemoteSessionState(tabs: [returnedTab]))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            phoneProfile: TerminalProfile(rows: 32, cols: 48),
+            relayClient: client
+        )
+
+        await model.updatePhoneProfile(TerminalProfile(rows: 40, cols: 58))
+
+        #expect(client.phoneProfileRequests == [PhoneProfileClientRequest(
+            machine: machine,
+            profile: TerminalProfile(rows: 40, cols: 58)
+        )])
+        #expect(model.phoneProfile == TerminalProfile(rows: 40, cols: 58))
+        #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 40, cols: 58))
+    }
 }
 
 private struct RelayClaim: Equatable {

@@ -65,6 +65,33 @@ final class AppModel {
         selectedTabID = tab.id
     }
 
+    func updatePhoneProfile(_ profile: TerminalProfile) async {
+        guard profile.rows > 0,
+              profile.cols > 0,
+              profile != phoneProfile
+        else {
+            return
+        }
+        phoneProfile = profile
+        guard let machine = selectedMachine,
+              machine.binding?.status == .active
+        else {
+            return
+        }
+        do {
+            if let relaySession, relaySessionMachineID == machine.id {
+                try await relaySession.setPhoneProfile(profile)
+            } else {
+                let state = try await relayClient.setPhoneProfile(machine: machine, profile: profile)
+                applyRemoteSessionState(state, machineID: machine.id)
+            }
+        } catch {
+            if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
+                machines[machineIndex].lastSeenText = "Unable to update phone profile"
+            }
+        }
+    }
+
     func updateSelectedTabWidth(_ widthMode: WidthMode) async {
         guard let machineID = selectedMachineID,
               let machine = selectedMachine,

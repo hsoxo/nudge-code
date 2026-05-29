@@ -24,4 +24,13 @@ struct TerminalWebAssetsTests {
         #expect(html.contains("--terminal-width"))
         #expect(html.contains("followCursor(widthMode)"))
     }
+
+    @Test func terminalRendererReportsMeasuredPhoneProfile() throws {
+        let url = try #require(TerminalWebAssets.indexURL())
+        let html = try String(contentsOf: url, encoding: .utf8)
+
+        #expect(html.contains("measuredPhoneProfile()"))
+        #expect(html.contains("messageHandlers?.phoneProfile?.postMessage(profile)"))
+        #expect(html.contains("new ResizeObserver(schedulePhoneProfileReport).observe(container)"))
+    }
 }
