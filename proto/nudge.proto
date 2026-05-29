@@ -20,6 +20,7 @@ message Envelope {
     CreateTab create_tab = 22;
     RenameTab rename_tab = 23;
     CloseTab close_tab = 24;
+    ResizeTab resize_tab = 25;
   }
 }
 
@@ -76,6 +77,12 @@ message RenameTab {
 
 message CloseTab {
   string tab_id = 1;
+}
+
+message ResizeTab {
+  string tab_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
 }
 
 message SessionState {

@@ -79,6 +79,19 @@ enum Command {
         #[arg(long, default_value_t = 4096)]
         max_bytes: u32,
     },
+    /// Resize a tab pty.
+    #[command(hide = true)]
+    ResizeTab {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+        /// Terminal rows.
+        #[arg(long)]
+        rows: u32,
+        /// Terminal columns.
+        #[arg(long)]
+        cols: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -213,6 +226,23 @@ async fn main() -> Result<()> {
                     anyhow::bail!("daemon returned {}: {}", error.code, error.message);
                 }
                 _ => anyhow::bail!("daemon returned an unexpected terminal output response"),
+            }
+        }
+        Some(Command::ResizeTab { tab_id, rows, cols }) => {
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::ResizeTab(v1::ResizeTab {
+                    tab_id,
+                    rows,
+                    cols,
+                })))
+                .await?;
+            match response.payload {
+                Some(v1::envelope::Payload::Ack(ack)) => println!("{}", ack.message),
+                Some(v1::envelope::Payload::Error(error)) => {
+                    anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+                }
+                _ => anyhow::bail!("daemon returned an unexpected resize response"),
             }
         }
         None => {

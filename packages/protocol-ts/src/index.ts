@@ -63,6 +63,12 @@ export interface CloseTab {
   tabId: string;
 }
 
+export interface ResizeTab {
+  tabId: string;
+  rows: number;
+  cols: number;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,

@@ -1,9 +1,11 @@
 use std::io::{Read, Write};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSize {
@@ -19,10 +21,16 @@ impl Default for TerminalSize {
 
 pub struct PtyTab {
     child: Box<dyn Child + Send + Sync>,
-    _master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    control_tx: Option<Sender<PtyCommand>>,
     output: Arc<Mutex<Vec<u8>>>,
     _reader_thread: JoinHandle<()>,
+    _writer_thread: Option<JoinHandle<()>>,
+}
+
+enum PtyCommand {
+    Input(Vec<u8>),
+    Resize(TerminalSize),
+    Shutdown,
 }
 
 impl PtyTab {
@@ -55,6 +63,7 @@ impl PtyTab {
                 .take_writer()
                 .context("failed to take pty writer")?,
         ));
+        let master = pair.master;
         let output = Arc::new(Mutex::new(Vec::new()));
         let reader_output = output.clone();
         let reader_thread = thread::spawn(move || {
@@ -75,22 +84,59 @@ impl PtyTab {
                 }
             }
         });
+        let (control_tx, control_rx) = mpsc::channel();
+        let writer_thread = thread::spawn(move || {
+            let mut pending_resize = None;
+            loop {
+                let command = match pending_resize.take() {
+                    Some(size) => match control_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(PtyCommand::Resize(next_size)) => {
+                            pending_resize = Some(next_size);
+                            continue;
+                        }
+                        Ok(command) => {
+                            let _ = master.resize(to_pty_size(size));
+                            command
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let _ = master.resize(to_pty_size(size));
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match control_rx.recv() {
+                        Ok(command) => command,
+                        Err(_) => break,
+                    },
+                };
+
+                match command {
+                    PtyCommand::Input(data) => {
+                        let mut writer = writer.lock().expect("pty writer lock poisoned");
+                        let _ = writer.write_all(&data);
+                        let _ = writer.flush();
+                    }
+                    PtyCommand::Resize(size) => pending_resize = Some(size),
+                    PtyCommand::Shutdown => break,
+                }
+            }
+        });
 
         Ok(Self {
             child,
-            _master: pair.master,
-            writer,
+            control_tx: Some(control_tx),
             output,
             _reader_thread: reader_thread,
+            _writer_thread: Some(writer_thread),
         })
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().expect("pty writer lock poisoned");
-        writer
-            .write_all(data)
-            .context("failed to write pty input")?;
-        writer.flush().context("failed to flush pty input")
+        self.send_command(PtyCommand::Input(data.to_vec()))
+    }
+
+    pub fn resize(&self, size: TerminalSize) -> Result<()> {
+        self.send_command(PtyCommand::Resize(size))
     }
 
     pub fn output_tail(&self, max_bytes: usize) -> Vec<u8> {
@@ -98,11 +144,34 @@ impl PtyTab {
         let start = output.len().saturating_sub(max_bytes);
         output[start..].to_vec()
     }
+
+    fn send_command(&self, command: PtyCommand) -> Result<()> {
+        self.control_tx
+            .as_ref()
+            .context("pty control queue is closed")?
+            .send(command)
+            .context("failed to send pty control command")
+    }
 }
 
 impl Drop for PtyTab {
     fn drop(&mut self) {
+        if let Some(control_tx) = self.control_tx.take() {
+            let _ = control_tx.send(PtyCommand::Shutdown);
+        }
+        if let Some(writer_thread) = self._writer_thread.take() {
+            let _ = writer_thread.join();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn to_pty_size(size: TerminalSize) -> PtySize {
+    PtySize {
+        rows: size.rows,
+        cols: size.cols,
+        pixel_width: 0,
+        pixel_height: 0,
     }
 }

@@ -450,6 +450,17 @@ impl DaemonRuntime {
             .with_context(|| format!("tab {tab_id} does not have a pty"))?;
         Ok(pty.output_tail(max_bytes))
     }
+
+    async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
+        self.ensure_ptys().await?;
+        let ptys = self.ptys.lock().await;
+        let pty = ptys
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .and_then(|tab| tab.pty.as_ref())
+            .with_context(|| format!("tab {tab_id} does not have a pty"))?;
+        pty.resize(size)
+    }
 }
 
 struct RuntimeTab {
@@ -619,6 +630,16 @@ async fn handle_payload(
         Some(v1::envelope::Payload::CloseTab(request)) => Some(
             v1::envelope::Payload::SessionState(runtime.close_tab(&request.tab_id).await?),
         ),
+        Some(v1::envelope::Payload::ResizeTab(request)) => {
+            let rows = u16::try_from(request.rows).context("rows do not fit in u16")?;
+            let cols = u16::try_from(request.cols).context("cols do not fit in u16")?;
+            runtime
+                .resize_tab(&request.tab_id, TerminalSize { rows, cols })
+                .await?;
+            Some(v1::envelope::Payload::Ack(v1::Ack {
+                message: "resize accepted".to_string(),
+            }))
+        }
         Some(_) => Some(v1::envelope::Payload::Error(v1::Error {
             code: "unsupported_message".to_string(),
             message: "daemon cannot handle this message yet".to_string(),
