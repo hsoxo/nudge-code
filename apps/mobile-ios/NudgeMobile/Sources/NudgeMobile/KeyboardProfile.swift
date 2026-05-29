@@ -5,6 +5,12 @@ struct ShortcutKey: Identifiable, Equatable, Sendable {
     var label: String
     var payload: String
     var submit: Bool = false
+    var requiresConfirmation: Bool = false
+    var confirmationLabel: String?
+
+    var armedLabel: String {
+        confirmationLabel ?? "Confirm \(label)"
+    }
 }
 
 struct KeyboardProfile: Equatable, Sendable {
@@ -55,7 +61,13 @@ struct KeyboardProfile: Equatable, Sendable {
         switch status.state {
         case .needsApproval:
             primary.insert(ShortcutKey(label: "Reject", payload: "n", submit: true), at: 0)
-            primary.insert(ShortcutKey(label: "Approve", payload: "y", submit: true), at: 0)
+            primary.insert(ShortcutKey(
+                label: "Approve",
+                payload: "y",
+                submit: true,
+                requiresConfirmation: true,
+                confirmationLabel: "Confirm Approve"
+            ), at: 0)
             actionTitle = "Confirm"
         case .waitingForInput:
             primary.append(ShortcutKey(label: "Submit", payload: "\r"))

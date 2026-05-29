@@ -395,6 +395,12 @@ Goals:
 
 - make phone interaction fast for shell and coding agents
 
+Current implementation status:
+
+- iOS selects shell, Claude, Codex, Opencode, and OpenClaw shortcut profiles from daemon-provided `AgentStatus`.
+- Waiting states add submit-oriented controls, and approval states expose Approve/Reject controls.
+- Approval actions now include mobile-side friction: the approving shortcut must be armed with a first tap and confirmed with a second tap before sending the approval input.
+
 Tasks:
 
 - Define keyboard profile schema.

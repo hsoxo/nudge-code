@@ -13,6 +13,9 @@ struct KeyboardProfileTests {
         #expect(profile.secondary.contains { $0.label == "Plan" })
         #expect(profile.primary.first { $0.label == "Approve" }?.submit == true)
         #expect(profile.primary.first { $0.label == "Reject" }?.submit == true)
+        #expect(profile.primary.first { $0.label == "Approve" }?.requiresConfirmation == true)
+        #expect(profile.primary.first { $0.label == "Approve" }?.armedLabel == "Confirm Approve")
+        #expect(profile.primary.first { $0.label == "Reject" }?.requiresConfirmation == false)
     }
 
     @Test func codexWaitingAddsSubmitAndCodexShortcuts() {

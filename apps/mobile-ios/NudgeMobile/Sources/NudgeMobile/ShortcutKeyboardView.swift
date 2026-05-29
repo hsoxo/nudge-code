@@ -3,6 +3,7 @@ import SwiftUI
 struct ShortcutKeyboardView: View {
     @Environment(AppModel.self) private var model
     var tab: TerminalTab
+    @State private var armedKeyID: String?
 
     private var profile: KeyboardProfile {
         KeyboardProfile.profile(for: tab.agentStatus)
@@ -41,16 +42,25 @@ struct ShortcutKeyboardView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(keys) { key in
-                    Button(key.label) {
-                        Task {
-                            await model.sendSelectedTabInput(key.payload, enter: key.submit)
-                        }
+                    Button(armedKeyID == key.id ? key.armedLabel : key.label) {
+                        handleShortcut(key)
                     }
                     .buttonStyle(.bordered)
+                    .tint(key.requiresConfirmation ? .orange : nil)
                     .controlSize(.small)
                 }
             }
         }
     }
 
+    private func handleShortcut(_ key: ShortcutKey) {
+        if key.requiresConfirmation, armedKeyID != key.id {
+            armedKeyID = key.id
+            return
+        }
+        armedKeyID = nil
+        Task {
+            await model.sendSelectedTabInput(key.payload, enter: key.submit)
+        }
+    }
 }
