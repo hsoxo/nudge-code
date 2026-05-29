@@ -214,6 +214,8 @@ message BindingState {
   string expires_at = 5;
   string status = 6;
   string bound_phone_id = 7;
+  string daemon_public_key = 8;
+  string phone_public_key = 9;
 }
 
 message AgentStatus {

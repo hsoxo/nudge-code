@@ -13,6 +13,7 @@ npm install
 npm run build
 npm run smoke:audit --workspace @nudge/relay
 npm run smoke:auth --workspace @nudge/relay
+npm run smoke:daemon-control --workspace @nudge/relay
 npm run smoke:e2e --workspace @nudge/relay
 npm run smoke:http-disabled --workspace @nudge/relay
 npm run smoke:persistence --workspace @nudge/relay

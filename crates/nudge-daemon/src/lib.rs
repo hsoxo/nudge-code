@@ -761,6 +761,8 @@ impl BindingState {
             expires_at: self.expires_at.clone(),
             status: self.status.as_str().to_string(),
             bound_phone_id: self.bound_phone_id.clone().unwrap_or_default(),
+            daemon_public_key: self.daemon_public_key.clone().unwrap_or_default(),
+            phone_public_key: self.phone_public_key.clone().unwrap_or_default(),
         }
     }
 }
@@ -969,8 +971,16 @@ fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
         expires_at: binding.expires_at,
         status: binding.status.parse()?,
         bound_phone_id,
-        daemon_public_key: None,
-        phone_public_key: None,
+        daemon_public_key: if binding.daemon_public_key.is_empty() {
+            None
+        } else {
+            Some(binding.daemon_public_key)
+        },
+        phone_public_key: if binding.phone_public_key.is_empty() {
+            None
+        } else {
+            Some(binding.phone_public_key)
+        },
         updated_at: now_string(),
     })
 }

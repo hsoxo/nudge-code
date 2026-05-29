@@ -1,5 +1,15 @@
 import { spawn } from 'node:child_process';
-import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
+  sign,
+  verify,
+  type KeyObject,
+} from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,17 +31,43 @@ interface ChallengeResponse {
 interface RelayMessage {
   type: 'message';
   message: {
+    fromDeviceId?: string;
     payload: {
       type: string;
       requestId?: string;
       ok?: boolean;
       data?: unknown;
+      sessionId?: string;
+      senderDeviceId?: string;
+      recipientDeviceId?: string;
+      messageType?: string;
+      sequence?: string;
+      nonceBase64?: string;
+      ciphertextBase64?: string;
+      senderEphemeralPublicKeyBase64?: string;
+      transcriptSignatureBase64?: string;
+      acceptedAt?: string;
     };
   };
 }
 
+interface E2ESession {
+  sessionId: string;
+  phoneDeviceId: string;
+  daemonDeviceId: string;
+  sendKey: Buffer;
+  receiveKey: Buffer;
+  nextSequence: bigint;
+  highestReceived: bigint;
+  encrypt(messageType: string, payload: unknown): Record<string, string>;
+  decrypt(envelope: RelayMessage['message']['payload']): unknown;
+}
+
 const baseUrl = process.env.NUDGE_RELAY_SMOKE_URL ?? 'http://127.0.0.1:8787';
 const nudgeBin = process.env.NUDGE_SMOKE_NUDGE_BIN ?? join(process.cwd(), '..', '..', 'target', 'debug', 'nudge');
+const textEncoder = new TextEncoder();
+const ed25519SpkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+const x25519SpkiPrefix = Buffer.from('302a300506032b656e032100', 'hex');
 
 async function main(): Promise<void> {
   const tmp = await mkdtemp(join(tmpdir(), 'nudge-daemon-control-'));
@@ -64,38 +100,56 @@ async function main(): Promise<void> {
       'active',
       '--bound-phone-id',
       phoneDevice.id,
+      '--daemon-public-key',
+      daemonPublicKey,
+      '--phone-public-key',
+      phoneIdentity.publicKey,
     ]);
     await runNudge(env, ['restart-tab']);
 
     await waitForDaemonRelay(env);
 
     const phoneSocket = await connectPhone(phoneDevice.id, binding.binding.id, phoneIdentity.privateKey);
+    const e2eSession = await openE2ESession({
+      websocket: phoneSocket,
+      phoneDeviceId: phoneDevice.id,
+      daemonDeviceId: daemonDevice.id,
+      phoneIdentity,
+      daemonPublicKey,
+    });
     phoneSocket.send(JSON.stringify({
       toDeviceId: daemonDevice.id,
-      payload: { type: 'get_state', requestId: 'state-1' },
+      payload: e2eSession.encrypt('get_state', { type: 'get_state', requestId: 'state-1' }),
     }));
-    const stateResponse = await waitForDaemonResponse(phoneSocket, 'state-1');
-    if (!stateResponse.message.payload.ok) {
+    const stateResponse = await waitForEncryptedDaemonResponse(phoneSocket, e2eSession, 'state-1');
+    if (!stateResponse.ok) {
       throw new Error(`state response failed: ${JSON.stringify(stateResponse)}`);
     }
 
     phoneSocket.send(JSON.stringify({
       toDeviceId: daemonDevice.id,
-      payload: { type: 'terminal_input', requestId: 'input-1', tabId: 'default', text: 'echo NUDGE_RELAY_CONTROL', enter: true },
+      payload: e2eSession.encrypt('terminal_input', {
+        type: 'terminal_input',
+        requestId: 'input-1',
+        tabId: 'default',
+        text: 'echo NUDGE_RELAY_CONTROL',
+        enter: true,
+      }),
     }));
-    const inputResponse = await waitForDaemonResponse(phoneSocket, 'input-1');
-    if (!inputResponse.message.payload.ok) {
+    const inputResponse = await waitForEncryptedDaemonResponse(phoneSocket, e2eSession, 'input-1');
+    if (!inputResponse.ok) {
       throw new Error(`input response failed: ${JSON.stringify(inputResponse)}`);
     }
+    const liveOutput = await waitForEncryptedLiveOutput(phoneSocket, e2eSession, 'NUDGE_RELAY_CONTROL');
 
     await sleep(300);
     const output = await runNudge(env, ['pty-output', '--max-bytes', '8192']);
-    if (!output.includes('NUDGE_RELAY_CONTROL')) {
+    if (!output.includes('NUDGE_RELAY_CONTROL') && !liveOutput.includes('NUDGE_RELAY_CONTROL')) {
       throw new Error(`terminal output did not include relay input marker: ${output}`);
     }
 
     phoneSocket.close();
-    console.log(`daemon relay control smoke passed binding=${binding.binding.id}`);
+    console.log(`daemon relay e2e control smoke passed binding=${binding.binding.id}`);
   } finally {
     if (env) {
       try {
@@ -168,6 +222,321 @@ function generateSmokeIdentity(): { publicKey: string; privateKey: KeyObject } {
   };
 }
 
+async function openE2ESession(input: {
+  websocket: WebSocket;
+  phoneDeviceId: string;
+  daemonDeviceId: string;
+  phoneIdentity: { publicKey: string; privateKey: KeyObject };
+  daemonPublicKey: string;
+}): Promise<E2ESession> {
+  const sessionId = `e2e_smoke_${Date.now()}`;
+  const phoneEphemeral = generateKeyPairSync('x25519');
+  const phoneIdentityPublicKey = Buffer.from(input.phoneIdentity.publicKey, 'base64');
+  const start = {
+    type: 'e2e_handshake_start',
+    sessionId,
+    senderDeviceId: input.phoneDeviceId,
+    recipientDeviceId: input.daemonDeviceId,
+    senderIdentityPublicKeyBase64: phoneIdentityPublicKey.toString('base64'),
+    senderEphemeralPublicKeyBase64: rawPublicKey(phoneEphemeral.publicKey).toString('base64'),
+    transcriptSignatureBase64: '',
+    createdAt: new Date().toISOString(),
+  };
+  const startTranscript = handshakeStartTranscript(start);
+  start.transcriptSignatureBase64 = sign(null, startTranscript, input.phoneIdentity.privateKey).toString('base64');
+  input.websocket.send(JSON.stringify({
+    toDeviceId: input.daemonDeviceId,
+    payload: start,
+  }));
+
+  const finishMessage = await waitForMessage(input.websocket, (message): message is RelayMessage => (
+    message.type === 'message' &&
+    message.message?.payload?.type === 'e2e_handshake_finish'
+  ));
+  const finish = finishMessage.message.payload;
+  if (
+    finish.sessionId !== sessionId ||
+    finish.senderDeviceId !== input.daemonDeviceId ||
+    finish.recipientDeviceId !== input.phoneDeviceId ||
+    !finish.senderEphemeralPublicKeyBase64 ||
+    !finish.transcriptSignatureBase64 ||
+    !finish.acceptedAt
+  ) {
+    throw new Error(`invalid e2e handshake finish: ${JSON.stringify(finishMessage)}`);
+  }
+  const finishTranscript = handshakeFinishTranscript(
+    startTranscript,
+    Buffer.from(start.transcriptSignatureBase64, 'base64'),
+    finish as Required<Pick<RelayMessage['message']['payload'], 'sessionId' | 'senderDeviceId' | 'recipientDeviceId' | 'senderEphemeralPublicKeyBase64' | 'acceptedAt'>>,
+  );
+  const daemonIdentityPublicKey = Buffer.from(input.daemonPublicKey, 'base64');
+  if (!verify(null, finishTranscript, publicKeyObjectFromRawEd25519(daemonIdentityPublicKey), Buffer.from(finish.transcriptSignatureBase64, 'base64'))) {
+    throw new Error('invalid e2e handshake finish signature');
+  }
+
+  const daemonEphemeralRaw = Buffer.from(finish.senderEphemeralPublicKeyBase64, 'base64');
+  const sharedSecret = diffieHellman({
+    privateKey: phoneEphemeral.privateKey,
+    publicKey: publicKeyObjectFromRawX25519(daemonEphemeralRaw),
+  });
+  const [sendKey, receiveKey] = deriveDirectionalKeys({
+    sessionId,
+    sharedSecret,
+    phoneEphemeralPublicKey: rawPublicKey(phoneEphemeral.publicKey),
+    daemonEphemeralPublicKey: daemonEphemeralRaw,
+  });
+  return makeE2ESession({
+    sessionId,
+    phoneDeviceId: input.phoneDeviceId,
+    daemonDeviceId: input.daemonDeviceId,
+    sendKey,
+    receiveKey,
+  });
+}
+
+function makeE2ESession(input: {
+  sessionId: string;
+  phoneDeviceId: string;
+  daemonDeviceId: string;
+  sendKey: Buffer;
+  receiveKey: Buffer;
+}): E2ESession {
+  return {
+    ...input,
+    nextSequence: 1n,
+    highestReceived: 0n,
+    encrypt(messageType: string, payload: unknown): Record<string, string> {
+      const sequence = this.nextSequence;
+      this.nextSequence += 1n;
+      const nonce = sequenceNonce(sequence);
+      const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
+      const cipher = createCipheriv('chacha20-poly1305', this.sendKey, nonce, { authTagLength: 16 });
+      cipher.setAAD(
+        associatedData(
+          this.sessionId,
+          this.phoneDeviceId,
+          this.daemonDeviceId,
+          messageType,
+          sequence,
+          nonce,
+        ),
+        { plaintextLength: plaintext.length },
+      );
+      const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+      return {
+        type: 'e2e_envelope',
+        sessionId: this.sessionId,
+        senderDeviceId: this.phoneDeviceId,
+        recipientDeviceId: this.daemonDeviceId,
+        messageType,
+        sequence: sequence.toString(),
+        nonceBase64: nonce.toString('base64'),
+        ciphertextBase64: ciphertext.toString('base64'),
+      };
+    },
+    decrypt(envelope: RelayMessage['message']['payload']): unknown {
+      if (
+        envelope.type !== 'e2e_envelope' ||
+        envelope.sessionId !== this.sessionId ||
+        envelope.senderDeviceId !== this.daemonDeviceId ||
+        envelope.recipientDeviceId !== this.phoneDeviceId ||
+        !envelope.messageType ||
+        !envelope.sequence ||
+        !envelope.nonceBase64 ||
+        !envelope.ciphertextBase64
+      ) {
+        throw new Error(`invalid e2e envelope: ${JSON.stringify(envelope)}`);
+      }
+      const sequence = BigInt(envelope.sequence);
+      if (sequence <= this.highestReceived) {
+        throw new Error('e2e replay detected');
+      }
+      const nonce = Buffer.from(envelope.nonceBase64, 'base64');
+      const ciphertextAndTag = Buffer.from(envelope.ciphertextBase64, 'base64');
+      const ciphertext = ciphertextAndTag.subarray(0, -16);
+      const tag = ciphertextAndTag.subarray(-16);
+      const decipher = createDecipheriv('chacha20-poly1305', this.receiveKey, nonce, { authTagLength: 16 });
+      decipher.setAAD(
+        associatedData(
+          envelope.sessionId,
+          envelope.senderDeviceId,
+          envelope.recipientDeviceId,
+          envelope.messageType,
+          sequence,
+          nonce,
+        ),
+        { plaintextLength: ciphertext.length },
+      );
+      decipher.setAuthTag(tag);
+      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      this.highestReceived = sequence;
+      return JSON.parse(plaintext.toString('utf8')) as unknown;
+    },
+  };
+}
+
+async function waitForEncryptedDaemonResponse(
+  websocket: WebSocket,
+  session: E2ESession,
+  requestId: string,
+): Promise<{ ok?: boolean; data?: unknown }> {
+  while (true) {
+    const message = await waitForMessage(websocket, (candidate): candidate is RelayMessage => (
+      candidate.type === 'message' &&
+      candidate.message?.payload?.type === 'e2e_envelope'
+    ));
+    const payload = session.decrypt(message.message.payload) as { type?: string; requestId?: string; ok?: boolean; data?: unknown };
+    if (payload.type === 'daemon_response' && payload.requestId === requestId) {
+      return payload;
+    }
+  }
+}
+
+async function waitForEncryptedLiveOutput(
+  websocket: WebSocket,
+  session: E2ESession,
+  expectedText: string,
+): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  let combined = '';
+  while (Date.now() < deadline) {
+    const message = await waitForMessage(websocket, (candidate): candidate is RelayMessage => (
+      candidate.type === 'message' &&
+      candidate.message?.payload?.type === 'e2e_envelope'
+    ));
+    const payload = session.decrypt(message.message.payload) as {
+      type?: string;
+      ok?: boolean;
+      data?: { bytesBase64?: string; text?: string };
+    };
+    if (payload.type !== 'daemon_response' || payload.ok !== true) {
+      continue;
+    }
+    if (payload.data?.bytesBase64) {
+      combined += Buffer.from(payload.data.bytesBase64, 'base64').toString('utf8');
+    }
+    if (payload.data?.text) {
+      combined += payload.data.text;
+    }
+    if (combined.includes(expectedText)) {
+      return combined;
+    }
+  }
+  throw new Error(`timed out waiting for encrypted live output containing ${expectedText}`);
+}
+
+function deriveDirectionalKeys(input: {
+  sessionId: string;
+  sharedSecret: Buffer;
+  phoneEphemeralPublicKey: Buffer;
+  daemonEphemeralPublicKey: Buffer;
+}): [Buffer, Buffer] {
+  const salt = Buffer.concat([
+    Buffer.from(input.sessionId, 'utf8'),
+    input.phoneEphemeralPublicKey,
+    input.daemonEphemeralPublicKey,
+  ]);
+  return [
+    Buffer.from(hkdfSync('sha256', input.sharedSecret, salt, Buffer.from('nudge e2e phone-to-daemon v1'), 32)),
+    Buffer.from(hkdfSync('sha256', input.sharedSecret, salt, Buffer.from('nudge e2e daemon-to-phone v1'), 32)),
+  ];
+}
+
+function sequenceNonce(sequence: bigint): Buffer {
+  const nonce = Buffer.alloc(12);
+  nonce.writeBigUInt64BE(sequence, 4);
+  return nonce;
+}
+
+function associatedData(
+  sessionId: string,
+  senderDeviceId: string,
+  recipientDeviceId: string,
+  messageType: string,
+  sequence: bigint,
+  nonce: Buffer,
+): Buffer {
+  const sequenceBytes = Buffer.alloc(8);
+  sequenceBytes.writeBigUInt64BE(sequence);
+  return joinTranscriptFields([
+    Buffer.from('nudge.e2e.envelope.v1', 'utf8'),
+    Buffer.from(sessionId, 'utf8'),
+    Buffer.from(senderDeviceId, 'utf8'),
+    Buffer.from(recipientDeviceId, 'utf8'),
+    Buffer.from(messageType, 'utf8'),
+    sequenceBytes,
+    nonce,
+  ]);
+}
+
+function handshakeStartTranscript(start: {
+  sessionId: string;
+  senderDeviceId: string;
+  recipientDeviceId: string;
+  senderIdentityPublicKeyBase64: string;
+  senderEphemeralPublicKeyBase64: string;
+  createdAt: string;
+}): Buffer {
+  return joinTranscriptFields([
+    Buffer.from('nudge.e2e.handshake.start.v1', 'utf8'),
+    Buffer.from(start.sessionId, 'utf8'),
+    Buffer.from(start.senderDeviceId, 'utf8'),
+    Buffer.from(start.recipientDeviceId, 'utf8'),
+    Buffer.from(start.senderIdentityPublicKeyBase64, 'base64'),
+    Buffer.from(start.senderEphemeralPublicKeyBase64, 'base64'),
+    Buffer.from(start.createdAt, 'utf8'),
+  ]);
+}
+
+function handshakeFinishTranscript(
+  startTranscript: Buffer,
+  startSignature: Buffer,
+  finish: {
+    sessionId: string;
+    senderDeviceId: string;
+    recipientDeviceId: string;
+    senderEphemeralPublicKeyBase64: string;
+    acceptedAt: string;
+  },
+): Buffer {
+  return joinTranscriptFields([
+    Buffer.from('nudge.e2e.handshake.finish.v1', 'utf8'),
+    startTranscript,
+    startSignature,
+    Buffer.from(finish.sessionId, 'utf8'),
+    Buffer.from(finish.senderDeviceId, 'utf8'),
+    Buffer.from(finish.recipientDeviceId, 'utf8'),
+    Buffer.from(finish.senderEphemeralPublicKeyBase64, 'base64'),
+    Buffer.from(finish.acceptedAt, 'utf8'),
+  ]);
+}
+
+function joinTranscriptFields(fields: Buffer[]): Buffer {
+  return Buffer.concat(fields.flatMap((field, index) => (
+    index === fields.length - 1 ? [field] : [field, Buffer.from([0])]
+  )));
+}
+
+function rawPublicKey(publicKey: KeyObject): Buffer {
+  return publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+}
+
+function publicKeyObjectFromRawEd25519(rawPublicKey: Buffer): KeyObject {
+  return createPublicKey({
+    key: Buffer.concat([ed25519SpkiPrefix, rawPublicKey]),
+    format: 'der',
+    type: 'spki',
+  });
+}
+
+function publicKeyObjectFromRawX25519(rawPublicKey: Buffer): KeyObject {
+  return createPublicKey({
+    key: Buffer.concat([x25519SpkiPrefix, rawPublicKey]),
+    format: 'der',
+    type: 'spki',
+  });
+}
+
 async function connectPhone(deviceId: string, bindingId: string, privateKey: KeyObject): Promise<WebSocket> {
   const wsUrl = await signedPhoneWebSocketUrl(deviceId, bindingId, privateKey);
   const websocket = new WebSocket(wsUrl);
@@ -192,14 +561,6 @@ async function signedPhoneWebSocketUrl(deviceId: string, bindingId: string, priv
 async function issueSocketChallenge(deviceId: string, bindingId: string): Promise<ChallengeResponse['challenge']> {
   const response = await postJson<ChallengeResponse>('/api/ws/challenge', { deviceId, bindingId });
   return response.challenge;
-}
-
-async function waitForDaemonResponse(websocket: WebSocket, requestId: string): Promise<RelayMessage> {
-  return waitForMessage(websocket, (message): message is RelayMessage => (
-    message.type === 'message' &&
-    message.message?.payload?.type === 'daemon_response' &&
-    message.message.payload.requestId === requestId
-  ));
 }
 
 function waitForMessage<T extends Record<string, any>>(

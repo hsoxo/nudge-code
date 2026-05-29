@@ -200,6 +200,10 @@ enum Command {
         status: String,
         #[arg(long)]
         bound_phone_id: Option<String>,
+        #[arg(long)]
+        daemon_public_key: Option<String>,
+        #[arg(long)]
+        phone_public_key: Option<String>,
     },
 }
 
@@ -551,6 +555,8 @@ async fn main() -> Result<()> {
             code,
             status,
             bound_phone_id,
+            daemon_public_key,
+            phone_public_key,
         }) => {
             ensure_daemon().await?;
             let binding = BindingState {
@@ -561,8 +567,8 @@ async fn main() -> Result<()> {
                 expires_at: String::new(),
                 status: parse_binding_status(&status)?,
                 bound_phone_id,
-                daemon_public_key: None,
-                phone_public_key: None,
+                daemon_public_key,
+                phone_public_key,
                 updated_at: now_millis().to_string(),
             };
             set_binding_state(binding).await?;

@@ -117,6 +117,8 @@ export interface BindingState {
   expiresAt: string;
   status: BindingStatus;
   boundPhoneId?: string;
+  daemonPublicKey?: string;
+  phonePublicKey?: string;
 }
 
 export interface SetPhoneProfile {
