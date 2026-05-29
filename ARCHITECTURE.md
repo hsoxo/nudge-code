@@ -612,7 +612,7 @@ Baseline:
 - relay stores public identity keys only
 - relay returns peer public identity keys only through authorized binding start/claim/status/confirm/revoke responses
 - every websocket authenticates with a relay-issued signed challenge
-- device key rotation uses a current-key-signed relay transcript over `POST /api/devices/rotate-key`; the relay validates the new Ed25519 public key, rejects replayed rotation nonces, and updates the stored device public key
+- device key rotation uses a current-key-signed relay transcript over `POST /api/devices/rotate-key`; the relay validates the new Ed25519 public key, rejects replayed rotation nonces, and updates the stored device public key. iOS generates a candidate Keychain identity, signs the rotation with the current key, commits the new key only after relay acceptance, and updates the local binding public key.
 - binding is explicit and revocable
 - relay revocation closes participant sockets with `binding_revoked`; daemon and iOS persist/surface revoked local state and stop reconnect loops
 - relay device revocation marks a device revoked, revokes every associated binding, closes active participants with `device_revoked`, clears queued messages to/from the device, and rejects future relay access for that device
@@ -637,7 +637,7 @@ E2E envelope:
 
 Preferred future hardening:
 
-- automatic daemon/iOS key rotation UX and managed storage-backed rotation nonce sharing
+- automatic daemon key rotation, scheduled iOS rotation UX, and managed storage-backed rotation nonce sharing
 - account-level revocation and managed storage-backed device revocation lists
 - extend audit coverage for approval actions after approval flows are first-class protocol messages
 - push notification signing

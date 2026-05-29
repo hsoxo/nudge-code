@@ -6,8 +6,15 @@ struct PhoneIdentity: Equatable, Sendable {
     var publicKey: String
 }
 
+struct PhoneIdentityRotation: Equatable, Sendable {
+    var identity: PhoneIdentity
+    var privateKeyRaw: Data
+}
+
 protocol PhoneIdentityStore: Sendable {
     func loadOrCreate() throws -> PhoneIdentity
+    func generateRotationCandidate() throws -> PhoneIdentityRotation
+    func commitRotation(_ rotation: PhoneIdentityRotation) throws
     func sign(_ message: Data) throws -> Data
     func signingPrivateKeyRaw() throws -> Data
     func reset() throws
@@ -34,6 +41,19 @@ final class KeychainPhoneIdentityStore: PhoneIdentityStore, @unchecked Sendable 
         let data = privateKey.rawRepresentation
         try savePrivateKeyData(data)
         return try identity(from: data)
+    }
+
+    func generateRotationCandidate() throws -> PhoneIdentityRotation {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        return PhoneIdentityRotation(
+            identity: PhoneIdentity(publicKey: privateKey.publicKey.rawRepresentation.base64EncodedString()),
+            privateKeyRaw: privateKey.rawRepresentation
+        )
+    }
+
+    func commitRotation(_ rotation: PhoneIdentityRotation) throws {
+        _ = try identity(from: rotation.privateKeyRaw)
+        try savePrivateKeyData(rotation.privateKeyRaw)
     }
 
     func sign(_ message: Data) throws -> Data {

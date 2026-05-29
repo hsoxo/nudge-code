@@ -135,6 +135,76 @@ struct RelayClientTests {
         #expect(URLProtocolStub.requests.first?.url?.query == "bindingId=bind_1&deviceId=phone_1")
     }
 
+    @Test func rotatePhoneKeySignsCurrentIdentityThenCommitsNewIdentity() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [
+            StubResponse(
+                path: "/api/devices/rotate-key",
+                data: #"{"device":{"id":"phone_1","kind":"phone","publicKey":"phone-new-public-key"}}"#.data(using: .utf8)!
+            )
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let identityStore = MemoryPhoneIdentityStore(publicKey: "phone-old-public-key")
+        identityStore.rotationCandidatePublicKey = "phone-new-public-key"
+        identityStore.rotationCandidateSigningKey = Data(repeating: 4, count: 32)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: identityStore
+        )
+
+        let identity = try await client.rotatePhoneKey(machine: activeMachine)
+
+        #expect(identity.publicKey == "phone-new-public-key")
+        #expect(try identityStore.loadOrCreate().publicKey == "phone-new-public-key")
+        #expect(try identityStore.signingPrivateKeyRaw() == Data(repeating: 4, count: 32))
+        #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/devices/rotate-key"])
+        let requestBody = try #require(URLProtocolStub.requests.first?.jsonBody)
+        #expect(requestBody["deviceId"] as? String == "phone_1")
+        #expect(requestBody["newPublicKey"] as? String == "phone-new-public-key")
+        let signedAt = try #require(requestBody["signedAt"] as? String)
+        let nonce = try #require(requestBody["nonce"] as? String)
+        let signature = try #require(requestBody["signature"] as? String)
+        let signatureBytes = try #require(Data(base64Encoded: signature))
+        let signedMessage = try #require(String(data: signatureBytes, encoding: .utf8))
+        #expect(signedAt.range(of: #"^\d+$"#, options: .regularExpression) != nil)
+        #expect(nonce.hasPrefix("rotation-"))
+        #expect(signedMessage == [
+            "signed:nudge.relay.device_key_rotation.v1",
+            "phone_1",
+            "phone-old-public-key",
+            "phone-new-public-key",
+            signedAt,
+            nonce
+        ].joined(separator: "\n"))
+    }
+
+    @Test func rotatePhoneKeyDoesNotCommitWhenRelayRejects() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [
+            StubResponse(
+                path: "/api/devices/rotate-key",
+                statusCode: 401,
+                data: #"{"error":"invalid_device_key_rotation_signature"}"#.data(using: .utf8)!
+            )
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let identityStore = MemoryPhoneIdentityStore(publicKey: "phone-old-public-key")
+        identityStore.rotationCandidatePublicKey = "phone-new-public-key"
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: identityStore
+        )
+
+        do {
+            _ = try await client.rotatePhoneKey(machine: activeMachine)
+            Issue.record("Expected rotation failure")
+        } catch RelayClientError.badStatus {
+            #expect(try identityStore.loadOrCreate().publicKey == "phone-old-public-key")
+        }
+    }
+
     @Test func fetchSessionStateConnectsMobileSocketAndRequestsState() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [socketChallengeResponse()]
@@ -870,13 +940,44 @@ private enum LiveRelayIntegrationError: Error {
     case timeout(String)
 }
 
-private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
+private final class MemoryPhoneIdentityStore: PhoneIdentityStore, @unchecked Sendable {
     var publicKey: String
     var signingKey: Data = Data(repeating: 3, count: 32)
     var usesRealSignature = false
+    var rotationCandidatePublicKey = "rotated-phone-public-key"
+    var rotationCandidateSigningKey = Data(repeating: 4, count: 32)
+
+    init(
+        publicKey: String,
+        signingKey: Data = Data(repeating: 3, count: 32),
+        usesRealSignature: Bool = false
+    ) {
+        self.publicKey = publicKey
+        self.signingKey = signingKey
+        self.usesRealSignature = usesRealSignature
+    }
 
     func loadOrCreate() throws -> PhoneIdentity {
         PhoneIdentity(publicKey: publicKey)
+    }
+
+    func generateRotationCandidate() throws -> PhoneIdentityRotation {
+        if usesRealSignature {
+            let privateKey = Curve25519.Signing.PrivateKey()
+            return PhoneIdentityRotation(
+                identity: PhoneIdentity(publicKey: privateKey.publicKey.rawRepresentation.base64EncodedString()),
+                privateKeyRaw: privateKey.rawRepresentation
+            )
+        }
+        return PhoneIdentityRotation(
+            identity: PhoneIdentity(publicKey: rotationCandidatePublicKey),
+            privateKeyRaw: rotationCandidateSigningKey
+        )
+    }
+
+    func commitRotation(_ rotation: PhoneIdentityRotation) throws {
+        publicKey = rotation.identity.publicKey
+        signingKey = rotation.privateKeyRaw
     }
 
     func sign(_ message: Data) throws -> Data {
@@ -1206,5 +1307,12 @@ private extension URLRequest {
             return String(data: data, encoding: .utf8) ?? ""
         }
         return ""
+    }
+
+    var jsonBody: [String: Any]? {
+        guard let data = httpBodyString.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }

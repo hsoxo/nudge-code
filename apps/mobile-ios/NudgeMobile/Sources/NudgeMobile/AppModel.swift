@@ -220,6 +220,29 @@ final class AppModel {
         }
     }
 
+    func rotateSelectedMachinePhoneKey() async {
+        guard let machineID = selectedMachineID,
+              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              machines[machineIndex].binding?.status == .active
+        else {
+            return
+        }
+        do {
+            let identity = try await relayClient.rotatePhoneKey(machine: machines[machineIndex])
+            if let currentIndex = machines.firstIndex(where: { $0.id == machineID }),
+               var binding = machines[currentIndex].binding {
+                binding.phonePublicKey = identity.publicKey
+                machines[currentIndex].binding = binding
+                machines[currentIndex].lastSeenText = "phone key rotated"
+                persistStableState()
+            }
+        } catch {
+            if let currentIndex = machines.firstIndex(where: { $0.id == machineID }) {
+                machines[currentIndex].lastSeenText = "Unable to rotate phone key"
+            }
+        }
+    }
+
     func syncSelectedMachineSession() async {
         guard let machineID = selectedMachineID
         else {

@@ -183,6 +183,42 @@ struct BindingClaimTests {
         #expect(model.machines.first == machine)
     }
 
+    @Test func appModelRotatesSelectedMachinePhoneKeyAndPersistsBinding() async throws {
+        let machine = activeMachine()
+        let client = RecordingRelayClient(rotatedPhoneIdentity: PhoneIdentity(publicKey: "phone-new-public-key"))
+        let persistence = RecordingAppModelPersistence()
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            persistence: persistence
+        )
+
+        await model.rotateSelectedMachinePhoneKey()
+
+        #expect(client.phoneKeyRotationRequests == [machine])
+        #expect(model.machines.first?.binding?.phonePublicKey == "phone-new-public-key")
+        #expect(model.machines.first?.lastSeenText == "phone key rotated")
+        let saved = try #require(persistence.savedStates.last)
+        #expect(saved.machines.first?.binding?.phonePublicKey == "phone-new-public-key")
+    }
+
+    @Test func appModelLeavesPhoneKeyUnchangedWhenRotationFails() async throws {
+        let machine = activeMachine()
+        let client = RecordingRelayClient(error: RelayClientError.badStatus)
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+
+        await model.rotateSelectedMachinePhoneKey()
+
+        #expect(client.phoneKeyRotationRequests.isEmpty)
+        #expect(model.machines.first?.binding?.phonePublicKey == machine.binding?.phonePublicKey)
+        #expect(model.machines.first?.lastSeenText == "Unable to rotate phone key")
+    }
+
     @Test func appModelAttachesActiveMachineSession() async throws {
         let machine = Machine(
             id: "mac",
@@ -865,6 +901,7 @@ private func activeMachine() -> Machine {
             bindingID: "bind_1",
             daemonDeviceID: "daemon_1",
             phoneDeviceID: "phone_1",
+            phonePublicKey: "phone-public-key",
             status: .active,
             expiresAt: "2026-05-29T00:00:00Z"
         )
@@ -894,7 +931,9 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var snapshotRequests: [TerminalSnapshotRequest] = []
     var phoneProfileRequests: [PhoneProfileClientRequest] = []
     var widthModeRequests: [WidthModeClientRequest] = []
+    var phoneKeyRotationRequests: [Machine] = []
     var statusClaim: BindingClaim
+    var rotatedPhoneIdentity: PhoneIdentity
     var sessionState: RemoteSessionState
     var snapshots: [String: TerminalSnapshot]
     var phoneProfileState: RemoteSessionState
@@ -910,6 +949,7 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         ),
+        rotatedPhoneIdentity: PhoneIdentity = PhoneIdentity(publicKey: "rotated-phone-public-key"),
         sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
         snapshots: [String: TerminalSnapshot] = [:],
         phoneProfileState: RemoteSessionState = RemoteSessionState(tabs: []),
@@ -919,6 +959,7 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
+        self.rotatedPhoneIdentity = rotatedPhoneIdentity
         self.sessionState = sessionState
         self.snapshots = snapshots
         self.phoneProfileState = phoneProfileState
@@ -949,6 +990,14 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         statusRequests.append(BindingStatusRequest(binding: binding, relayURL: relayURL))
         return statusClaim
+    }
+
+    func rotatePhoneKey(machine: Machine) async throws -> PhoneIdentity {
+        if let error {
+            throw error
+        }
+        phoneKeyRotationRequests.append(machine)
+        return rotatedPhoneIdentity
     }
 
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState {

@@ -3,6 +3,7 @@ import Foundation
 protocol RelayClient: Sendable {
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
     func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim
+    func rotatePhoneKey(machine: Machine) async throws -> PhoneIdentity
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
@@ -47,6 +48,43 @@ struct HTTPRelayClient: RelayClient {
         let (data, response) = try await urlSession.data(from: url)
         try validate(response: response)
         return try decodeBindingClaim(from: data)
+    }
+
+    func rotatePhoneKey(machine: Machine) async throws -> PhoneIdentity {
+        guard let binding = machine.binding else {
+            throw RelayClientError.missingBinding
+        }
+        let currentIdentity = try identityStore.loadOrCreate()
+        let rotation = try identityStore.generateRotationCandidate()
+        let signedAt = String(Int64(Date().timeIntervalSince1970 * 1000))
+        let nonce = "rotation-\(UUID().uuidString)"
+        let message = deviceKeyRotationMessage(
+            deviceID: binding.phoneDeviceID,
+            currentPublicKey: currentIdentity.publicKey,
+            newPublicKey: rotation.identity.publicKey,
+            signedAt: signedAt,
+            nonce: nonce
+        )
+        var request = URLRequest(url: machine.relayURL.appending(path: "/api/devices/rotate-key"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(DeviceKeyRotationRequest(
+            deviceId: binding.phoneDeviceID,
+            newPublicKey: rotation.identity.publicKey,
+            signedAt: signedAt,
+            nonce: nonce,
+            signature: try identityStore.sign(Data(message.utf8)).base64EncodedString()
+        ))
+        let (data, response) = try await urlSession.data(for: request)
+        try validate(response: response)
+        let device = try JSONDecoder().decode(DeviceResponse.self, from: data).device
+        guard device.id == binding.phoneDeviceID,
+              device.publicKey == rotation.identity.publicKey
+        else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        try identityStore.commitRotation(rotation)
+        return rotation.identity
     }
 
     func connect(machine: Machine) async throws {
@@ -663,9 +701,18 @@ private struct DeviceRequest: Encodable {
     var publicKey: String
 }
 
+private struct DeviceKeyRotationRequest: Encodable {
+    var deviceId: String
+    var newPublicKey: String
+    var signedAt: String
+    var nonce: String
+    var signature: String
+}
+
 private struct DeviceResponse: Decodable {
     struct Device: Decodable {
         var id: String
+        var publicKey: String?
     }
 
     var device: Device
@@ -702,6 +749,23 @@ private struct SocketChallengeResponse: Decodable {
     }
 
     var challenge: Challenge
+}
+
+private func deviceKeyRotationMessage(
+    deviceID: String,
+    currentPublicKey: String,
+    newPublicKey: String,
+    signedAt: String,
+    nonce: String
+) -> String {
+    [
+        "nudge.relay.device_key_rotation.v1",
+        deviceID,
+        currentPublicKey,
+        newPublicKey,
+        signedAt,
+        nonce
+    ].joined(separator: "\n")
 }
 
 private struct RelaySocketRequest<Payload: Encodable>: Encodable {
