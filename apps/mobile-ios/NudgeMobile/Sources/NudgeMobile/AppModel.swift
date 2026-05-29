@@ -7,7 +7,18 @@ final class AppModel {
     private static let maxReplayOutputBytes = 64 * 1024
 
     var machines: [Machine]
-    var tabsByMachine: [String: [TerminalTab]]
+    @ObservationIgnored private var tabsByMachineStorage: [String: [TerminalTab]]
+    var tabsByMachine: [String: [TerminalTab]] {
+        get {
+            access(keyPath: \.tabsByMachine)
+            return tabsByMachineStorage
+        }
+        set {
+            withMutation(keyPath: \.tabsByMachine) {
+                tabsByMachineStorage = newValue
+            }
+        }
+    }
     var selectedMachineID: String?
     var selectedTabID: String?
     var bindingDraft: BindingDraft?
@@ -34,7 +45,7 @@ final class AppModel {
         let initialTabID = selectedTabID ?? tabsByMachine[initialMachineID ?? ""]?.first?.id
 
         self.machines = machines
-        self.tabsByMachine = tabsByMachine
+        self.tabsByMachineStorage = tabsByMachine
         self.selectedMachineID = initialMachineID
         self.selectedTabID = initialTabID
         self.bindingDraft = bindingDraft
@@ -477,9 +488,9 @@ final class AppModel {
     }
 
     private func replaceTabs(_ tabs: [TerminalTab], machineID: String) {
-        var nextTabsByMachine = tabsByMachine
-        nextTabsByMachine[machineID] = tabs
-        tabsByMachine = nextTabsByMachine
+        withMutation(keyPath: \.tabsByMachine) {
+            tabsByMachineStorage[machineID] = tabs
+        }
     }
 
     private func replaceTab(_ tab: TerminalTab, machineID: String) {
@@ -504,15 +515,17 @@ final class AppModel {
 
     @discardableResult
     private func updateTabs(machineID: String, mutate: (inout [TerminalTab]) -> Bool) -> Bool {
-        var nextTabsByMachine = tabsByMachine
-        guard var tabs = nextTabsByMachine[machineID],
-              mutate(&tabs)
-        else {
-            return false
+        var didUpdate = false
+        withMutation(keyPath: \.tabsByMachine) {
+            guard var tabs = tabsByMachineStorage[machineID],
+                  mutate(&tabs)
+            else {
+                return
+            }
+            tabsByMachineStorage[machineID] = tabs
+            didUpdate = true
         }
-        nextTabsByMachine[machineID] = tabs
-        tabsByMachine = nextTabsByMachine
-        return true
+        return didUpdate
     }
 
     private func appendBase64Output(_ existingBase64: String, _ newBase64: String) -> String {
