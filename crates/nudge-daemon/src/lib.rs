@@ -1159,41 +1159,72 @@ fn looks_like_shell_prompt(text: &str) -> bool {
 struct ProcessEntry {
     pid: u32,
     parent_pid: u32,
+    process_group: u32,
     foreground: bool,
     command: String,
 }
 
 fn foreground_process_signal(
     child_pid: Option<u32>,
+    foreground_process_group: Option<u32>,
     fallback_command: Option<&str>,
 ) -> Option<ProcessSignal> {
     let fallback = fallback_command.map(|command| ProcessSignal::new(command, child_pid));
-    let child_pid = child_pid?;
-    let entries = process_entries().ok()?;
-    process_signal_from_entries(child_pid, &entries).or(fallback)
+    let Some(child_pid) = child_pid else {
+        return fallback;
+    };
+    let Ok(entries) = process_entries() else {
+        return fallback;
+    };
+    process_signal_from_entries(child_pid, foreground_process_group, &entries).or(fallback)
 }
 
-fn process_signal_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Option<ProcessSignal> {
+fn process_signal_from_entries(
+    root_pid: u32,
+    foreground_process_group: Option<u32>,
+    entries: &[ProcessEntry],
+) -> Option<ProcessSignal> {
     let descendants = process_descendants(root_pid, entries);
-    descendants
+    let direct_foreground_process_group = matching_foreground_process_group(
+        root_pid,
+        &descendants,
+        entries,
+        foreground_process_group,
+    );
+    let is_foreground = |entry: &ProcessEntry| match direct_foreground_process_group {
+        Some(process_group) => entry.process_group == process_group,
+        None => entry.foreground,
+    };
+    let foreground_signal = descendants
         .iter()
         .rev()
-        .find(|entry| entry.foreground && is_agent_command_name(&entry.command))
+        .find(|entry| is_foreground(entry) && is_agent_command_name(&entry.command))
         .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
         .or_else(|| {
             descendants
                 .iter()
                 .rev()
-                .find(|entry| entry.foreground && !is_shell_command_name(&entry.command))
+                .find(|entry| is_foreground(entry) && !is_shell_command_name(&entry.command))
                 .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
         })
         .or_else(|| {
             descendants
                 .iter()
                 .rev()
-                .find(|entry| entry.foreground)
+                .find(|entry| is_foreground(entry))
                 .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
-        })
+        });
+
+    if let Some(process_group) = direct_foreground_process_group {
+        return foreground_signal.or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.pid == root_pid && entry.process_group == process_group)
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        });
+    }
+
+    foreground_signal
         .or_else(|| {
             descendants
                 .iter()
@@ -1216,6 +1247,22 @@ fn process_signal_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Optio
         })
 }
 
+fn matching_foreground_process_group(
+    root_pid: u32,
+    descendants: &[ProcessEntry],
+    entries: &[ProcessEntry],
+    foreground_process_group: Option<u32>,
+) -> Option<u32> {
+    let foreground_process_group = foreground_process_group?;
+    let root_matches = entries
+        .iter()
+        .any(|entry| entry.pid == root_pid && entry.process_group == foreground_process_group);
+    let descendant_matches = descendants
+        .iter()
+        .any(|entry| entry.process_group == foreground_process_group);
+    (root_matches || descendant_matches).then_some(foreground_process_group)
+}
+
 fn process_descendants(root_pid: u32, entries: &[ProcessEntry]) -> Vec<ProcessEntry> {
     let mut result = Vec::new();
     let mut stack = vec![root_pid];
@@ -1233,7 +1280,7 @@ fn process_descendants(root_pid: u32, entries: &[ProcessEntry]) -> Vec<ProcessEn
 
 fn process_entries() -> Result<Vec<ProcessEntry>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,stat=,comm="])
+        .args(["-axo", "pid=,ppid=,pgid=,stat=,comm="])
         .output()
         .context("failed to run ps for process detection")?;
     if !output.status.success() {
@@ -1260,6 +1307,10 @@ fn parse_process_entry(line: &str) -> Result<ProcessEntry> {
         anyhow::bail!("missing process parent pid in ps row: {line}");
     };
     let rest = rest.trim_start();
+    let Some((process_group, rest)) = rest.split_once(char::is_whitespace) else {
+        anyhow::bail!("missing process group in ps row: {line}");
+    };
+    let rest = rest.trim_start();
     let Some((stat, command)) = rest.split_once(char::is_whitespace) else {
         anyhow::bail!("missing process stat in ps row: {line}");
     };
@@ -1274,6 +1325,9 @@ fn parse_process_entry(line: &str) -> Result<ProcessEntry> {
         parent_pid: parent_pid
             .parse()
             .with_context(|| format!("invalid process parent pid in ps row: {line}"))?,
+        process_group: process_group
+            .parse()
+            .with_context(|| format!("invalid process group in ps row: {line}"))?,
         foreground: stat.contains('+'),
         command: command.to_string(),
     })
@@ -1644,7 +1698,11 @@ impl DaemonRuntime {
                         runtime_tab.tab_id.clone(),
                         text,
                         runtime_tab.pty.as_ref().and_then(|pty| {
-                            foreground_process_signal(pty.child_pid(), Some(pty.command_name()))
+                            foreground_process_signal(
+                                pty.child_pid(),
+                                pty.foreground_process_group(),
+                                Some(pty.command_name()),
+                            )
                         }),
                     )
                 })
@@ -1681,7 +1739,11 @@ impl DaemonRuntime {
             .find(|runtime_tab| runtime_tab.tab_id == tab_id)
             .and_then(|runtime_tab| {
                 runtime_tab.pty.as_ref().and_then(|pty| {
-                    foreground_process_signal(pty.child_pid(), Some(pty.command_name()))
+                    foreground_process_signal(
+                        pty.child_pid(),
+                        pty.foreground_process_group(),
+                        Some(pty.command_name()),
+                    )
                 })
             })
     }
@@ -3688,13 +3750,14 @@ mod tests {
     #[test]
     fn process_entries_parse_ps_rows() {
         let entries = parse_process_entries(
-            "  100     1 Ss   /bin/zsh\n  101   100 S+   /Users/me/.local/bin/codex\n",
+            "  100     1   100 Ss   /bin/zsh\n  101   100   101 S+   /Users/me/.local/bin/codex\n",
         )
         .expect("process rows should parse");
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].pid, 101);
         assert_eq!(entries[1].parent_pid, 100);
+        assert_eq!(entries[1].process_group, 101);
         assert!(entries[1].foreground);
         assert_eq!(entries[1].command, "/Users/me/.local/bin/codex");
     }
@@ -3705,24 +3768,27 @@ mod tests {
             ProcessEntry {
                 pid: 100,
                 parent_pid: 1,
+                process_group: 100,
                 foreground: true,
                 command: "zsh".to_string(),
             },
             ProcessEntry {
                 pid: 101,
                 parent_pid: 100,
+                process_group: 101,
                 foreground: true,
                 command: "python".to_string(),
             },
             ProcessEntry {
                 pid: 102,
                 parent_pid: 101,
+                process_group: 101,
                 foreground: true,
                 command: "/opt/homebrew/bin/claude".to_string(),
             },
         ];
 
-        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+        let signal = process_signal_from_entries(100, None, &entries).expect("signal should exist");
 
         assert_eq!(signal.command, "/opt/homebrew/bin/claude");
         assert_eq!(signal.pid, Some(102));
@@ -3734,24 +3800,93 @@ mod tests {
             ProcessEntry {
                 pid: 100,
                 parent_pid: 1,
+                process_group: 100,
                 foreground: true,
                 command: "zsh".to_string(),
             },
             ProcessEntry {
                 pid: 101,
                 parent_pid: 100,
+                process_group: 101,
                 foreground: false,
                 command: "claude".to_string(),
             },
             ProcessEntry {
                 pid: 102,
                 parent_pid: 100,
+                process_group: 102,
                 foreground: true,
                 command: "vim".to_string(),
             },
         ];
 
-        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+        let signal = process_signal_from_entries(100, None, &entries).expect("signal should exist");
+
+        assert_eq!(signal.command, "vim");
+        assert_eq!(signal.pid, Some(102));
+    }
+
+    #[test]
+    fn process_signal_prefers_direct_foreground_process_group() {
+        let entries = vec![
+            ProcessEntry {
+                pid: 100,
+                parent_pid: 1,
+                process_group: 100,
+                foreground: true,
+                command: "zsh".to_string(),
+            },
+            ProcessEntry {
+                pid: 101,
+                parent_pid: 100,
+                process_group: 101,
+                foreground: true,
+                command: "claude".to_string(),
+            },
+            ProcessEntry {
+                pid: 102,
+                parent_pid: 100,
+                process_group: 102,
+                foreground: false,
+                command: "vim".to_string(),
+            },
+        ];
+
+        let signal =
+            process_signal_from_entries(100, Some(102), &entries).expect("signal should exist");
+
+        assert_eq!(signal.command, "vim");
+        assert_eq!(signal.pid, Some(102));
+    }
+
+    #[test]
+    fn process_signal_uses_stat_foreground_when_process_group_is_unmatched() {
+        let entries = vec![
+            ProcessEntry {
+                pid: 100,
+                parent_pid: 1,
+                process_group: 100,
+                foreground: true,
+                command: "zsh".to_string(),
+            },
+            ProcessEntry {
+                pid: 101,
+                parent_pid: 100,
+                process_group: 101,
+                foreground: false,
+                command: "claude".to_string(),
+            },
+            ProcessEntry {
+                pid: 102,
+                parent_pid: 100,
+                process_group: 102,
+                foreground: true,
+                command: "vim".to_string(),
+            },
+        ];
+
+        let signal =
+            process_signal_from_entries(100, Some(999), &entries).expect("signal should exist");
 
         assert_eq!(signal.command, "vim");
         assert_eq!(signal.pid, Some(102));
@@ -3762,11 +3897,13 @@ mod tests {
         let entries = vec![ProcessEntry {
             pid: 100,
             parent_pid: 1,
+            process_group: 100,
             foreground: true,
             command: "zsh".to_string(),
         }];
 
-        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+        let signal =
+            process_signal_from_entries(100, Some(100), &entries).expect("signal should exist");
 
         assert_eq!(signal.command, "zsh");
         assert_eq!(signal.pid, Some(100));

@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSize {
@@ -23,6 +23,7 @@ pub struct PtyTab {
     child: Box<dyn Child + Send + Sync>,
     child_pid: Option<u32>,
     command_name: String,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     control_tx: Option<Sender<PtyCommand>>,
     output: Arc<Mutex<Vec<u8>>>,
     _reader_thread: JoinHandle<()>,
@@ -74,7 +75,7 @@ impl PtyTab {
                 .take_writer()
                 .context("failed to take pty writer")?,
         ));
-        let master = pair.master;
+        let master = Arc::new(Mutex::new(pair.master));
         let output = Arc::new(Mutex::new(Vec::new()));
         let reader_output = output.clone();
         let reader_thread = thread::spawn(move || {
@@ -97,6 +98,7 @@ impl PtyTab {
             }
         });
         let (control_tx, control_rx) = mpsc::channel();
+        let writer_master = master.clone();
         let writer_thread = thread::spawn(move || {
             let mut pending_resize = None;
             loop {
@@ -107,11 +109,17 @@ impl PtyTab {
                             continue;
                         }
                         Ok(command) => {
-                            let _ = master.resize(to_pty_size(size));
+                            let _ = writer_master
+                                .lock()
+                                .expect("pty master lock poisoned")
+                                .resize(to_pty_size(size));
                             command
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = master.resize(to_pty_size(size));
+                            let _ = writer_master
+                                .lock()
+                                .expect("pty master lock poisoned")
+                                .resize(to_pty_size(size));
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -138,6 +146,7 @@ impl PtyTab {
             child,
             child_pid,
             command_name,
+            master,
             control_tx: Some(control_tx),
             output,
             _reader_thread: reader_thread,
@@ -165,6 +174,19 @@ impl PtyTab {
 
     pub fn command_name(&self) -> &str {
         &self.command_name
+    }
+
+    pub fn foreground_process_group(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            let process_group = self.master.lock().ok()?.process_group_leader()?;
+            u32::try_from(process_group).ok()
+        }
+
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     fn send_command(&self, command: PtyCommand) -> Result<()> {
