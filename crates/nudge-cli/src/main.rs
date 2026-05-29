@@ -86,6 +86,13 @@ enum Command {
         #[arg(long, default_value = "default")]
         tab_id: String,
     },
+    /// Print daemon-produced terminal render frame.
+    #[command(hide = true)]
+    RenderFrame {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+    },
     /// Save phone terminal profile in daemon state.
     #[command(hide = true)]
     SetPhoneProfile {
@@ -286,6 +293,30 @@ async fn main() -> Result<()> {
                     anyhow::bail!("daemon returned {}: {}", error.code, error.message);
                 }
                 _ => anyhow::bail!("daemon returned an unexpected snapshot response"),
+            }
+        }
+        Some(Command::RenderFrame { tab_id }) => {
+            ensure_daemon().await?;
+            let response = nudge_daemon::request(envelope(
+                v1::envelope::Payload::TerminalRenderRequest(v1::TerminalRenderRequest { tab_id }),
+            ))
+            .await?;
+            match response.payload {
+                Some(v1::envelope::Payload::TerminalRender(render)) => {
+                    println!(
+                        "render tab={} rows={} cols={} width_mode={} bytes={}",
+                        render.tab_id,
+                        render.rows,
+                        render.cols,
+                        render.width_mode,
+                        render.frame.len()
+                    );
+                    print!("{}", String::from_utf8_lossy(&render.frame));
+                }
+                Some(v1::envelope::Payload::Error(error)) => {
+                    anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+                }
+                _ => anyhow::bail!("daemon returned an unexpected render response"),
             }
         }
         Some(Command::SetPhoneProfile { rows, cols }) => {

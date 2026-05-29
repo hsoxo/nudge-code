@@ -66,6 +66,18 @@ export interface TerminalSnapshot {
   formatted: Uint8Array;
 }
 
+export interface TerminalRenderRequest {
+  tabId: string;
+}
+
+export interface TerminalRender {
+  tabId: string;
+  rows: number;
+  cols: number;
+  frame: Uint8Array;
+  widthMode: 'computer' | 'phone';
+}
+
 export interface PhoneProfile {
   rows: number;
   cols: number;

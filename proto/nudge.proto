@@ -26,6 +26,8 @@ message Envelope {
     TerminalSnapshot terminal_snapshot = 28;
     SetPhoneProfile set_phone_profile = 29;
     SetWidthMode set_width_mode = 30;
+    TerminalRenderRequest terminal_render_request = 31;
+    TerminalRender terminal_render = 32;
   }
 }
 
@@ -116,6 +118,18 @@ message SetWidthMode {
   string mode = 2;
   uint32 computer_rows = 3;
   uint32 computer_cols = 4;
+}
+
+message TerminalRenderRequest {
+  string tab_id = 1;
+}
+
+message TerminalRender {
+  string tab_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+  bytes frame = 4;
+  string width_mode = 5;
 }
 
 message SessionState {

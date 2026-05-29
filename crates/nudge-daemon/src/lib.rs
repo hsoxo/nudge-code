@@ -645,6 +645,35 @@ impl DaemonRuntime {
         })
     }
 
+    async fn terminal_render(&self, tab_id: &str) -> Result<v1::TerminalRender> {
+        let ptys = self.ptys.lock().await;
+        let runtime_tab = ptys
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .with_context(|| format!("tab {tab_id} was not found"))?;
+        let snapshot = runtime_tab
+            .grid
+            .lock()
+            .expect("terminal grid lock poisoned")
+            .snapshot();
+        let width_mode = {
+            let session = self.session.lock().await;
+            session
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| tab.width_mode.as_str().to_string())
+                .unwrap_or_else(|| "computer".to_string())
+        };
+        Ok(v1::TerminalRender {
+            tab_id: tab_id.to_string(),
+            rows: snapshot.rows as u32,
+            cols: snapshot.cols as u32,
+            frame: snapshot.formatted,
+            width_mode,
+        })
+    }
+
     async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
         {
             let mut session = self.session.lock().await;
@@ -873,6 +902,9 @@ async fn handle_payload(
                 runtime.terminal_snapshot(&request.tab_id).await?,
             ))
         }
+        Some(v1::envelope::Payload::TerminalRenderRequest(request)) => Some(
+            v1::envelope::Payload::TerminalRender(runtime.terminal_render(&request.tab_id).await?),
+        ),
         Some(v1::envelope::Payload::SetPhoneProfile(request)) => {
             let rows = u16::try_from(request.rows).context("rows do not fit in u16")?;
             let cols = u16::try_from(request.cols).context("cols do not fit in u16")?;
