@@ -24,6 +24,7 @@ final class AppModel {
     var bindingDraft: BindingDraft?
     var bindingClaimState: BindingClaimState = .idle
     var phoneProfile: TerminalProfile
+    var workspaceNoticeText: String?
     var commandComposer = ""
     private(set) var relaySyncGeneration = 0
     private let relayClient: any RelayClient
@@ -389,7 +390,7 @@ final class AppModel {
         guard let machine = selectedMachine else {
             return
         }
-        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab") {
+        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab", fallbackNoticeText: "Free version is limited to one tab on this computer.") {
             try await relayClient.createTab(machine: machine, title: title)
         }
     }
@@ -427,6 +428,10 @@ final class AppModel {
         await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to restart tab") {
             try await relayClient.restartTab(machine: machine, tabID: tab.id)
         }
+    }
+
+    func clearWorkspaceNotice() {
+        workspaceNoticeText = nil
     }
 
     func parsePairingURL(_ value: String) -> Bool {
@@ -606,14 +611,27 @@ final class AppModel {
     private func applyTabAction(
         machineID: String,
         fallbackErrorText: String,
+        fallbackNoticeText: String? = nil,
         action: () async throws -> RemoteSessionState
     ) async {
         do {
             let state = try await action()
+            workspaceNoticeText = nil
             applyRemoteSessionState(state, machineID: machineID)
         } catch {
+            workspaceNoticeText = tabActionNoticeText(error: error, fallback: fallbackNoticeText ?? fallbackErrorText)
             markMachine(machineID: machineID, state: .online, text: fallbackErrorText)
         }
+    }
+
+    private func tabActionNoticeText(error: Error, fallback: String) -> String {
+        guard case RelayClientError.daemonRejected(let message) = error else {
+            return fallback
+        }
+        if message.contains("free entitlement") || message.contains("max_tabs") || message.contains("tab") {
+            return "Free version is limited to one tab on this computer."
+        }
+        return fallback
     }
 
     private func applyRemoteSessionState(_ state: RemoteSessionState, machineID: String) {

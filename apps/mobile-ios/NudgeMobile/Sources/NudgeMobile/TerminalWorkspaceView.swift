@@ -90,6 +90,23 @@ struct TerminalWorkspaceView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .alert(
+            "Tab Action Failed",
+            isPresented: Binding(
+                get: { model.workspaceNoticeText != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        model.clearWorkspaceNotice()
+                    }
+                }
+            )
+        ) {
+            Button("OK") {
+                model.clearWorkspaceNotice()
+            }
+        } message: {
+            Text(model.workspaceNoticeText ?? "")
+        }
         .task(id: model.relaySyncTaskID) {
             await model.refreshSelectedMachineBinding()
             await model.syncSelectedMachineSession()

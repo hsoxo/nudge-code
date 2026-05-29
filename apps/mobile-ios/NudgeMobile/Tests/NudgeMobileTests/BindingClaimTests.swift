@@ -1000,6 +1000,37 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.title == "Claude")
     }
 
+    @Test func appModelShowsNoticeWhenFreeTabLimitRejectsCreateTab() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let client = RecordingRelayClient(error: RelayClientError.daemonRejected("free entitlement allows 1 tab; close a tab or upgrade to create more"))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.createRemoteTab()
+
+        #expect(client.createTabRequests == [])
+        #expect(model.workspaceNoticeText == "Free version is limited to one tab on this computer.")
+        #expect(model.machines.first?.lastSeenText == "Unable to create tab")
+
+        model.clearWorkspaceNotice()
+
+        #expect(model.workspaceNoticeText == nil)
+    }
+
     @Test func appModelUpdatesWidthThroughOneShotRelayWhenSessionIsClosed() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(
