@@ -195,6 +195,7 @@ struct RelaySocketMessage {
     #[serde(rename = "type")]
     message_type: String,
     message: Option<RelayRoutedMessage>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +312,8 @@ pub enum SessionError {
     UnsupportedWidthMode { mode: String },
     #[error("unsupported binding status {status}")]
     UnsupportedBindingStatus { status: String },
+    #[error("relay binding was revoked")]
+    RelayBindingRevoked,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1626,6 +1629,28 @@ impl DaemonRuntime {
         Ok(self.session_state().await)
     }
 
+    async fn mark_binding_revoked(&self, binding_id: &str) -> Result<()> {
+        let revoked_binding = {
+            let mut session = self.session.lock().await;
+            let Some(binding) = session.binding.clone() else {
+                return Ok(());
+            };
+            if binding.binding_id != binding_id {
+                return Ok(());
+            }
+            let revoked = binding.revoked();
+            session.set_binding(revoked.clone());
+            self.state_store.save(&session)?;
+            revoked
+        };
+        self.set_relay_state(RelayConnectionState::error(
+            &revoked_binding,
+            "binding_revoked".to_string(),
+        ))
+        .await;
+        Ok(())
+    }
+
     async fn device_identity(&self) -> Result<DeviceIdentity> {
         let mut session = self.session.lock().await;
         if session.ensure_device_identity()? {
@@ -1644,6 +1669,10 @@ impl DaemonRuntime {
             .binding
             .clone()
             .filter(|binding| binding.status == BindingStatus::Active)
+    }
+
+    async fn current_binding(&self) -> Option<BindingState> {
+        self.session.lock().await.binding.clone()
     }
 
     async fn running_tab_ids(&self) -> Vec<String> {
@@ -1726,9 +1755,21 @@ async fn relay_connection_loop(runtime: DaemonRuntime) {
             _ = sleep(Duration::from_millis(250)) => {}
         }
 
-        let binding = match runtime.current_active_binding().await {
-            Some(binding) => binding,
-            None => {
+        let binding = match runtime.current_binding().await {
+            Some(binding) if binding.status == BindingStatus::Active => binding,
+            Some(binding) if binding.status == BindingStatus::Revoked => {
+                if active_binding_id.as_deref() != Some(binding.binding_id.as_str()) {
+                    runtime
+                        .set_relay_state(RelayConnectionState::error(
+                            &binding,
+                            "binding_revoked".to_string(),
+                        ))
+                        .await;
+                    active_binding_id = Some(binding.binding_id.clone());
+                }
+                continue;
+            }
+            _ => {
                 if active_binding_id.take().is_some() {
                     runtime
                         .set_relay_state(RelayConnectionState::unbound())
@@ -1746,9 +1787,16 @@ async fn relay_connection_loop(runtime: DaemonRuntime) {
         }
 
         if let Err(error) = connect_relay_once(&runtime, &binding).await {
-            runtime
-                .set_relay_state(RelayConnectionState::error(&binding, format!("{error:#}")))
-                .await;
+            if runtime
+                .current_active_binding()
+                .await
+                .map(|current| current.binding_id == binding.binding_id)
+                .unwrap_or(false)
+            {
+                runtime
+                    .set_relay_state(RelayConnectionState::error(&binding, format!("{error:#}")))
+                    .await;
+            }
             tokio::select! {
                 _ = runtime.shutdown.notified() => break,
                 _ = sleep(Duration::from_secs(1)) => {}
@@ -1822,7 +1870,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                 match message {
                     Some(Ok(message)) => {
                         runtime.mark_relay_message().await;
-                        if let Some(response) = handle_relay_message(runtime, binding, message).await {
+                        if let Some(response) = handle_relay_message(runtime, binding, message).await? {
                             websocket
                                 .send(WebSocketMessage::Text(response.into()))
                                 .await
@@ -1845,9 +1893,16 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         }
     }
 
-    runtime
-        .set_relay_state(RelayConnectionState::disconnected(binding))
-        .await;
+    if runtime
+        .current_active_binding()
+        .await
+        .map(|current| current.binding_id == binding.binding_id)
+        .unwrap_or(false)
+    {
+        runtime
+            .set_relay_state(RelayConnectionState::disconnected(binding))
+            .await;
+    }
     Ok(())
 }
 
@@ -1855,29 +1910,40 @@ async fn handle_relay_message(
     runtime: &DaemonRuntime,
     binding: &BindingState,
     message: WebSocketMessage,
-) -> Option<String> {
+) -> Result<Option<String>> {
     let text = match message {
         WebSocketMessage::Text(text) => text,
-        WebSocketMessage::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok()?.into(),
-        _ => return None,
+        WebSocketMessage::Binary(bytes) => match String::from_utf8(bytes.to_vec()) {
+            Ok(text) => text.into(),
+            Err(_) => return Ok(None),
+        },
+        _ => return Ok(None),
     };
     let relay_message = match serde_json::from_str::<RelaySocketMessage>(&text) {
         Ok(relay_message) => relay_message,
-        Err(_) => return None,
+        Err(_) => return Ok(None),
     };
-    if relay_message.message_type != "message" {
-        return None;
+    if relay_message.message_type == "error"
+        && relay_message.error.as_deref() == Some("binding_revoked")
+    {
+        runtime.mark_binding_revoked(&binding.binding_id).await?;
+        return Err(SessionError::RelayBindingRevoked.into());
     }
-    let routed = relay_message.message?;
+    if relay_message.message_type != "message" {
+        return Ok(None);
+    }
+    let Some(routed) = relay_message.message else {
+        return Ok(None);
+    };
     let response = handle_relay_control_request(runtime, routed.payload).await;
-    Some(relay_response_json(
+    Ok(Some(relay_response_json(
         &routed.from_device_id,
         &routed.id,
         binding,
         &response.request_id,
         response.ok,
         response.payload,
-    ))
+    )))
 }
 
 struct RelayControlResponse {
@@ -2828,6 +2894,45 @@ mod tests {
             & 0o777;
         let _ = fs::remove_dir_all(&root);
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn relay_binding_revoked_error_marks_local_binding_revoked() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-revoked-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string());
+        session.set_binding(binding.clone());
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+
+        let error = handle_relay_message(
+            &runtime,
+            &binding,
+            WebSocketMessage::Text(r#"{"type":"error","error":"binding_revoked"}"#.into()),
+        )
+        .await
+        .expect_err("revocation should break relay connection");
+
+        assert!(error.to_string().contains("relay binding was revoked"));
+        assert!(runtime.current_active_binding().await.is_none());
+        let session = runtime.session.lock().await;
+        assert_eq!(
+            session.binding.as_ref().map(|binding| binding.status),
+            Some(BindingStatus::Revoked)
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

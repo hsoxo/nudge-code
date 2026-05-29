@@ -41,6 +41,7 @@ Current scaffold:
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 - relay-issued signed mobile websocket challenges with the Keychain-backed phone identity.
+- relay revocation handling that marks the machine binding revoked and stops reconnecting.
 
 Still open:
 

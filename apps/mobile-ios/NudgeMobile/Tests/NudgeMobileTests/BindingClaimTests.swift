@@ -447,6 +447,27 @@ struct BindingClaimTests {
         #expect(secondSession.closed)
     }
 
+    @Test func appModelMarksBindingRevokedAndStopsReconnectAfterRelayRevocation() async throws {
+        let machine = activeMachine()
+        let session = RecordingRelaySession(errorWhenReceiving: RelayClientError.bindingRevoked)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            sessionReconnectDelayNanoseconds: 1_000_000
+        )
+
+        await model.syncSelectedMachineSession()
+
+        #expect(client.openSessionRequests == [machine])
+        #expect(session.closed)
+        #expect(model.machines.first?.binding?.status == .revoked)
+        #expect(model.machines.first?.connectionState == .offline)
+        #expect(model.machines.first?.lastSeenText == "binding revoked")
+    }
+
     @Test func appModelUpdatesWidthThroughOpenRelaySession() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(
@@ -766,10 +787,12 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     var closed = false
 
     var suspendWhenEmpty: Bool
+    var errorWhenReceiving: Error?
 
-    init(events: [RelaySessionEvent] = [], suspendWhenEmpty: Bool = false) {
+    init(events: [RelaySessionEvent] = [], suspendWhenEmpty: Bool = false, errorWhenReceiving: Error? = nil) {
         self.events = events
         self.suspendWhenEmpty = suspendWhenEmpty
+        self.errorWhenReceiving = errorWhenReceiving
     }
 
     func requestSessionState() async throws {
@@ -813,6 +836,9 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     }
 
     func receiveEvent() async throws -> RelaySessionEvent {
+        if let errorWhenReceiving {
+            throw errorWhenReceiving
+        }
         if events.isEmpty {
             if suspendWhenEmpty {
                 while true {

@@ -609,6 +609,7 @@ Baseline:
 - relay stores public identity keys only
 - every websocket authenticates with a relay-issued signed challenge
 - binding is explicit and revocable
+- relay revocation closes participant sockets with `binding_revoked`; daemon and iOS persist/surface revoked local state and stop reconnect loops
 - relay enforces route authorization
 - terminal/control payloads are end-to-end encrypted between phone and daemon
 - terminal data is not logged

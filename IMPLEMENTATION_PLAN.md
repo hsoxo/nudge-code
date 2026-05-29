@@ -231,7 +231,8 @@ Current implementation status:
 - Relay rate-limits pairing claim attempts by client address and normalized pairing code; this protects the short pairing code from simple online guessing while keeping the limits configurable for hosted deployment.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
-- E2E encrypted envelopes, managed database storage, hosted deployment, and daemon/iOS revocation UX remain open.
+- Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
+- E2E encrypted envelopes, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -463,6 +464,7 @@ Tasks:
 Current implementation status:
 
 - Signed websocket auth supports relay-issued one-shot challenges; daemon and iOS both request and sign challenges before websocket connect, and relay can reject legacy timestamp/nonce auth when challenge enforcement is enabled.
+- Binding revocation propagates to active daemon and iOS sessions through relay websocket errors; both clients stop reconnecting and surface revoked state locally.
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
 - The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 

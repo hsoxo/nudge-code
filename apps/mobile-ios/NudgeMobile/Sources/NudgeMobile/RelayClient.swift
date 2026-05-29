@@ -225,6 +225,9 @@ struct HTTPRelayClient: RelayClient {
                 return
             }
             if message.type == "error" {
+                if message.error == "binding_revoked" {
+                    throw RelayClientError.bindingRevoked
+                }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
             }
         }
@@ -261,6 +264,9 @@ struct HTTPRelayClient: RelayClient {
             let text = try await socket.receiveString()
             let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
             if message.type == "error" {
+                if message.error == "binding_revoked" {
+                    throw RelayClientError.bindingRevoked
+                }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
             }
             guard message.type == "message",
@@ -291,6 +297,7 @@ enum RelayClientError: Error {
     case badStatus
     case daemonRejected(String)
     case invalidWebSocketMessage
+    case bindingRevoked
     case missingBinding
     case missingPhoneDeviceID
     case unsupportedRelayValue(String)
@@ -478,6 +485,9 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             let text = try await socket.receiveString()
             let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
             if message.type == "error" {
+                if message.error == "binding_revoked" {
+                    throw RelayClientError.bindingRevoked
+                }
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
             }
             guard message.type == "message",

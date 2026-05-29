@@ -140,6 +140,31 @@ struct RelayClientTests {
         #expect(socket.closed)
     }
 
+    @Test func relayErrorBindingRevokedStopsOneShotRequest() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"error","error":"binding_revoked"}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "ios-input" }
+        )
+
+        do {
+            try await client.sendTerminalInput(machine: activeMachine, tabID: "default", text: "echo hi", enter: true)
+            Issue.record("Expected bindingRevoked")
+        } catch RelayClientError.bindingRevoked {
+            #expect(socket.closed)
+        }
+    }
+
     @Test func fetchTerminalSnapshotRequestsSelectedTabSnapshot() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [socketChallengeResponse()]

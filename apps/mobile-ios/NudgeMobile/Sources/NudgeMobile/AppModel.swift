@@ -157,6 +157,10 @@ final class AppModel {
             } catch is CancellationError {
                 closeRelaySession()
                 return
+            } catch RelayClientError.bindingRevoked {
+                closeRelaySession()
+                markMachineBindingRevoked(machineID: machineID)
+                return
             } catch {
                 closeRelaySession()
                 guard activeSelectedMachineIndex(machineID: machineID) != nil else {
@@ -312,6 +316,23 @@ final class AppModel {
         }
         machines[index].connectionState = state
         machines[index].lastSeenText = text
+    }
+
+    private func markMachineBindingRevoked(machineID: String) {
+        guard let index = machines.firstIndex(where: { $0.id == machineID }) else {
+            return
+        }
+        if let binding = machines[index].binding {
+            machines[index].binding = MachineBinding(
+                bindingID: binding.bindingID,
+                daemonDeviceID: binding.daemonDeviceID,
+                phoneDeviceID: binding.phoneDeviceID,
+                status: .revoked,
+                expiresAt: binding.expiresAt
+            )
+        }
+        machines[index].connectionState = .offline
+        machines[index].lastSeenText = "binding revoked"
     }
 
     private func runRelaySession(machineID: String, machine: Machine) async throws {
