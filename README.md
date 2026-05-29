@@ -20,6 +20,7 @@ npm run smoke:persistence --workspace @nudge/relay
 npm run smoke:rate-limit --workspace @nudge/relay
 npm run smoke:readyz --workspace @nudge/relay
 scripts/smoke-ios-relay-claim.sh
+npm run check:handoff
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh
 NUDGE_VERSION=v0.0.0 NUDGE_BINARY=target/debug/nudge scripts/package-release.sh
 NUDGE_VERSION=v0.0.0 scripts/prepare-install-site.sh
