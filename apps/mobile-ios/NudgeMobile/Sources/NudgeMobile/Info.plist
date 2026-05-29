@@ -33,6 +33,13 @@
 	<string>1</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Nudge scans the computer pairing QR code to bind this phone.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Nudge connects to the relay running on your development computer during local testing.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

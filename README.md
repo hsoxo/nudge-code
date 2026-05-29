@@ -20,6 +20,7 @@ npm run smoke:persistence --workspace @nudge/relay
 npm run smoke:rate-limit --workspace @nudge/relay
 npm run smoke:readyz --workspace @nudge/relay
 scripts/smoke-ios-relay-claim.sh
+npm run check:local-first
 npm run check:handoff
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh
 NUDGE_VERSION=v0.0.0 NUDGE_BINARY=target/debug/nudge scripts/package-release.sh
@@ -27,6 +28,8 @@ NUDGE_VERSION=v0.0.0 scripts/prepare-install-site.sh
 scripts/smoke-install.sh
 cd apps/mobile-ios && xcodegen generate --spec project.yml
 ```
+
+For the current local-first target, use [docs/local-first-run.md](/Users/hhe/Projects/code-mule/docs/local-first-run.md). It keeps relay on the development machine and supports either simulator, same-network phone such as `http://10.10.10.xxx:8787`, or a temporary Cloudflare Tunnel URL.
 
 ## Current Local Daemon Checks
 

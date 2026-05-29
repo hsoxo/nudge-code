@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nudge-ios-relay-claim.XXXXXX")"
@@ -17,8 +17,26 @@ RELAY_BIN="$ROOT_DIR/packages/relay/dist/index.js"
 PAIRING_FILE="$TMP_DIR/pairing.txt"
 BIND_LOG="$LOG_DIR/bind.log"
 RELAY_LOG="$LOG_DIR/relay.log"
+RELAY_AUDIT_LOG="$LOG_DIR/relay-audit.jsonl"
 PHONE_SIGNING_KEY_BASE64="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
 SIMULATOR_UDID="${NUDGE_IOS_SMOKE_SIMULATOR_UDID:-}"
+KEEP_LOGS="${NUDGE_IOS_SMOKE_KEEP_LOGS:-0}"
+
+print_logs() {
+  echo "smoke log dir: $LOG_DIR" >&2
+  if [ -f "$RELAY_LOG" ]; then
+    echo "--- relay log ---" >&2
+    cat "$RELAY_LOG" >&2
+  fi
+  if [ -f "$RELAY_AUDIT_LOG" ]; then
+    echo "--- relay audit ---" >&2
+    cat "$RELAY_AUDIT_LOG" >&2
+  fi
+  if [ -f "$BIND_LOG" ]; then
+    echo "--- bind log ---" >&2
+    cat "$BIND_LOG" >&2
+  fi
+}
 
 cleanup() {
   set +e
@@ -38,9 +56,14 @@ cleanup() {
     xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_PHONE_PUBLIC_KEY >/dev/null 2>&1 || true
     xcrun simctl spawn "$SIMULATOR_UDID" launchctl unsetenv NUDGE_IOS_PHONE_SIGNING_KEY_BASE64 >/dev/null 2>&1 || true
   fi
-  rm -rf "$TMP_DIR"
+  if [ "$KEEP_LOGS" = "1" ]; then
+    echo "kept smoke logs at $TMP_DIR" >&2
+  else
+    rm -rf "$TMP_DIR"
+  fi
 }
 trap cleanup EXIT INT TERM
+trap 'print_logs' ERR
 
 require_file() {
   if [ ! -f "$1" ]; then
@@ -108,6 +131,7 @@ NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1 \
 NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1 \
 NUDGE_RELAY_REQUIRE_WS_CHALLENGE=1 \
 NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1 \
+NUDGE_RELAY_AUDIT_PATH="$RELAY_AUDIT_LOG" \
 node "$RELAY_BIN" >"$RELAY_LOG" 2>&1 &
 RELAY_PID="$!"
 

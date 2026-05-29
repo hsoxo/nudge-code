@@ -21,6 +21,8 @@ The first real relay/daemon integration smoke runs the iOS simulator test proces
 ../../scripts/smoke-ios-relay-claim.sh
 ```
 
+For manual local-first testing, run the relay on the development computer and bind with either a simulator-local URL, a same-network LAN URL, or a temporary Cloudflare Tunnel URL. See `../../docs/local-first-run.md`.
+
 Shared protocol types are generated from the repo protobuf schema:
 
 ```sh

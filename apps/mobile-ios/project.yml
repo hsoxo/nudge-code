@@ -33,6 +33,9 @@ targets:
               - nudge
         UILaunchScreen:
           UIColorName: ""
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Nudge connects to the relay running on your development computer during local testing.
         NSCameraUsageDescription: Nudge scans the computer pairing QR code to bind this phone.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

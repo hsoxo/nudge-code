@@ -93,6 +93,7 @@ class FixedWindowRateLimiter {
 }
 
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
+const host = process.env.NUDGE_RELAY_HOST ?? '0.0.0.0';
 const hostedMode = process.env.NUDGE_RELAY_HOSTED_MODE === '1';
 const requireWebSocketSignature = hostedMode || process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const requireWebSocketChallenge = hostedMode || process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
@@ -1113,6 +1114,7 @@ function readiness(): Record<string, unknown> {
       statePersistence: relayStateStore.kind !== 'memory',
       stateStore: relayStateStore.kind,
       auditLog: Boolean(relayAuditPath),
+      host,
       requireWebSocketSignature,
       requireWebSocketChallenge,
       requireE2EPayload,
@@ -1206,8 +1208,8 @@ async function persistRelayState(): Promise<void> {
 
 try {
   await loadRelayState();
-  server.listen(port, () => {
-    console.log(`nudge relay listening on :${port}`);
+  server.listen(port, host, () => {
+    console.log(`nudge relay listening on ${host}:${port}`);
   });
 } catch (error) {
   console.error(error);

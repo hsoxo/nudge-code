@@ -249,12 +249,14 @@ struct HTTPRelayClient: RelayClient {
         let challenge = try await issueSocketChallenge(relayURL: relayURL, binding: binding)
         let signature = try identityStore.sign(Data(challenge.message.utf8)).base64EncodedString()
         components?.path = "/ws/mobile"
-        components?.queryItems = [
-            URLQueryItem(name: "deviceId", value: binding.phoneDeviceID),
-            URLQueryItem(name: "bindingId", value: binding.bindingID),
-            URLQueryItem(name: "authChallengeId", value: challenge.id),
-            URLQueryItem(name: "authChallengeSignature", value: signature)
+        components?.percentEncodedQuery = [
+            ("deviceId", binding.phoneDeviceID),
+            ("bindingId", binding.bindingID),
+            ("authChallengeId", challenge.id),
+            ("authChallengeSignature", signature)
         ]
+            .map { "\($0)=\(percentEncodeQueryValue($1))" }
+            .joined(separator: "&")
         guard let url = components?.url else {
             throw RelayClientError.badURL
         }
@@ -793,6 +795,12 @@ private func deviceKeyRotationMessage(
 private struct RelaySocketRequest<Payload: Encodable>: Encodable {
     var toDeviceId: String
     var payload: Payload
+}
+
+private func percentEncodeQueryValue(_ value: String) -> String {
+    var allowed = CharacterSet.urlQueryAllowed
+    allowed.remove(charactersIn: "+&=")
+    return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
 }
 
 private func encodeSocketRequest<Payload: Encodable>(_ request: RelaySocketRequest<Payload>) throws -> String {

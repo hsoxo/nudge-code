@@ -12,4 +12,5 @@ Current implementation docs:
 
 - `handoff.md`: preflight checks and manual hosted relay/device-test handoff steps.
 - `install.md`: native installer, update, signature verification, and static hosting bundle.
+- `local-first-run.md`: local development relay, simulator smoke, LAN phone, and Cloudflare Tunnel first-run path.
 - `relay-hosted.md`

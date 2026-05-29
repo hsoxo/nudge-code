@@ -9,6 +9,7 @@ interface ReadinessResponse {
   config: {
     hostedMode: boolean;
     statePersistence: boolean;
+    host: string;
     requireWebSocketSignature: boolean;
     requireWebSocketChallenge: boolean;
     requireE2EPayload: boolean;
@@ -40,6 +41,9 @@ async function main(): Promise<void> {
       const ready = await getJson<ReadinessResponse>('/readyz');
       if (!ready.config.hostedMode) {
         throw new Error(`expected hosted mode config, got ${JSON.stringify(ready)}`);
+      }
+      if (ready.config.host !== '127.0.0.1') {
+        throw new Error(`expected configured relay host, got ${JSON.stringify(ready)}`);
       }
       if (!ready.config.statePersistence) {
         throw new Error(`expected persistent state config, got ${JSON.stringify(ready)}`);
@@ -86,6 +90,7 @@ async function startRelay(env: NodeJS.ProcessEnv): Promise<ChildProcess> {
       ...process.env,
       ...env,
       NUDGE_RELAY_PORT: String(port),
+      NUDGE_RELAY_HOST: '127.0.0.1',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });

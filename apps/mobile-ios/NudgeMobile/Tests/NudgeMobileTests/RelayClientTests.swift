@@ -820,6 +820,8 @@ struct RelayClientTests {
         #expect(query["bindingId"] == "bind_1")
         #expect(query["authChallengeId"] == "challenge_1")
         #expect(query["authChallengeSignature"] == Data("signed:nudge.relay.websocket.challenge.v1\nphone_1\nbind_1\nchallenge_1\n2026-05-29T00:01:00Z".utf8).base64EncodedString())
+        #expect(url.absoluteString.contains("authChallengeSignature="))
+        #expect(!url.absoluteString.contains("+"))
     }
 
     private func socketChallengeResponse() -> StubResponse {
