@@ -10,6 +10,20 @@ NUDGE_RELAY_PORT=8787 \
 node packages/relay/dist/index.js
 ```
 
+The repo also includes a production container build for hosts that deploy Node services as containers:
+
+```sh
+docker build -f packages/relay/Dockerfile -t nudge-relay .
+docker run --rm -p 8787:8787 \
+  -e NUDGE_RELAY_STATE_PATH=/var/lib/nudge/relay-state.json \
+  -e NUDGE_RELAY_AUDIT_PATH=/var/log/nudge/relay-audit.jsonl \
+  -v nudge-relay-state:/var/lib/nudge \
+  -v nudge-relay-logs:/var/log/nudge \
+  nudge-relay
+```
+
+The container enables `NUDGE_RELAY_HOSTED_MODE=1` by default.
+
 `NUDGE_RELAY_HOSTED_MODE=1` enables the relay hardening defaults expected for hosted service traffic:
 
 - signed websocket auth is required

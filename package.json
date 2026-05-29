@@ -7,6 +7,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
+    "check:relay-container": "scripts/check-relay-container.sh",
     "relay:start": "npm --workspace @nudge/relay run start"
   },
   "engines": {
