@@ -1094,13 +1094,19 @@ async fn print_daemon_status() -> Result<()> {
     match response.payload {
         Some(v1::envelope::Payload::DaemonStatus(status)) => {
             println!(
-                "daemon socket={} state={} clients={} uptime={}s tabs={} plan={}",
+                "daemon socket={} state={} clients={} uptime={}s tabs={} plan={} relay_status={} relay_url={} relay_binding_id={} relay_last_error={} relay_connected_at={} relay_last_message_at={}",
                 status.socket_path,
                 status.state_path,
                 status.connected_clients,
                 status.uptime_seconds,
                 status.tabs,
-                status.plan
+                status.plan,
+                status.relay_status,
+                status.relay_url,
+                status.relay_binding_id,
+                status.relay_last_error,
+                status.relay_connected_at,
+                status.relay_last_message_at
             );
             Ok(())
         }

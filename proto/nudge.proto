@@ -52,6 +52,12 @@ message DaemonStatus {
   uint64 uptime_seconds = 4;
   uint32 tabs = 5;
   string plan = 6;
+  string relay_status = 7;
+  string relay_url = 8;
+  string relay_binding_id = 9;
+  string relay_last_error = 10;
+  string relay_connected_at = 11;
+  string relay_last_message_at = 12;
 }
 
 message StopDaemon {}

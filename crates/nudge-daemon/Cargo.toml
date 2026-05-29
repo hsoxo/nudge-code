@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 dirs.workspace = true
+futures-util.workspace = true
 nudge-protocol = { path = "../nudge-protocol" }
 nudge-pty = { path = "../nudge-pty" }
 nudge-terminal = { path = "../nudge-terminal" }
@@ -17,3 +18,4 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true

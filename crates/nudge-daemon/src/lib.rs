@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
 use nudge_terminal::{TerminalGrid, TerminalSize as GridSize};
@@ -15,6 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tokio::task;
+use tokio::time::sleep;
+use tokio_tungstenite::connect_async;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -103,6 +106,39 @@ pub enum BindingStatus {
     Pending,
     Active,
     Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayConnectionState {
+    pub status: RelayConnectionStatus,
+    pub relay_url: String,
+    pub binding_id: String,
+    pub last_error: Option<String>,
+    pub connected_at: Option<String>,
+    pub last_message_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayConnectionStatus {
+    Unbound,
+    Connecting,
+    Connected,
+    Disconnected,
+    Error,
+}
+
+impl Default for RelayConnectionState {
+    fn default() -> Self {
+        Self {
+            status: RelayConnectionStatus::Unbound,
+            relay_url: String::new(),
+            binding_id: String::new(),
+            last_error: None,
+            connected_at: None,
+            last_message_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +511,69 @@ impl BindingStatus {
     }
 }
 
+impl RelayConnectionState {
+    fn unbound() -> Self {
+        Self::default()
+    }
+
+    fn connecting(binding: &BindingState) -> Self {
+        Self {
+            status: RelayConnectionStatus::Connecting,
+            relay_url: binding.relay_url.clone(),
+            binding_id: binding.binding_id.clone(),
+            last_error: None,
+            connected_at: None,
+            last_message_at: None,
+        }
+    }
+
+    fn connected(binding: &BindingState) -> Self {
+        let now = now_string();
+        Self {
+            status: RelayConnectionStatus::Connected,
+            relay_url: binding.relay_url.clone(),
+            binding_id: binding.binding_id.clone(),
+            last_error: None,
+            connected_at: Some(now.clone()),
+            last_message_at: Some(now),
+        }
+    }
+
+    fn disconnected(binding: &BindingState) -> Self {
+        Self {
+            status: RelayConnectionStatus::Disconnected,
+            relay_url: binding.relay_url.clone(),
+            binding_id: binding.binding_id.clone(),
+            last_error: None,
+            connected_at: None,
+            last_message_at: None,
+        }
+    }
+
+    fn error(binding: &BindingState, error: String) -> Self {
+        Self {
+            status: RelayConnectionStatus::Error,
+            relay_url: binding.relay_url.clone(),
+            binding_id: binding.binding_id.clone(),
+            last_error: Some(error),
+            connected_at: None,
+            last_message_at: None,
+        }
+    }
+}
+
+impl RelayConnectionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unbound => "unbound",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Disconnected => "disconnected",
+            Self::Error => "error",
+        }
+    }
+}
+
 impl std::str::FromStr for BindingStatus {
     type Err = SessionError;
 
@@ -629,6 +728,7 @@ struct DaemonRuntime {
     ptys: Arc<Mutex<Vec<RuntimeTab>>>,
     shutdown: Arc<Notify>,
     connected_clients: Arc<AtomicU32>,
+    relay_state: Arc<Mutex<RelayConnectionState>>,
     started_at: Instant,
     socket_path: PathBuf,
 }
@@ -650,6 +750,7 @@ impl DaemonRuntime {
             ptys: Arc::new(Mutex::new(ptys)),
             shutdown: Arc::new(Notify::new()),
             connected_clients: Arc::new(AtomicU32::new(0)),
+            relay_state: Arc::new(Mutex::new(RelayConnectionState::default())),
             started_at: Instant::now(),
             socket_path,
         }
@@ -657,6 +758,7 @@ impl DaemonRuntime {
 
     async fn status(&self) -> v1::DaemonStatus {
         let session = self.session.lock().await;
+        let relay = self.relay_state.lock().await.clone();
         v1::DaemonStatus {
             socket_path: self.socket_path.display().to_string(),
             state_path: self.state_store.path().display().to_string(),
@@ -664,6 +766,12 @@ impl DaemonRuntime {
             uptime_seconds: self.started_at.elapsed().as_secs(),
             tabs: session.tabs.len() as u32,
             plan: session.entitlement.plan.clone(),
+            relay_status: relay.status.as_str().to_string(),
+            relay_url: relay.relay_url,
+            relay_binding_id: relay.binding_id,
+            relay_last_error: relay.last_error.unwrap_or_default(),
+            relay_connected_at: relay.connected_at.unwrap_or_default(),
+            relay_last_message_at: relay.last_message_at.unwrap_or_default(),
         }
     }
 
@@ -856,7 +964,26 @@ impl DaemonRuntime {
             session.clear_binding();
             self.state_store.save(&session)?;
         }
+        self.set_relay_state(RelayConnectionState::unbound()).await;
         Ok(self.session_state().await)
+    }
+
+    async fn current_active_binding(&self) -> Option<BindingState> {
+        self.session
+            .lock()
+            .await
+            .binding
+            .clone()
+            .filter(|binding| binding.status == BindingStatus::Active)
+    }
+
+    async fn set_relay_state(&self, state: RelayConnectionState) {
+        *self.relay_state.lock().await = state;
+    }
+
+    async fn mark_relay_message(&self) {
+        let mut relay_state = self.relay_state.lock().await;
+        relay_state.last_message_at = Some(now_string());
     }
 
     async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
@@ -900,6 +1027,100 @@ async fn spawn_pty_for_tab(
     .with_context(|| format!("failed to spawn shell for tab {tab_id}"))
 }
 
+async fn relay_connection_loop(runtime: DaemonRuntime) {
+    let mut active_binding_id: Option<String> = None;
+    loop {
+        tokio::select! {
+            _ = runtime.shutdown.notified() => break,
+            _ = sleep(Duration::from_millis(250)) => {}
+        }
+
+        let binding = match runtime.current_active_binding().await {
+            Some(binding) => binding,
+            None => {
+                if active_binding_id.take().is_some() {
+                    runtime
+                        .set_relay_state(RelayConnectionState::unbound())
+                        .await;
+                }
+                continue;
+            }
+        };
+
+        if active_binding_id.as_deref() != Some(binding.binding_id.as_str()) {
+            runtime
+                .set_relay_state(RelayConnectionState::connecting(&binding))
+                .await;
+            active_binding_id = Some(binding.binding_id.clone());
+        }
+
+        if let Err(error) = connect_relay_once(&runtime, &binding).await {
+            runtime
+                .set_relay_state(RelayConnectionState::error(&binding, format!("{error:#}")))
+                .await;
+            tokio::select! {
+                _ = runtime.shutdown.notified() => break,
+                _ = sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+}
+
+async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> Result<()> {
+    let url = relay_websocket_url(binding)?;
+    runtime
+        .set_relay_state(RelayConnectionState::connecting(binding))
+        .await;
+    let (mut websocket, _) = connect_async(&url)
+        .await
+        .with_context(|| format!("failed to connect relay websocket {url}"))?;
+    runtime
+        .set_relay_state(RelayConnectionState::connected(binding))
+        .await;
+
+    loop {
+        tokio::select! {
+            _ = runtime.shutdown.notified() => break,
+            message = websocket.next() => {
+                match message {
+                    Some(Ok(_message)) => runtime.mark_relay_message().await,
+                    Some(Err(error)) => return Err(error).context("relay websocket error"),
+                    None => break,
+                }
+            }
+        }
+
+        let still_current = runtime
+            .current_active_binding()
+            .await
+            .map(|current| current.binding_id == binding.binding_id)
+            .unwrap_or(false);
+        if !still_current {
+            break;
+        }
+    }
+
+    runtime
+        .set_relay_state(RelayConnectionState::disconnected(binding))
+        .await;
+    Ok(())
+}
+
+fn relay_websocket_url(binding: &BindingState) -> Result<String> {
+    let base = binding.relay_url.trim_end_matches('/');
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        anyhow::bail!("relay url must start with http:// or https://");
+    };
+    Ok(format!(
+        "{ws_base}/ws/daemon?deviceId={}&bindingId={}",
+        binding.daemon_device_id, binding.binding_id
+    ))
+}
+
 pub async fn run_server(config: DaemonConfig) -> Result<()> {
     let paths = IpcPaths::from_env_or_default()?;
     paths.prepare_runtime_dir()?;
@@ -932,6 +1153,10 @@ pub async fn run_server(config: DaemonConfig) -> Result<()> {
     if !restored_from_disk {
         runtime.ensure_ptys().await?;
     }
+    let relay_runtime = runtime.clone();
+    tokio::spawn(async move {
+        relay_connection_loop(relay_runtime).await;
+    });
 
     if config.placeholder || config.foreground {
         let state = runtime.session_state().await;

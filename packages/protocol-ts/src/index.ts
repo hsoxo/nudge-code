@@ -29,6 +29,12 @@ export interface DaemonStatus {
   uptimeSeconds: number;
   tabs: number;
   plan: EntitlementPlan;
+  relayStatus: 'unbound' | 'connecting' | 'connected' | 'disconnected' | 'error';
+  relayUrl: string;
+  relayBindingId: string;
+  relayLastError: string;
+  relayConnectedAt: string;
+  relayLastMessageAt: string;
 }
 
 export interface Ack {
