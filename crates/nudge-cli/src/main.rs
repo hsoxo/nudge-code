@@ -1,8 +1,16 @@
+use std::io::{Write, stdout};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size,
+};
 use nudge_daemon::{BindingState, BindingStatus, DaemonConfig};
 use nudge_protocol::v1;
 use serde::{Deserialize, Serialize};
@@ -432,8 +440,7 @@ async fn main() -> Result<()> {
             .await?;
             match response.payload {
                 Some(v1::envelope::Payload::SessionState(state)) => {
-                    print_session_state(&state);
-                    println!("attached to daemon; interactive terminal UI is next");
+                    run_interactive_client(state).await?;
                 }
                 Some(v1::envelope::Payload::Error(error)) => {
                     anyhow::bail!("daemon returned {}: {}", error.code, error.message);
@@ -443,6 +450,68 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
+    let mut terminal = TerminalGuard::enter()?;
+    let mut selected_tab_id = state
+        .tabs
+        .first()
+        .map(|tab| tab.id.clone())
+        .context("daemon session has no tabs")?;
+    if !selected_tab_needs_restart(&state, &selected_tab_id) {
+        resize_selected_tab(&selected_tab_id).await?;
+    }
+    let mut last_frame = String::new();
+
+    loop {
+        state = get_session_state().await?;
+        if !state.tabs.iter().any(|tab| tab.id == selected_tab_id) {
+            selected_tab_id = state
+                .tabs
+                .first()
+                .map(|tab| tab.id.clone())
+                .context("daemon session has no tabs")?;
+        }
+        let render = render_tab(&selected_tab_id, &state).await?;
+        let fingerprint = render.fingerprint();
+        if fingerprint != last_frame {
+            draw_frame(&mut terminal, &state, &selected_tab_id, &render).await?;
+            last_frame = fingerprint;
+        }
+
+        if event::poll(Duration::from_millis(60)).context("failed to poll terminal input")? {
+            match event::read().context("failed to read terminal input")? {
+                Event::Key(key) if should_detach(key) => break,
+                Event::Key(key) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    handle_control_key(key, &mut selected_tab_id).await?;
+                    last_frame.clear();
+                }
+                Event::Key(key) => {
+                    if !selected_tab_needs_restart(&state, &selected_tab_id)
+                        && let Some(bytes) = key_to_pty_bytes(key)
+                    {
+                        send_terminal_input(&selected_tab_id, bytes).await?;
+                    }
+                }
+                Event::Resize(cols, rows) => {
+                    if !selected_tab_needs_restart(&state, &selected_tab_id) {
+                        resize_tab(&selected_tab_id, rows, cols).await?;
+                    }
+                    last_frame.clear();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = nudge_daemon::request(envelope(v1::envelope::Payload::ClientExited(
+        v1::ClientExited {
+            client_id: format!("cli-{}", std::process::id()),
+        },
+    )))
+    .await;
     Ok(())
 }
 
@@ -729,6 +798,261 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw terminal mode")?;
+        execute!(stdout(), EnterAlternateScreen, Hide, Clear(ClearType::All))
+            .context("failed to enter alternate screen")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+struct ClientFrame {
+    rows: u32,
+    cols: u32,
+    text: String,
+    width_mode: String,
+    tab_status: String,
+}
+
+impl ClientFrame {
+    fn fingerprint(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}",
+            self.rows, self.cols, self.width_mode, self.tab_status, self.text
+        )
+    }
+}
+
+async fn draw_frame(
+    _terminal: &mut TerminalGuard,
+    state: &v1::SessionState,
+    selected_tab_id: &str,
+    render: &ClientFrame,
+) -> Result<()> {
+    let mut output = stdout();
+    let (terminal_cols, terminal_rows) = size().unwrap_or((80, 24));
+    execute!(output, MoveTo(0, 0), Clear(ClearType::All)).context("failed to clear terminal")?;
+    write!(output, "{}", tab_bar(state, selected_tab_id))?;
+    let content_rows = terminal_rows.saturating_sub(2) as usize;
+    for (index, line) in render.text.lines().take(content_rows).enumerate() {
+        execute!(output, MoveTo(0, (index + 1) as u16))?;
+        write!(output, "{}", fit_line(line, terminal_cols as usize))?;
+    }
+    execute!(output, MoveTo(0, terminal_rows.saturating_sub(1)))?;
+    write!(
+        output,
+        "{}",
+        status_line(
+            &render.width_mode,
+            &render.tab_status,
+            render.rows,
+            render.cols,
+        )
+    )?;
+    output.flush().context("failed to flush terminal frame")?;
+    Ok(())
+}
+
+fn tab_bar(state: &v1::SessionState, selected_tab_id: &str) -> String {
+    let mut parts = Vec::new();
+    for tab in &state.tabs {
+        if tab.id == selected_tab_id {
+            parts.push(format!("[{}]", tab.title));
+        } else {
+            parts.push(format!(" {} ", tab.title));
+        }
+    }
+    format!("Nudge {}", parts.join(" "))
+}
+
+fn status_line(width_mode: &str, tab_status: &str, rows: u32, cols: u32) -> String {
+    format!(
+        "Ctrl-d detach | Ctrl-r restart | Ctrl-n next | Ctrl-p previous | status={tab_status} width={width_mode} size={rows}x{cols}"
+    )
+}
+
+fn fit_line(line: &str, max_cols: usize) -> String {
+    line.chars().take(max_cols).collect()
+}
+
+async fn handle_control_key(key: KeyEvent, selected_tab_id: &mut String) -> Result<()> {
+    match key.code {
+        KeyCode::Char('n') => {
+            let state = get_session_state().await?;
+            if let Some(index) = state.tabs.iter().position(|tab| tab.id == *selected_tab_id) {
+                let next = (index + 1) % state.tabs.len();
+                *selected_tab_id = state.tabs[next].id.clone();
+                if !selected_tab_needs_restart(&state, selected_tab_id) {
+                    resize_selected_tab(selected_tab_id).await?;
+                }
+            }
+        }
+        KeyCode::Char('p') => {
+            let state = get_session_state().await?;
+            if let Some(index) = state.tabs.iter().position(|tab| tab.id == *selected_tab_id) {
+                let next = if index == 0 {
+                    state.tabs.len() - 1
+                } else {
+                    index - 1
+                };
+                *selected_tab_id = state.tabs[next].id.clone();
+                if !selected_tab_needs_restart(&state, selected_tab_id) {
+                    resize_selected_tab(selected_tab_id).await?;
+                }
+            }
+        }
+        KeyCode::Char('r') => {
+            restart_tab(selected_tab_id).await?;
+            resize_selected_tab(selected_tab_id).await?;
+        }
+        _ => {
+            if let Some(bytes) = control_key_to_pty_bytes(key) {
+                send_terminal_input(selected_tab_id, bytes).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_detach(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('d'))
+}
+
+fn control_key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    match key.code {
+        KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+            let upper = c.to_ascii_uppercase() as u8;
+            Some(vec![upper - b'A' + 1])
+        }
+        _ => None,
+    }
+}
+
+fn key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    match key.code {
+        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
+        KeyCode::Enter => Some(b"\r".to_vec()),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Tab => Some(b"\t".to_vec()),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        _ => None,
+    }
+}
+
+async fn get_session_state() -> Result<v1::SessionState> {
+    let response =
+        nudge_daemon::request(envelope(v1::envelope::Payload::GetState(v1::GetState {}))).await?;
+    session_from_response(response)
+}
+
+async fn render_tab(tab_id: &str, state: &v1::SessionState) -> Result<ClientFrame> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::TerminalSnapshotRequest(
+        v1::TerminalSnapshotRequest {
+            tab_id: tab_id.to_string(),
+        },
+    )))
+    .await?;
+    match response.payload {
+        Some(v1::envelope::Payload::TerminalSnapshot(snapshot)) => Ok(ClientFrame {
+            rows: snapshot.rows,
+            cols: snapshot.cols,
+            text: snapshot.text,
+            width_mode: state
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| tab.width_mode.clone())
+                .unwrap_or_else(|| "computer".to_string()),
+            tab_status: state
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| tab.status.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+        }),
+        Some(v1::envelope::Payload::Error(error)) => {
+            anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+        }
+        _ => anyhow::bail!("daemon returned an unexpected snapshot response"),
+    }
+}
+
+async fn restart_tab(tab_id: &str) -> Result<()> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::RestartTab(
+        v1::RestartTab {
+            tab_id: tab_id.to_string(),
+        },
+    )))
+    .await?;
+    let _ = session_from_response(response)?;
+    Ok(())
+}
+
+async fn send_terminal_input(tab_id: &str, data: Vec<u8>) -> Result<()> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::TerminalInput(
+        v1::TerminalInput {
+            tab_id: tab_id.to_string(),
+            data,
+        },
+    )))
+    .await?;
+    match response.payload {
+        Some(v1::envelope::Payload::Ack(_)) => Ok(()),
+        Some(v1::envelope::Payload::Error(error)) => {
+            anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+        }
+        _ => anyhow::bail!("daemon returned an unexpected input response"),
+    }
+}
+
+fn selected_tab_needs_restart(state: &v1::SessionState, selected_tab_id: &str) -> bool {
+    state
+        .tabs
+        .iter()
+        .find(|tab| tab.id == selected_tab_id)
+        .map(|tab| tab.status == "needs_restart")
+        .unwrap_or(false)
+}
+
+async fn resize_selected_tab(tab_id: &str) -> Result<()> {
+    let (cols, rows) = size().unwrap_or((80, 24));
+    resize_tab(tab_id, rows.saturating_sub(2).max(1), cols).await
+}
+
+async fn resize_tab(tab_id: &str, rows: u16, cols: u16) -> Result<()> {
+    let response =
+        nudge_daemon::request(envelope(v1::envelope::Payload::ResizeTab(v1::ResizeTab {
+            tab_id: tab_id.to_string(),
+            rows: rows as u32,
+            cols: cols as u32,
+        })))
+        .await?;
+    match response.payload {
+        Some(v1::envelope::Payload::Ack(_)) => Ok(()),
+        Some(v1::envelope::Payload::Error(error)) => {
+            anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+        }
+        _ => anyhow::bail!("daemon returned an unexpected resize response"),
+    }
 }
 
 fn print_session_response(response: v1::Envelope, ok_message: &str) -> Result<()> {
