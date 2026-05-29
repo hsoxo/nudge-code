@@ -20,8 +20,13 @@
       background: #050505;
     }
 
-    #terminal.computer {
-      min-width: 900px;
+    #terminal.phone .xterm {
+      width: 100%;
+    }
+
+    #terminal.computer .xterm {
+      width: var(--terminal-width, 900px);
+      min-width: 100%;
     }
 
     .xterm {
@@ -58,20 +63,55 @@
 
     term.open(container);
 
+    function cellWidth() {
+      return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
+    }
+
+    function syncTerminalSize(widthMode, rows, cols) {
+      const safeRows = Math.max(Number(rows) || 1, 1);
+      const safeCols = Math.max(Number(cols) || 1, 1);
+      container.classList.toggle('phone', widthMode !== 'computer');
+      container.classList.toggle('computer', widthMode === 'computer');
+      if (widthMode === 'computer') {
+        container.style.setProperty('--terminal-width', `${Math.ceil(safeCols * cellWidth() + 28)}px`);
+        term.resize(safeCols, safeRows);
+      } else {
+        container.style.removeProperty('--terminal-width');
+        term.resize(safeCols, safeRows);
+        requestAnimationFrame(() => {
+          term.resize(Math.max(Math.floor((container.clientWidth - 28) / cellWidth()), 1), safeRows);
+        });
+      }
+    }
+
+    function followCursor(widthMode) {
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+        if (widthMode !== 'computer') {
+          container.scrollLeft = 0;
+          return;
+        }
+        const cursorX = term.buffer.active.cursorX * cellWidth() + 14;
+        const viewportStart = container.scrollLeft;
+        const viewportEnd = viewportStart + container.clientWidth - 14;
+        if (cursorX > viewportEnd) {
+          container.scrollLeft = Math.max(cursorX - container.clientWidth + 40, 0);
+        } else if (cursorX < viewportStart) {
+          container.scrollLeft = Math.max(cursorX - 40, 0);
+        }
+      });
+    }
+
     window.nudgeTerminal = {
-      setSnapshot(text, widthMode) {
-        container.classList.toggle('computer', widthMode === 'computer');
+      setSnapshot(text, widthMode, rows, cols) {
+        syncTerminalSize(widthMode, rows, cols);
         term.reset();
         term.write(text || '');
-        requestAnimationFrame(() => {
-          container.scrollTop = container.scrollHeight;
-        });
+        followCursor(widthMode);
       },
       writeOutput(text) {
         term.write(text || '');
-        requestAnimationFrame(() => {
-          container.scrollTop = container.scrollHeight;
-        });
+        followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       }
     };
   </script>

@@ -14,4 +14,14 @@ struct TerminalWebAssetsTests {
         #expect(TerminalWebAssets.requiredFilenames.contains("xterm.css"))
         #expect(TerminalWebAssets.requiredFilenames.contains("XTERM_LICENSE"))
     }
+
+    @Test func terminalRendererSupportsProfileSizedComputerWidth() throws {
+        let url = try #require(TerminalWebAssets.indexURL())
+        let html = try String(contentsOf: url, encoding: .utf8)
+
+        #expect(html.contains("setSnapshot(text, widthMode, rows, cols)"))
+        #expect(html.contains("term.resize(safeCols, safeRows)"))
+        #expect(html.contains("--terminal-width"))
+        #expect(html.contains("followCursor(widthMode)"))
+    }
 }

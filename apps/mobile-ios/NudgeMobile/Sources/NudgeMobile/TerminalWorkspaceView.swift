@@ -101,6 +101,7 @@ struct TerminalView: View {
         TerminalWebView(
             snapshotText: tab.previewText,
             widthMode: tab.widthMode,
+            profile: tab.profile,
             outputText: tab.pendingOutputText,
             outputSequence: tab.outputSequence
         )
@@ -115,6 +116,7 @@ struct TerminalView: View {
 struct TerminalWebView: UIViewRepresentable {
     var snapshotText: String
     var widthMode: WidthMode
+    var profile: TerminalProfile
     var outputText: String
     var outputSequence: Int
 
@@ -131,6 +133,7 @@ struct TerminalWebView: UIViewRepresentable {
         context.coordinator.update(
             snapshotText: snapshotText,
             widthMode: widthMode,
+            profile: profile,
             outputText: outputText,
             outputSequence: outputSequence,
             in: webView
@@ -143,8 +146,8 @@ struct TerminalWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         private var isLoaded = false
-        private var pendingSnapshot: (text: String, widthMode: WidthMode)?
-        private var lastSnapshot: (text: String, widthMode: WidthMode)?
+        private var pendingSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
+        private var lastSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
         private var pendingOutput: (text: String, sequence: Int)?
         private var lastOutputSequence = 0
 
@@ -159,11 +162,12 @@ struct TerminalWebView: UIViewRepresentable {
         func update(
             snapshotText: String,
             widthMode: WidthMode,
+            profile: TerminalProfile,
             outputText: String,
             outputSequence: Int,
             in webView: WKWebView
         ) {
-            let snapshot = (text: snapshotText, widthMode: widthMode)
+            let snapshot = (text: snapshotText, widthMode: widthMode, profile: profile)
             guard isLoaded else {
                 pendingSnapshot = snapshot
                 if outputSequence > lastOutputSequence {
@@ -171,7 +175,9 @@ struct TerminalWebView: UIViewRepresentable {
                 }
                 return
             }
-            if lastSnapshot?.text != snapshotText || lastSnapshot?.widthMode != widthMode {
+            if lastSnapshot?.text != snapshotText ||
+                lastSnapshot?.widthMode != widthMode ||
+                lastSnapshot?.profile != profile {
                 apply(snapshot, in: webView)
             }
             if outputSequence > lastOutputSequence {
@@ -191,12 +197,14 @@ struct TerminalWebView: UIViewRepresentable {
             }
         }
 
-        private func apply(_ snapshot: (text: String, widthMode: WidthMode), in webView: WKWebView) {
+        private func apply(_ snapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile), in webView: WKWebView) {
             lastSnapshot = snapshot
             let encodedText = Self.javascriptString(snapshot.text)
             let encodedWidthMode = Self.javascriptString(snapshot.widthMode.rawValue)
+            let rows = max(snapshot.profile.rows, 1)
+            let cols = max(snapshot.profile.cols, 1)
             webView.evaluateJavaScript(
-                "window.nudgeTerminal && window.nudgeTerminal.setSnapshot(\(encodedText), \(encodedWidthMode));"
+                "window.nudgeTerminal && window.nudgeTerminal.setSnapshot(\(encodedText), \(encodedWidthMode), \(rows), \(cols));"
             )
         }
 
