@@ -116,6 +116,20 @@ impl StateStore {
         Ok(session)
     }
 
+    pub fn load_or_create_with_status(&self) -> Result<(MachineSession, bool)> {
+        if self.path.exists() {
+            let bytes = fs::read(&self.path)
+                .with_context(|| format!("failed to read {}", self.path.display()))?;
+            let session = serde_json::from_slice(&bytes)
+                .with_context(|| format!("failed to parse {}", self.path.display()))?;
+            return Ok((session, true));
+        }
+
+        let session = MachineSession::new_default();
+        self.save(&session)?;
+        Ok((session, false))
+    }
+
     pub fn save(&self, session: &MachineSession) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
@@ -185,6 +199,29 @@ impl MachineSession {
                 tab_id: tab_id.to_string(),
             })?;
         self.tabs.remove(index);
+        self.updated_at = now_string();
+        Ok(())
+    }
+
+    pub fn mark_all_tabs_needs_restart(&mut self) {
+        let now = now_string();
+        for tab in &mut self.tabs {
+            tab.status = TabStatus::NeedsRestart;
+            tab.last_activity_at = now.clone();
+        }
+        self.updated_at = now;
+    }
+
+    pub fn mark_tab_running(&mut self, tab_id: &str) -> std::result::Result<(), SessionError> {
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| SessionError::TabNotFound {
+                tab_id: tab_id.to_string(),
+            })?;
+        tab.status = TabStatus::Running;
+        tab.last_activity_at = now_string();
         self.updated_at = now_string();
         Ok(())
     }
@@ -413,24 +450,38 @@ impl DaemonRuntime {
         Ok(self.session_state().await)
     }
 
+    async fn restart_tab(&self, tab_id: &str) -> Result<v1::SessionState> {
+        {
+            let session = self.session.lock().await;
+            if !session.tabs.iter().any(|tab| tab.id == tab_id) {
+                anyhow::bail!("tab {tab_id} was not found");
+            }
+        }
+        {
+            let mut ptys = self.ptys.lock().await;
+            if let Some(runtime_tab) = ptys.iter_mut().find(|tab| tab.tab_id == tab_id) {
+                runtime_tab.pty = Some(spawn_pty_for_tab(tab_id).await?);
+            }
+        }
+        {
+            let mut session = self.session.lock().await;
+            session.mark_tab_running(tab_id)?;
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
     async fn ensure_ptys(&self) -> Result<()> {
         let mut ptys = self.ptys.lock().await;
         for runtime_tab in ptys.iter_mut() {
             if runtime_tab.pty.is_none() {
-                let tab_id = runtime_tab.tab_id.clone();
-                let pty =
-                    task::spawn_blocking(move || PtyTab::spawn_shell(TerminalSize::default()))
-                        .await
-                        .context("pty spawn task failed")?
-                        .with_context(|| format!("failed to spawn shell for tab {tab_id}"))?;
-                runtime_tab.pty = Some(pty);
+                runtime_tab.pty = Some(spawn_pty_for_tab(&runtime_tab.tab_id).await?);
             }
         }
         Ok(())
     }
 
     async fn write_input(&self, tab_id: &str, data: Vec<u8>) -> Result<()> {
-        self.ensure_ptys().await?;
         let ptys = self.ptys.lock().await;
         let pty = ptys
             .iter()
@@ -441,7 +492,6 @@ impl DaemonRuntime {
     }
 
     async fn output_tail(&self, tab_id: &str, max_bytes: usize) -> Result<Vec<u8>> {
-        self.ensure_ptys().await?;
         let ptys = self.ptys.lock().await;
         let pty = ptys
             .iter()
@@ -452,7 +502,6 @@ impl DaemonRuntime {
     }
 
     async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
-        self.ensure_ptys().await?;
         let ptys = self.ptys.lock().await;
         let pty = ptys
             .iter()
@@ -466,6 +515,14 @@ impl DaemonRuntime {
 struct RuntimeTab {
     tab_id: String,
     pty: Option<PtyTab>,
+}
+
+async fn spawn_pty_for_tab(tab_id: &str) -> Result<PtyTab> {
+    let tab_id = tab_id.to_string();
+    task::spawn_blocking(move || PtyTab::spawn_shell(TerminalSize::default()))
+        .await
+        .context("pty spawn task failed")?
+        .with_context(|| format!("failed to spawn shell for tab {tab_id}"))
 }
 
 pub async fn run_server(config: DaemonConfig) -> Result<()> {
@@ -486,14 +543,20 @@ pub async fn run_server(config: DaemonConfig) -> Result<()> {
     }
 
     let state_store = StateStore::from_env_or_default()?;
-    let session = state_store.load_or_create()?;
+    let (mut session, restored_from_disk) = state_store.load_or_create_with_status()?;
+    if restored_from_disk {
+        session.mark_all_tabs_needs_restart();
+        state_store.save(&session)?;
+    }
     let listener = UnixListener::bind(paths.socket_path())
         .with_context(|| format!("failed to bind {}", paths.socket_path().display()))?;
     fs::set_permissions(paths.socket_path(), fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to secure {}", paths.socket_path().display()))?;
 
     let runtime = DaemonRuntime::new(state_store, session, paths.socket_path().to_path_buf());
-    runtime.ensure_ptys().await?;
+    if !restored_from_disk {
+        runtime.ensure_ptys().await?;
+    }
 
     if config.placeholder || config.foreground {
         let state = runtime.session_state().await;
@@ -640,6 +703,9 @@ async fn handle_payload(
                 message: "resize accepted".to_string(),
             }))
         }
+        Some(v1::envelope::Payload::RestartTab(request)) => Some(
+            v1::envelope::Payload::SessionState(runtime.restart_tab(&request.tab_id).await?),
+        ),
         Some(_) => Some(v1::envelope::Payload::Error(v1::Error {
             code: "unsupported_message".to_string(),
             message: "daemon cannot handle this message yet".to_string(),
@@ -768,5 +834,23 @@ mod tests {
             .close_tab("default")
             .expect_err("closing the last tab should be rejected");
         assert!(matches!(error, SessionError::CannotCloseLastTab));
+    }
+
+    #[test]
+    fn restored_tabs_are_marked_needs_restart() {
+        let mut session = MachineSession::new_default();
+        session.mark_all_tabs_needs_restart();
+        assert!(matches!(session.tabs[0].status, TabStatus::NeedsRestart));
+        assert_eq!(session.to_proto().tabs[0].status, "needs_restart");
+    }
+
+    #[test]
+    fn restart_marks_tab_running() {
+        let mut session = MachineSession::new_default();
+        session.mark_all_tabs_needs_restart();
+        session
+            .mark_tab_running("default")
+            .expect("default tab should exist");
+        assert!(matches!(session.tabs[0].status, TabStatus::Running));
     }
 }

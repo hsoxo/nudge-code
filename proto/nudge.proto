@@ -21,6 +21,7 @@ message Envelope {
     RenameTab rename_tab = 23;
     CloseTab close_tab = 24;
     ResizeTab resize_tab = 25;
+    RestartTab restart_tab = 26;
   }
 }
 
@@ -83,6 +84,10 @@ message ResizeTab {
   string tab_id = 1;
   uint32 rows = 2;
   uint32 cols = 3;
+}
+
+message RestartTab {
+  string tab_id = 1;
 }
 
 message SessionState {

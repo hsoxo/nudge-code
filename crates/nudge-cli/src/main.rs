@@ -92,6 +92,13 @@ enum Command {
         #[arg(long)]
         cols: u32,
     },
+    /// Restart a tab pty after daemon restart.
+    #[command(hide = true)]
+    RestartTab {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -244,6 +251,14 @@ async fn main() -> Result<()> {
                 }
                 _ => anyhow::bail!("daemon returned an unexpected resize response"),
             }
+        }
+        Some(Command::RestartTab { tab_id }) => {
+            ensure_daemon().await?;
+            let response = nudge_daemon::request(envelope(v1::envelope::Payload::RestartTab(
+                v1::RestartTab { tab_id },
+            )))
+            .await?;
+            print_session_response(response, "tab restarted")?;
         }
         None => {
             ensure_daemon().await?;

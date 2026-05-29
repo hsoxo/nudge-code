@@ -69,6 +69,10 @@ export interface ResizeTab {
   cols: number;
 }
 
+export interface RestartTab {
+  tabId: string;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,
