@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "smoke:daemon-control": "node dist/smoke-daemon-control.js",
     "smoke:websocket": "node dist/smoke-websocket.js",
     "start": "node dist/index.js"
   },

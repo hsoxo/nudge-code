@@ -152,6 +152,22 @@ enum Command {
         #[arg(long, default_value = "default")]
         tab_id: String,
     },
+    /// Persist binding state for relay smoke tests.
+    #[command(hide = true)]
+    SetBindingState {
+        #[arg(long)]
+        relay_url: String,
+        #[arg(long)]
+        daemon_device_id: String,
+        #[arg(long)]
+        binding_id: String,
+        #[arg(long)]
+        code: String,
+        #[arg(long)]
+        status: String,
+        #[arg(long)]
+        bound_phone_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -429,6 +445,28 @@ async fn main() -> Result<()> {
             )))
             .await?;
             print_session_response(response, "tab restarted")?;
+        }
+        Some(Command::SetBindingState {
+            relay_url,
+            daemon_device_id,
+            binding_id,
+            code,
+            status,
+            bound_phone_id,
+        }) => {
+            ensure_daemon().await?;
+            let binding = BindingState {
+                relay_url,
+                daemon_device_id,
+                binding_id,
+                code,
+                expires_at: String::new(),
+                status: parse_binding_status(&status)?,
+                bound_phone_id,
+                updated_at: now_millis().to_string(),
+            };
+            set_binding_state(binding).await?;
+            println!("binding state saved");
         }
         None => {
             ensure_daemon().await?;
@@ -798,6 +836,15 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+fn parse_binding_status(status: &str) -> Result<BindingStatus> {
+    match status {
+        "pending" => Ok(BindingStatus::Pending),
+        "active" => Ok(BindingStatus::Active),
+        "revoked" => Ok(BindingStatus::Revoked),
+        other => anyhow::bail!("unsupported binding status {other}"),
+    }
 }
 
 struct TerminalGuard;

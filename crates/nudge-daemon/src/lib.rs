@@ -6,18 +6,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
 use nudge_terminal::{TerminalGrid, TerminalSize as GridSize};
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tokio::task;
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -116,6 +118,68 @@ pub struct RelayConnectionState {
     pub last_error: Option<String>,
     pub connected_at: Option<String>,
     pub last_message_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelaySocketMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    message: Option<RelayRoutedMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayRoutedMessage {
+    id: String,
+    from_device_id: String,
+    payload: RelayControlRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RelayControlRequest {
+    GetState {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    TerminalSnapshot {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+    },
+    TerminalInput {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        text: String,
+        #[serde(default)]
+        enter: bool,
+    },
+    SetPhoneProfile {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        rows: u32,
+        cols: u32,
+    },
+    SetWidthMode {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        mode: String,
+        #[serde(rename = "computerRows")]
+        computer_rows: u32,
+        #[serde(rename = "computerCols")]
+        computer_cols: u32,
+    },
+    RestartTab {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1083,7 +1147,15 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
             _ = runtime.shutdown.notified() => break,
             message = websocket.next() => {
                 match message {
-                    Some(Ok(_message)) => runtime.mark_relay_message().await,
+                    Some(Ok(message)) => {
+                        runtime.mark_relay_message().await;
+                        if let Some(response) = handle_relay_message(runtime, binding, message).await {
+                            websocket
+                                .send(WebSocketMessage::Text(response.into()))
+                                .await
+                                .context("failed to send relay websocket response")?;
+                        }
+                    }
                     Some(Err(error)) => return Err(error).context("relay websocket error"),
                     None => break,
                 }
@@ -1104,6 +1176,226 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         .set_relay_state(RelayConnectionState::disconnected(binding))
         .await;
     Ok(())
+}
+
+async fn handle_relay_message(
+    runtime: &DaemonRuntime,
+    binding: &BindingState,
+    message: WebSocketMessage,
+) -> Option<String> {
+    let text = match message {
+        WebSocketMessage::Text(text) => text,
+        WebSocketMessage::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok()?.into(),
+        _ => return None,
+    };
+    let relay_message = match serde_json::from_str::<RelaySocketMessage>(&text) {
+        Ok(relay_message) => relay_message,
+        Err(_) => return None,
+    };
+    if relay_message.message_type != "message" {
+        return None;
+    }
+    let routed = relay_message.message?;
+    let response = handle_relay_control_request(runtime, routed.payload).await;
+    Some(relay_response_json(
+        &routed.from_device_id,
+        &routed.id,
+        binding,
+        &response.request_id,
+        response.ok,
+        response.payload,
+    ))
+}
+
+struct RelayControlResponse {
+    request_id: String,
+    ok: bool,
+    payload: Value,
+}
+
+async fn handle_relay_control_request(
+    runtime: &DaemonRuntime,
+    request: RelayControlRequest,
+) -> RelayControlResponse {
+    match request {
+        RelayControlRequest::GetState { request_id } => RelayControlResponse::ok(
+            request_id,
+            session_state_json(runtime.session_state().await),
+        ),
+        RelayControlRequest::TerminalSnapshot { request_id, tab_id } => {
+            match runtime.terminal_snapshot(&tab_id).await {
+                Ok(snapshot) => RelayControlResponse::ok(
+                    request_id,
+                    json!({
+                        "tabId": snapshot.tab_id,
+                        "rows": snapshot.rows,
+                        "cols": snapshot.cols,
+                        "text": snapshot.text,
+                    }),
+                ),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+        RelayControlRequest::TerminalInput {
+            request_id,
+            tab_id,
+            mut text,
+            enter,
+        } => {
+            if enter {
+                text.push('\r');
+            }
+            match runtime.write_input(&tab_id, text.into_bytes()).await {
+                Ok(()) => RelayControlResponse::ok(request_id, json!({"accepted": true})),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+        RelayControlRequest::SetPhoneProfile {
+            request_id,
+            rows,
+            cols,
+        } => {
+            let rows = match u16::try_from(rows) {
+                Ok(rows) => rows,
+                Err(error) => return RelayControlResponse::error(request_id, error),
+            };
+            let cols = match u16::try_from(cols) {
+                Ok(cols) => cols,
+                Err(error) => return RelayControlResponse::error(request_id, error),
+            };
+            match runtime.set_phone_profile(rows, cols).await {
+                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+        RelayControlRequest::SetWidthMode {
+            request_id,
+            tab_id,
+            mode,
+            computer_rows,
+            computer_cols,
+        } => {
+            let computer_rows = match u16::try_from(computer_rows) {
+                Ok(rows) => rows,
+                Err(error) => return RelayControlResponse::error(request_id, error),
+            };
+            let computer_cols = match u16::try_from(computer_cols) {
+                Ok(cols) => cols,
+                Err(error) => return RelayControlResponse::error(request_id, error),
+            };
+            let mode = match mode.parse::<WidthMode>() {
+                Ok(mode) => mode,
+                Err(error) => return RelayControlResponse::error(request_id, error),
+            };
+            match runtime
+                .set_width_mode(
+                    &tab_id,
+                    mode,
+                    TerminalSize {
+                        rows: computer_rows,
+                        cols: computer_cols,
+                    },
+                )
+                .await
+            {
+                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+        RelayControlRequest::RestartTab { request_id, tab_id } => {
+            match runtime.restart_tab(&tab_id).await {
+                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+    }
+}
+
+impl RelayControlResponse {
+    fn ok(request_id: String, payload: Value) -> Self {
+        Self {
+            request_id,
+            ok: true,
+            payload,
+        }
+    }
+
+    fn error<E>(request_id: String, error: E) -> Self
+    where
+        E: std::fmt::Display,
+    {
+        Self {
+            request_id,
+            ok: false,
+            payload: json!({"error": error.to_string()}),
+        }
+    }
+}
+
+fn relay_response_json(
+    to_device_id: &str,
+    relay_message_id: &str,
+    binding: &BindingState,
+    request_id: &str,
+    ok: bool,
+    payload: Value,
+) -> String {
+    serde_json::to_string(&json!({
+        "toDeviceId": to_device_id,
+        "payload": {
+            "type": "daemon_response",
+            "requestId": request_id,
+            "relayMessageId": relay_message_id,
+            "bindingId": binding.binding_id,
+            "ok": ok,
+            "data": payload,
+        }
+    }))
+    .expect("relay response json should serialize")
+}
+
+fn session_state_json(state: v1::SessionState) -> Value {
+    let tabs: Vec<Value> = state
+        .tabs
+        .into_iter()
+        .map(|tab| {
+            json!({
+                "id": tab.id,
+                "title": tab.title,
+                "status": tab.status,
+                "widthMode": tab.width_mode,
+                "rows": tab.rows,
+                "cols": tab.cols,
+            })
+        })
+        .collect();
+    json!({
+        "tabs": tabs,
+        "entitlement": state.entitlement.map(|entitlement| {
+            json!({
+                "plan": entitlement.plan,
+                "maxBoundComputers": entitlement.max_bound_computers,
+                "maxTabsPerComputer": entitlement.max_tabs_per_computer,
+            })
+        }),
+        "phoneProfile": state.phone_profile.map(|profile| {
+            json!({
+                "rows": profile.rows,
+                "cols": profile.cols,
+            })
+        }),
+        "binding": state.binding.map(|binding| {
+            json!({
+                "relayUrl": binding.relay_url,
+                "daemonDeviceId": binding.daemon_device_id,
+                "bindingId": binding.binding_id,
+                "code": binding.code,
+                "expiresAt": binding.expires_at,
+                "status": binding.status,
+                "boundPhoneId": binding.bound_phone_id,
+            })
+        }),
+    })
 }
 
 fn relay_websocket_url(binding: &BindingState) -> Result<String> {
