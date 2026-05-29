@@ -11,6 +11,7 @@
     "smoke:audit": "node dist/smoke-audit.js",
     "smoke:auth": "node dist/smoke-auth.js",
     "smoke:daemon-control": "node dist/smoke-daemon-control.js",
+    "smoke:e2e": "node dist/smoke-e2e-enforcement.js",
     "smoke:persistence": "node dist/smoke-persistence.js",
     "smoke:rate-limit": "node dist/smoke-rate-limit.js",
     "smoke:websocket": "node dist/smoke-websocket.js",

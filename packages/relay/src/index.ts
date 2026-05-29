@@ -58,7 +58,8 @@ type AuditEventType =
   | 'socket_rejected'
   | 'message_routed'
   | 'message_queued'
-  | 'message_poll';
+  | 'message_poll'
+  | 'message_rejected';
 
 type RateLimitResult =
   | { ok: true }
@@ -109,6 +110,7 @@ class FixedWindowRateLimiter {
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const requireWebSocketChallenge = process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
+const requireE2EPayload = process.env.NUDGE_RELAY_REQUIRE_E2E_PAYLOAD === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
 const relayAuditPath = process.env.NUDGE_RELAY_AUDIT_PATH;
 const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
@@ -420,6 +422,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 400, { error: 'same_source_and_destination' });
       return;
     }
+    const payloadValidation = validateRelayPayload(body.payload);
+    if (!payloadValidation.ok) {
+      audit('message_rejected', {
+        bindingId: binding.id,
+        fromDeviceId: body.fromDeviceId,
+        toDeviceId: body.toDeviceId,
+        error: payloadValidation.error,
+        payloadType: payloadType(body.payload),
+      });
+      writeJson(response, 400, { error: payloadValidation.error });
+      return;
+    }
     const message: RelayMessage = {
       id: `msg_${randomUUID()}`,
       bindingId: binding.id,
@@ -591,6 +605,18 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       websocket.send(JSON.stringify({ type: 'error', error: 'route_not_authorized' }));
       return;
     }
+    const payloadValidation = validateRelayPayload(message.payload);
+    if (!payloadValidation.ok) {
+      audit('message_rejected', {
+        bindingId: binding.id,
+        fromDeviceId: device.id,
+        toDeviceId: message.toDeviceId,
+        error: payloadValidation.error,
+        payloadType: payloadType(message.payload),
+      });
+      websocket.send(JSON.stringify({ type: 'error', error: payloadValidation.error }));
+      return;
+    }
     const relayMessage: RelayMessage = {
       id: `msg_${randomUUID()}`,
       bindingId: binding.id,
@@ -666,6 +692,46 @@ function payloadType(payload: unknown): string | undefined {
   }
   const type = (payload as { type?: unknown }).type;
   return typeof type === 'string' ? type : undefined;
+}
+
+type PayloadValidation =
+  | { ok: true }
+  | { ok: false; error: 'e2e_payload_required' | 'invalid_e2e_payload' };
+
+function validateRelayPayload(payload: unknown): PayloadValidation {
+  if (!requireE2EPayload) {
+    return { ok: true };
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'e2e_payload_required' };
+  }
+  const candidate = payload as Record<string, unknown>;
+  if (candidate.type !== 'e2e_envelope') {
+    return { ok: false, error: 'e2e_payload_required' };
+  }
+  if (
+    typeof candidate.version !== 'number' ||
+    !Number.isInteger(candidate.version) ||
+    candidate.version < 1 ||
+    typeof candidate.messageType !== 'string' ||
+    typeof candidate.ciphertextBase64 !== 'string' ||
+    typeof candidate.nonceBase64 !== 'string' ||
+    typeof candidate.senderKeyId !== 'string' ||
+    typeof candidate.recipientKeyId !== 'string'
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (!isBase64(candidate.ciphertextBase64) || !isBase64(candidate.nonceBase64)) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  return { ok: true };
+}
+
+function isBase64(value: string): boolean {
+  if (value.length === 0 || value.length % 4 !== 0) {
+    return false;
+  }
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
 }
 
 function audit(type: AuditEventType, fields: Record<string, unknown> = {}): void {

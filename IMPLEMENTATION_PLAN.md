@@ -229,10 +229,11 @@ Current implementation status:
 - Relay supports Ed25519 signed websocket auth query parameters with in-memory nonce replay rejection in compatibility mode, and can require signatures with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
 - Relay issues short-lived, one-shot websocket auth challenges through `POST /api/ws/challenge`; daemon and iOS sign those challenges before opening their websocket, and hosted deployments can require them with `NUDGE_RELAY_REQUIRE_WS_CHALLENGE=1`.
 - Relay rate-limits pairing claim attempts by client address and normalized pairing code; this protects the short pairing code from simple online guessing while keeping the limits configurable for hosted deployment.
+- Relay can require opaque encrypted payload envelopes with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; in that mode it rejects plaintext relay payloads and only forwards `e2e_envelope` metadata plus ciphertext fields.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
-- E2E encrypted envelopes, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
+- Daemon/iOS X25519 handshake, payload encryption/decryption, encrypted sequence replay rejection, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -468,6 +469,7 @@ Current implementation status:
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
 - Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
 - Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
+- Relay E2E payload enforcement can be enabled with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; it rejects plaintext relay payloads and forwards only opaque `e2e_envelope` payloads.
 - The in-memory challenge and rate-limit stores are appropriate for the single-process hosted MVP; production multi-instance deployment should move them to Redis or the managed data store.
 
 Exit criteria:
@@ -511,7 +513,7 @@ Relay tests:
 
 - device registration
 - signed websocket auth
-- E2E envelope relay without plaintext access
+- E2E envelope enforcement rejects plaintext relay payloads
 - replayed encrypted payload rejected
 - pairing challenge expiration
 - pairing claim rate limiting
