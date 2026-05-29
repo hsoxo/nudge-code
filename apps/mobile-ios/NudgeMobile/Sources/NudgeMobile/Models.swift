@@ -116,8 +116,10 @@ struct TerminalTab: Identifiable, Codable, Equatable, Sendable {
     var profile: TerminalProfile
     var agentStatus: AgentStatus
     var previewText: String
+    var replayOutputBase64: String = ""
+    var replayOutputSequence: Int = 0
+    var pendingOutputBase64: String = ""
     var outputSequence: Int = 0
-    var pendingOutputText: String = ""
 }
 
 struct BindingDraft: Equatable, Sendable {

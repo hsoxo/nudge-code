@@ -4,6 +4,8 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
+    private static let maxReplayOutputBytes = 64 * 1024
+
     var machines: [Machine]
     var tabsByMachine: [String: [TerminalTab]]
     var selectedMachineID: String?
@@ -442,27 +444,60 @@ final class AppModel {
     }
 
     private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
-        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == snapshot.tabID }) else {
+        guard var tabs = tabsByMachine[machineID],
+              let tabIndex = tabs.firstIndex(where: { $0.id == snapshot.tabID })
+        else {
             return
         }
-        tabsByMachine[machineID]?[tabIndex].profile = snapshot.profile
-        tabsByMachine[machineID]?[tabIndex].previewText = snapshot.text
-        tabsByMachine[machineID]?[tabIndex].pendingOutputText = ""
+        tabs[tabIndex].profile = snapshot.profile
+        tabs[tabIndex].previewText = snapshot.text
+        tabs[tabIndex].replayOutputBase64 = ""
+        tabs[tabIndex].replayOutputSequence += 1
+        tabs[tabIndex].pendingOutputBase64 = ""
+        tabsByMachine[machineID] = tabs
     }
 
     private func applyTerminalOutput(_ output: TerminalOutput, machineID: String) {
-        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == output.tabID }) else {
+        guard var tabs = tabsByMachine[machineID],
+              let tabIndex = tabs.firstIndex(where: { $0.id == output.tabID })
+        else {
             return
         }
-        tabsByMachine[machineID]?[tabIndex].pendingOutputText = output.text
-        tabsByMachine[machineID]?[tabIndex].outputSequence += 1
+        if output.isReplay {
+            tabs[tabIndex].replayOutputBase64 = output.bytesBase64
+            tabs[tabIndex].replayOutputSequence += 1
+            tabs[tabIndex].pendingOutputBase64 = ""
+            tabsByMachine[machineID] = tabs
+            return
+        }
+        tabs[tabIndex].replayOutputBase64 = appendBase64Output(
+            tabs[tabIndex].replayOutputBase64,
+            output.bytesBase64
+        )
+        tabs[tabIndex].pendingOutputBase64 = output.bytesBase64
+        tabs[tabIndex].outputSequence += 1
+        tabsByMachine[machineID] = tabs
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
-        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == update.tabID }) else {
+        guard var tabs = tabsByMachine[machineID],
+              let tabIndex = tabs.firstIndex(where: { $0.id == update.tabID })
+        else {
             return
         }
-        tabsByMachine[machineID]?[tabIndex].agentStatus = update.status
+        tabs[tabIndex].agentStatus = update.status
+        tabsByMachine[machineID] = tabs
+    }
+
+    private func appendBase64Output(_ existingBase64: String, _ newBase64: String) -> String {
+        var data = Data(base64Encoded: existingBase64) ?? Data()
+        if let newData = Data(base64Encoded: newBase64) {
+            data.append(newData)
+        }
+        if data.count > Self.maxReplayOutputBytes {
+            data.removeFirst(data.count - Self.maxReplayOutputBytes)
+        }
+        return data.base64EncodedString()
     }
 
     static func preview() -> AppModel {

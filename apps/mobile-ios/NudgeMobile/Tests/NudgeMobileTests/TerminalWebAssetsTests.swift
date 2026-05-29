@@ -25,6 +25,17 @@ struct TerminalWebAssetsTests {
         #expect(html.contains("followCursor(widthMode)"))
     }
 
+    @Test func terminalRendererSupportsBase64ReplayAndLiveOutput() throws {
+        let url = try #require(TerminalWebAssets.indexURL())
+        let html = try String(contentsOf: url, encoding: .utf8)
+
+        #expect(html.contains("base64ToBytes(base64)"))
+        #expect(html.contains("setReplayOutputBase64(base64)"))
+        #expect(html.contains("writeOutputBase64(base64)"))
+        #expect(html.contains("replayBufferLimit = 64 * 1024"))
+        #expect(html.contains("term.write(bytes)"))
+    }
+
     @Test func terminalRendererReportsMeasuredPhoneProfile() throws {
         let url = try #require(TerminalWebAssets.indexURL())
         let html = try String(contentsOf: url, encoding: .utf8)

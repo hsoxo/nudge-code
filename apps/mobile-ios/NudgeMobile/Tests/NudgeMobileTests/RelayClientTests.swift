@@ -341,7 +341,8 @@ struct RelayClientTests {
         #expect(state.tabs.first?.id == "default")
         #expect(outputEvent == .terminalOutput(TerminalOutput(
             tabID: "default",
-            text: "Claude ready"
+            text: "Claude ready",
+            isReplay: true
         )))
         #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
     }
@@ -399,7 +400,34 @@ struct RelayClientTests {
         #expect(socket.sent.isEmpty)
         #expect(event == .terminalOutput(TerminalOutput(
             tabID: "default",
-            text: "\u{001B}[31mred\n"
+            bytesBase64: "G1szMW1yZWQK"
+        )))
+    }
+
+    @Test func openSessionPreservesNonUtf8TerminalOutputBytes() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","ok":true,"data":{"tabId":"default","bytesBase64":"//4A"}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "unused" }
+        )
+
+        let session = try await client.openSession(machine: activeMachine)
+        let event = try await session.receiveEvent()
+        session.close()
+
+        #expect(event == .terminalOutput(TerminalOutput(
+            tabID: "default",
+            bytesBase64: "//4A"
         )))
     }
 

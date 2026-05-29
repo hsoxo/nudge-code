@@ -354,8 +354,52 @@ struct BindingClaimTests {
 
         #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ ")
-        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputText == "echo hi\r\nhi\r\n")
+        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == Data("echo hi\r\nhi\r\n".utf8).base64EncodedString())
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("echo hi\r\nhi\r\n".utf8).base64EncodedString())
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
+    }
+
+    @Test func appModelAppliesTerminalOutputReplayWithoutLiveIncrement() async throws {
+        let machine = activeMachine()
+        let remoteTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let replayBase64 = Data("older output\r\n".utf8).base64EncodedString()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalOutput(TerminalOutput(tabID: "default", bytesBase64: replayBase64, isReplay: true))
+        ], suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.replayOutputSequence == 1
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == replayBase64)
+        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == "")
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputSequence == 1)
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 0)
     }
 
     @Test func appModelAppliesLiveAgentStatusWithoutSnapshotRequest() async throws {
@@ -480,7 +524,7 @@ struct BindingClaimTests {
 
         try await waitUntil {
             client.openSessionRequests.count == 2 &&
-                model.tabsByMachine[machine.id]?.first?.pendingOutputText == "Codex reconnected"
+                model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == Data("Codex reconnected".utf8).base64EncodedString()
         }
 
         #expect(client.openSessionRequests.map(\.id) == [machine.id, machine.id])
@@ -493,7 +537,7 @@ struct BindingClaimTests {
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "relay session synced")
         #expect(model.tabsByMachine[machine.id]?.first?.agentStatus.kind == .codex)
-        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputText == "Codex reconnected")
+        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == Data("Codex reconnected".utf8).base64EncodedString())
 
         syncTask.cancel()
         await syncTask.value

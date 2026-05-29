@@ -336,7 +336,27 @@ struct TerminalSnapshot: Equatable, Sendable {
 
 struct TerminalOutput: Equatable, Sendable {
     var tabID: String
-    var text: String
+    var bytesBase64: String
+    var isReplay: Bool = false
+
+    var text: String {
+        guard let data = Data(base64Encoded: bytesBase64),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return ""
+        }
+        return text
+    }
+
+    init(tabID: String, bytesBase64: String, isReplay: Bool = false) {
+        self.tabID = tabID
+        self.bytesBase64 = bytesBase64
+        self.isReplay = isReplay
+    }
+
+    init(tabID: String, text: String, isReplay: Bool = false) {
+        self.init(tabID: tabID, bytesBase64: Data(text.utf8).base64EncodedString(), isReplay: isReplay)
+    }
 }
 
 struct AgentStatusUpdate: Equatable, Sendable {
@@ -594,7 +614,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             }
             return .terminalOutput(TerminalOutput(
                 tabID: output.tabId,
-                text: output.text
+                bytesBase64: output.bytesBase64,
+                isReplay: true
             ))
         case .terminalInput(let tabID):
             return .terminalInputAccepted(tabID: tabID)
@@ -620,7 +641,7 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
         if let output = data.output {
             return .terminalOutput(TerminalOutput(
                 tabID: output.tabId,
-                text: output.text
+                bytesBase64: output.bytesBase64
             ))
         }
         if let agentStatus = try data.agentStatusUpdate {
@@ -953,13 +974,13 @@ private struct RelayDaemonDataResponse: Decodable {
     }
 
     var output: RelayTerminalOutputResponse? {
-        guard let tabId, let bytesBase64,
-              let data = Data(base64Encoded: bytesBase64),
-              let text = String(data: data, encoding: .utf8)
+        guard let tabId,
+              let bytesBase64,
+              Data(base64Encoded: bytesBase64) != nil
         else {
             return nil
         }
-        return RelayTerminalOutputResponse(tabId: tabId, text: text)
+        return RelayTerminalOutputResponse(tabId: tabId, bytesBase64: bytesBase64)
     }
 
     var agentStatusUpdate: AgentStatusUpdate? {
@@ -981,7 +1002,7 @@ private struct RelayTerminalSnapshotResponse: Decodable {
 
 private struct RelayTerminalOutputResponse: Decodable {
     var tabId: String
-    var text: String
+    var bytesBase64: String
 }
 
 private struct RelayTabResponse: Decodable {

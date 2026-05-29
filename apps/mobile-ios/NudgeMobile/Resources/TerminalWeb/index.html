@@ -64,6 +64,16 @@
     term.open(container);
     let lastReportedPhoneProfile = null;
     let resizeReportHandle = 0;
+    let encoder = new TextEncoder();
+    let replayBufferLimit = 64 * 1024;
+    let snapshotState = {
+      text: '',
+      widthMode: 'phone',
+      rows: 24,
+      cols: 80
+    };
+    let replayBuffer = [];
+    let liveBuffer = [];
 
     function cellWidth() {
       return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
@@ -139,15 +149,67 @@
       });
     }
 
+    function base64ToBytes(base64) {
+      if (!base64) {
+        return new Uint8Array();
+      }
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    function appendBounded(buffer, bytes) {
+      for (const byte of bytes) {
+        buffer.push(byte);
+      }
+      const overflow = buffer.length - replayBufferLimit;
+      if (overflow > 0) {
+        buffer.splice(0, overflow);
+      }
+    }
+
+    function writeBytes(bytes) {
+      if (!bytes || bytes.length === 0) {
+        return;
+      }
+      term.write(bytes);
+    }
+
+    function resetAndReplay() {
+      syncTerminalSize(snapshotState.widthMode, snapshotState.rows, snapshotState.cols);
+      term.reset();
+      term.write(snapshotState.text || '');
+      writeBytes(new Uint8Array(replayBuffer));
+      writeBytes(new Uint8Array(liveBuffer));
+      followCursor(snapshotState.widthMode);
+    }
+
     window.nudgeTerminal = {
       setSnapshot(text, widthMode, rows, cols) {
-        syncTerminalSize(widthMode, rows, cols);
-        term.reset();
-        term.write(text || '');
-        followCursor(widthMode);
+        snapshotState.text = text || '';
+        snapshotState.widthMode = widthMode || 'phone';
+        snapshotState.rows = rows;
+        snapshotState.cols = cols;
+        resetAndReplay();
+      },
+      setReplayOutputBase64(base64) {
+        replayBuffer.splice(0, replayBuffer.length, ...base64ToBytes(base64));
+        liveBuffer.splice(0, liveBuffer.length);
+        resetAndReplay();
+      },
+      writeOutputBase64(base64) {
+        const bytes = base64ToBytes(base64);
+        appendBounded(liveBuffer, bytes);
+        writeBytes(bytes);
+        followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       },
       writeOutput(text) {
-        term.write(text || '');
+        const bytes = encoder.encode(text || '');
+        appendBounded(liveBuffer, bytes);
+        writeBytes(bytes);
         followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       }
     };

@@ -110,7 +110,9 @@ struct TerminalView: View {
             snapshotText: tab.previewText,
             widthMode: tab.widthMode,
             profile: tab.profile,
-            outputText: tab.pendingOutputText,
+            replayOutputBase64: tab.replayOutputBase64,
+            replayOutputSequence: tab.replayOutputSequence,
+            outputBase64: tab.pendingOutputBase64,
             outputSequence: tab.outputSequence,
             onPhoneProfileMeasured: onPhoneProfileMeasured
         )
@@ -126,7 +128,9 @@ struct TerminalWebView: UIViewRepresentable {
     var snapshotText: String
     var widthMode: WidthMode
     var profile: TerminalProfile
-    var outputText: String
+    var replayOutputBase64: String
+    var replayOutputSequence: Int
+    var outputBase64: String
     var outputSequence: Int
     var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
@@ -146,7 +150,9 @@ struct TerminalWebView: UIViewRepresentable {
             snapshotText: snapshotText,
             widthMode: widthMode,
             profile: profile,
-            outputText: outputText,
+            replayOutputBase64: replayOutputBase64,
+            replayOutputSequence: replayOutputSequence,
+            outputBase64: outputBase64,
             outputSequence: outputSequence,
             onPhoneProfileMeasured: onPhoneProfileMeasured,
             in: webView
@@ -165,7 +171,9 @@ struct TerminalWebView: UIViewRepresentable {
         private var isLoaded = false
         private var pendingSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
         private var lastSnapshot: (text: String, widthMode: WidthMode, profile: TerminalProfile)?
-        private var pendingOutput: (text: String, sequence: Int)?
+        private var pendingReplayOutput: (base64: String, sequence: Int)?
+        private var pendingOutput: (base64: String, sequence: Int)?
+        private var lastReplayOutputSequence = 0
         private var lastOutputSequence = 0
         private var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
@@ -181,7 +189,9 @@ struct TerminalWebView: UIViewRepresentable {
             snapshotText: String,
             widthMode: WidthMode,
             profile: TerminalProfile,
-            outputText: String,
+            replayOutputBase64: String,
+            replayOutputSequence: Int,
+            outputBase64: String,
             outputSequence: Int,
             onPhoneProfileMeasured: @escaping (TerminalProfile) -> Void,
             in webView: WKWebView
@@ -190,8 +200,11 @@ struct TerminalWebView: UIViewRepresentable {
             let snapshot = (text: snapshotText, widthMode: widthMode, profile: profile)
             guard isLoaded else {
                 pendingSnapshot = snapshot
+                if replayOutputSequence > lastReplayOutputSequence {
+                    pendingReplayOutput = (base64: replayOutputBase64, sequence: replayOutputSequence)
+                }
                 if outputSequence > lastOutputSequence {
-                    pendingOutput = (text: outputText, sequence: outputSequence)
+                    pendingOutput = (base64: outputBase64, sequence: outputSequence)
                 }
                 return
             }
@@ -200,8 +213,11 @@ struct TerminalWebView: UIViewRepresentable {
                 lastSnapshot?.profile != profile {
                 apply(snapshot, in: webView)
             }
+            if replayOutputSequence > lastReplayOutputSequence {
+                applyReplayOutput(replayOutputBase64, sequence: replayOutputSequence, in: webView)
+            }
             if outputSequence > lastOutputSequence {
-                applyOutput(outputText, sequence: outputSequence, in: webView)
+                applyOutput(outputBase64, sequence: outputSequence, in: webView)
             }
         }
 
@@ -211,8 +227,12 @@ struct TerminalWebView: UIViewRepresentable {
                 apply(pendingSnapshot, in: webView)
                 self.pendingSnapshot = nil
             }
+            if let pendingReplayOutput {
+                applyReplayOutput(pendingReplayOutput.base64, sequence: pendingReplayOutput.sequence, in: webView)
+                self.pendingReplayOutput = nil
+            }
             if let pendingOutput {
-                applyOutput(pendingOutput.text, sequence: pendingOutput.sequence, in: webView)
+                applyOutput(pendingOutput.base64, sequence: pendingOutput.sequence, in: webView)
                 self.pendingOutput = nil
             }
         }
@@ -228,11 +248,22 @@ struct TerminalWebView: UIViewRepresentable {
             )
         }
 
-        private func applyOutput(_ text: String, sequence: Int, in webView: WKWebView) {
-            lastOutputSequence = sequence
-            let encodedText = Self.javascriptString(text)
+        private func applyReplayOutput(_ base64: String, sequence: Int, in webView: WKWebView) {
+            lastReplayOutputSequence = sequence
+            let encodedBase64 = Self.javascriptString(base64)
             webView.evaluateJavaScript(
-                "window.nudgeTerminal && window.nudgeTerminal.writeOutput(\(encodedText));"
+                "window.nudgeTerminal && window.nudgeTerminal.setReplayOutputBase64(\(encodedBase64));"
+            )
+        }
+
+        private func applyOutput(_ base64: String, sequence: Int, in webView: WKWebView) {
+            lastOutputSequence = sequence
+            if base64.isEmpty {
+                return
+            }
+            let encodedBase64 = Self.javascriptString(base64)
+            webView.evaluateJavaScript(
+                "window.nudgeTerminal && window.nudgeTerminal.writeOutputBase64(\(encodedBase64));"
             )
         }
 
