@@ -219,6 +219,8 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     binding.status = 'revoked';
     binding.revokedAt = now();
+    closeBindingSockets(binding, 'binding_revoked');
+    clearBindingQueues(binding);
     persistRelayState();
     writeJson(response, 200, { binding });
     return;
@@ -360,6 +362,11 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       websocket.send(JSON.stringify({ type: 'error', error: 'invalid_json' }));
       return;
     }
+    if (binding.status !== 'active') {
+      websocket.send(JSON.stringify({ type: 'error', error: 'binding_not_active' }));
+      websocket.close(4001, 'binding_not_active');
+      return;
+    }
     if (!isBindingParticipant(binding, message.toDeviceId) || message.toDeviceId === device.id) {
       websocket.send(JSON.stringify({ type: 'error', error: 'route_not_authorized' }));
       return;
@@ -388,6 +395,31 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       sockets.delete(device.id);
     }
   });
+}
+
+function closeBindingSockets(binding: Binding, reason: string): void {
+  for (const deviceId of bindingDeviceIds(binding)) {
+    const socket = sockets.get(deviceId);
+    if (socket && socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ type: 'error', error: reason }));
+      socket.close(4001, reason);
+    }
+  }
+}
+
+function clearBindingQueues(binding: Binding): void {
+  const participants = new Set(bindingDeviceIds(binding));
+  for (const deviceId of participants) {
+    const queue = messages.get(deviceId);
+    if (!queue) {
+      continue;
+    }
+    messages.set(deviceId, queue.filter((message) => message.bindingId !== binding.id));
+  }
+}
+
+function bindingDeviceIds(binding: Binding): string[] {
+  return [binding.daemonDeviceId, binding.phoneDeviceId].filter((deviceId): deviceId is string => Boolean(deviceId));
 }
 
 function makePairingCode(): string {
