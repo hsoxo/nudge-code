@@ -267,7 +267,7 @@ Current implementation status:
 - `nudge bind phone` renders a terminal QR code and can `--wait --yes` for simulated phone claim and computer confirmation.
 - Hidden smoke helpers can simulate phone claim and computer confirmation until the native iOS binding UI exists.
 - `nudge bind revoke` revokes the relay binding and clears local binding state.
-- Native iOS QR scanning, phone signed websocket URLs, daemon signed websocket URLs, participant public key caching, live relay E2E encryption wiring, and spawned relay/daemon/simulated-phone E2E smoke coverage are implemented. Reconnect and true mobile-app process integration coverage remain open Phase 5/relay work.
+- Native iOS QR scanning, phone signed websocket URLs, daemon signed websocket URLs, participant public key caching, live relay E2E encryption wiring, spawned relay/daemon/simulated-phone E2E smoke coverage, and in-process iOS relay-session coverage for encrypted reconnect replay are implemented. On-device mobile-app process integration coverage against a hosted relay and real daemon remains open Phase 5/relay work.
 
 Tasks:
 
@@ -304,7 +304,7 @@ Current implementation status:
 
 - `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
 - The scaffold includes machine list, tab strip, terminal preview WebView with bundled xterm.js assets, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with persisted machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, byte-safe replayed terminal output tail, throttled ephemeral daemon-pushed live terminal byte updates, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
-- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. The long-lived mobile relay session now accepts daemon-pushed agent status updates without forcing a terminal snapshot, so shortcut keyboards can react to Claude/Codex state changes. The iOS terminal model preserves terminal output as base64 bytes, distinguishes reconnect replay from live incremental output, and keeps a bounded replay buffer for WebView rebuilds. True mobile-app process integration coverage remains open.
+- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. The long-lived mobile relay session now accepts daemon-pushed agent status updates without forcing a terminal snapshot, so shortcut keyboards can react to Claude/Codex state changes. The iOS terminal model preserves terminal output as base64 bytes, distinguishes reconnect replay from live incremental output, and keeps a bounded replay buffer for WebView rebuilds. In-process iOS relay-session tests cover encrypted terminal input, daemon-pushed live output, and reconnect replay; on-device mobile-app process integration coverage remains open.
 
 Tasks:
 

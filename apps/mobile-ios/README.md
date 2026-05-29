@@ -45,7 +45,8 @@ Current scaffold:
 - SwiftProtobuf-generated E2E handshake and encrypted envelope protocol types.
 - CryptoKit E2E handshake/envelope helpers for transcript signatures, X25519/HKDF/ChaCha20-Poly1305 encryption, and replay checks.
 - E2E relay handshake exchange and encrypted request/response handling in `RelayClient`.
+- in-process relay-session coverage for encrypted terminal input, daemon-pushed live output, and reconnect replay handling.
 
 Still open:
 
-- True mobile-app process integration coverage for encrypted terminal input, live output, and reconnect replay.
+- On-device mobile-app process integration coverage against a hosted relay and real daemon.

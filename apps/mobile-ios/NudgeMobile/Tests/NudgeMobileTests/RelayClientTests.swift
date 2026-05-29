@@ -347,6 +347,89 @@ struct RelayClientTests {
         #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
     }
 
+    @Test func openSessionUsesE2EForInputLiveOutputAndReconnectReplay() async throws {
+        let phoneSigningPrivateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
+        let daemonSigningPrivateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 4, count: 32))
+        let binding = MachineBinding(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            daemonPublicKey: daemonSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            phonePublicKey: phoneSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            status: .active,
+            expiresAt: "2026-05-29T00:00:00Z"
+        )
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://relay.test")!,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: binding
+        )
+        let identityStore = MemoryPhoneIdentityStore(
+            publicKey: phoneSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            signingKey: phoneSigningPrivateKey.rawRepresentation
+        )
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#
+        ])
+        let daemonScript = E2ERelaySessionDaemonScript(
+            daemonSigningPrivateKey: daemonSigningPrivateKey,
+            daemonEphemeral: try E2EKeyPair(rawRepresentation: Data(repeating: 9, count: 32))
+        )
+        socket.onSend = { sent in
+            daemonScript.handle(sent: sent, socket: socket)
+        }
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let requestIDs = RequestIDSequence(["input-e2e", "replay-e2e"])
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: identityStore,
+            webSocketFactory: RecordingWebSocketFactory(socket: socket),
+            requestIDGenerator: { requestIDs.next() }
+        )
+
+        let session = try await client.openSession(machine: machine)
+        try await session.sendTerminalInput(tabID: "default", text: "echo hi", enter: true)
+        let inputEvent = try await session.receiveEvent()
+        let liveOutputEvent = try await session.receiveEvent()
+        try await session.requestTerminalOutput(tabID: "default", maxBytes: 4096)
+        let replayOutputEvent = try await session.receiveEvent()
+        session.close()
+
+        #expect(socket.sent.count == 3)
+        #expect(socket.sent[0].contains(#""type":"e2e_handshake_start""#))
+        #expect(socket.sent[1].contains(#""type":"e2e_envelope""#))
+        #expect(socket.sent[2].contains(#""type":"e2e_envelope""#))
+        #expect(!socket.sent[1].contains("echo hi"))
+        #expect(!socket.sent[1].contains(#""tabId":"default""#))
+        #expect(!socket.sent[2].contains(#""maxBytes""#))
+        #expect(!socket.sent[2].contains(#""replay-e2e""#))
+        #expect(daemonScript.errors.isEmpty)
+        #expect(daemonScript.decryptedPayloads.count == 2)
+        #expect(daemonScript.decryptedPayloads[0]["type"] as? String == "terminal_input")
+        #expect(daemonScript.decryptedPayloads[0]["requestId"] as? String == "input-e2e")
+        #expect(daemonScript.decryptedPayloads[0]["tabId"] as? String == "default")
+        #expect(daemonScript.decryptedPayloads[0]["text"] as? String == "echo hi")
+        #expect(daemonScript.decryptedPayloads[1]["type"] as? String == "terminal_output")
+        #expect(daemonScript.decryptedPayloads[1]["requestId"] as? String == "replay-e2e")
+        #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
+        #expect(liveOutputEvent == .terminalOutput(TerminalOutput(
+            tabID: "default",
+            text: "live output"
+        )))
+        #expect(replayOutputEvent == .terminalOutput(TerminalOutput(
+            tabID: "default",
+            text: "replayed output",
+            isReplay: true
+        )))
+        #expect(socket.closed)
+    }
+
     @Test func openSessionAcceptsUnsolicitedLiveTerminalSnapshot() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [socketChallengeResponse()]
@@ -650,11 +733,177 @@ private final class RecordingWebSocket: RelayWebSocketTransport, @unchecked Send
     }
 }
 
+private final class E2ERelaySessionDaemonScript: @unchecked Sendable {
+    let daemonSigningPrivateKey: Curve25519.Signing.PrivateKey
+    let daemonEphemeral: E2EKeyPair
+    private var daemonSession: E2ESession?
+    var decryptedPayloads: [[String: Any]] = []
+    var errors: [String] = []
+
+    init(
+        daemonSigningPrivateKey: Curve25519.Signing.PrivateKey,
+        daemonEphemeral: E2EKeyPair
+    ) {
+        self.daemonSigningPrivateKey = daemonSigningPrivateKey
+        self.daemonEphemeral = daemonEphemeral
+    }
+
+    func handle(sent: String, socket: RecordingWebSocket) {
+        do {
+            guard let payload = relayPayload(from: sent),
+                  let type = payload["type"] as? String
+            else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            switch type {
+            case "e2e_handshake_start":
+                try handleHandshakeStart(payload: payload, socket: socket)
+            case "e2e_envelope":
+                try handleEnvelope(payload: payload, socket: socket)
+            default:
+                throw RelayClientError.unsupportedRelayValue(type)
+            }
+        } catch {
+            errors.append(String(describing: error))
+        }
+    }
+
+    private func handleHandshakeStart(payload: [String: Any], socket: RecordingWebSocket) throws {
+        let start = try JSONDecoder()
+            .decode(E2EHandshakeStartRelayPayload.self, from: JSONSerialization.data(withJSONObject: payload))
+            .start()
+        var finish = Nudge_V1_E2EHandshakeFinish()
+        finish.sessionID = start.sessionID
+        finish.senderDeviceID = "daemon_1"
+        finish.recipientDeviceID = "phone_1"
+        finish.senderEphemeralPublicKey = daemonEphemeral.publicKey
+        finish.acceptedAt = "2026-05-29T00:00:01.000Z"
+        finish = try signE2EHandshakeFinish(
+            signingPrivateKeyRaw: daemonSigningPrivateKey.rawRepresentation,
+            start: start,
+            finish: finish
+        )
+        let finishPayload = try jsonObjectString(E2EHandshakeFinishRelayPayload(finish: finish))
+        socket.messages.append(#"{"type":"message","message":{"payload":\#(finishPayload)}}"#)
+        daemonSession = try E2ESession(
+            sessionID: start.sessionID,
+            localDeviceID: "daemon_1",
+            remoteDeviceID: "phone_1",
+            localKeyPair: daemonEphemeral,
+            remotePublicKey: start.senderEphemeralPublicKey,
+            role: .daemon
+        )
+    }
+
+    private func handleEnvelope(payload: [String: Any], socket: RecordingWebSocket) throws {
+        guard var session = daemonSession else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        let envelope = try JSONDecoder()
+            .decode(E2ERelayPayload.self, from: JSONSerialization.data(withJSONObject: payload))
+            .envelope()
+        let plaintext = try session.decrypt(envelope)
+        guard let request = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              let type = request["type"] as? String
+        else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        daemonSession = session
+        decryptedPayloads.append(request)
+        switch type {
+        case "terminal_input":
+            try appendEncryptedResponse(
+                socket: socket,
+                messageType: "terminal_input_response",
+                response: RelayDaemonPayloadFixture(
+                    type: "daemon_response",
+                    requestId: request["requestId"] as? String,
+                    ok: true,
+                    data: ["accepted": true]
+                )
+            )
+            try appendEncryptedResponse(
+                socket: socket,
+                messageType: "terminal_output",
+                response: RelayDaemonPayloadFixture(
+                    type: "daemon_response",
+                    requestId: nil,
+                    ok: true,
+                    data: [
+                        "tabId": "default",
+                        "bytesBase64": Data("live output".utf8).base64EncodedString()
+                    ]
+                )
+            )
+        case "terminal_output":
+            try appendEncryptedResponse(
+                socket: socket,
+                messageType: "terminal_output",
+                response: RelayDaemonPayloadFixture(
+                    type: "daemon_response",
+                    requestId: request["requestId"] as? String,
+                    ok: true,
+                    data: [
+                        "tabId": "default",
+                        "bytesBase64": Data("replayed output".utf8).base64EncodedString()
+                    ]
+                )
+            )
+        default:
+            throw RelayClientError.unsupportedRelayValue(type)
+        }
+    }
+
+    private func appendEncryptedResponse(
+        socket: RecordingWebSocket,
+        messageType: String,
+        response: RelayDaemonPayloadFixture
+    ) throws {
+        guard var session = daemonSession else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        let responseData = try JSONEncoder().encode(response)
+        let encrypted = try session.encrypt(messageType: messageType, plaintext: responseData)
+        daemonSession = session
+        let encryptedPayload = try jsonObjectString(E2ERelayPayload(envelope: encrypted))
+        socket.messages.append(#"{"type":"message","message":{"payload":\#(encryptedPayload)}}"#)
+    }
+}
+
 private struct RelayDaemonPayloadFixture: Encodable {
     var type: String
-    var requestId: String
+    var requestId: String?
     var ok: Bool
-    var data: [String: Bool]
+    var data: [String: RelayDaemonFixtureValue]
+
+    init(type: String, requestId: String?, ok: Bool, data: [String: Bool]) {
+        self.type = type
+        self.requestId = requestId
+        self.ok = ok
+        self.data = data.mapValues { .bool($0) }
+    }
+
+    init(type: String, requestId: String?, ok: Bool, data: [String: String]) {
+        self.type = type
+        self.requestId = requestId
+        self.ok = ok
+        self.data = data.mapValues { .string($0) }
+    }
+}
+
+private enum RelayDaemonFixtureValue: Encodable {
+    case bool(Bool)
+    case string(String)
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .bool(let value):
+            try container.encode(value)
+        case .string(let value):
+            try container.encode(value)
+        }
+    }
 }
 
 private func relayPayload(from socketMessage: String) -> [String: Any]? {
