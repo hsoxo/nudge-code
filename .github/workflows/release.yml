@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rust-release:
+    name: Rust ${{ matrix.target.os }} ${{ matrix.target.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target:
+              os: macos
+              arch: aarch64
+          - runner: macos-15-intel
+            target:
+              os: macos
+              arch: x86_64
+          - runner: ubuntu-24.04
+            target:
+              os: linux
+              arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target:
+              os: linux
+              arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            rustup toolchain install stable --profile minimal
+            rustup default stable
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build nudge
+        run: cargo build --release -p nudge-cli
+
+      - name: Package release artifact
+        run: scripts/package-release.sh
+        env:
+          NUDGE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          NUDGE_TARGET_OS: ${{ matrix.target.os }}
+          NUDGE_TARGET_ARCH: ${{ matrix.target.arch }}
+
+      - name: Smoke installer against packaged artifact
+        run: scripts/smoke-install.sh
+        env:
+          NUDGE_TARGET_OS: ${{ matrix.target.os }}
+          NUDGE_TARGET_ARCH: ${{ matrix.target.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: |
+            dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz
+            dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-github-release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: rust-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
