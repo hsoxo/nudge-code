@@ -7,6 +7,7 @@ import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
 import { MemorySocketChallengeStore, MemorySocketNonceStore, verifySocketSignature } from './auth.js';
 
 type DeviceKind = 'daemon' | 'phone';
+type DeviceStatus = 'active' | 'revoked';
 type BindingStatus = 'pending' | 'claimed' | 'active' | 'revoked';
 
 interface Device {
@@ -14,6 +15,8 @@ interface Device {
   kind: DeviceKind;
   publicKey: string;
   createdAt: string;
+  status?: DeviceStatus;
+  revokedAt?: string;
 }
 
 interface Binding {
@@ -48,6 +51,7 @@ interface PersistedRelayState {
 
 type AuditEventType =
   | 'device_registered'
+  | 'device_revoked'
   | 'binding_started'
   | 'binding_claimed'
   | 'binding_confirmed'
@@ -208,11 +212,37 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       kind: body.kind,
       publicKey: body.publicKey,
       createdAt: now(),
+      status: 'active',
     };
     devices.set(device.id, device);
     persistRelayState();
     audit('device_registered', { deviceKind: device.kind, deviceId: device.id });
     writeJson(response, 201, { device });
+    return;
+  }
+
+  if (method === 'POST' && url.pathname === '/api/devices/revoke') {
+    const body = await readJson<{ deviceId?: string; actorDeviceId?: string }>(request);
+    const device = body.deviceId ? devices.get(body.deviceId) : undefined;
+    if (!device) {
+      writeJson(response, 404, { error: 'device_not_registered' });
+      return;
+    }
+    const actorDeviceId = body.actorDeviceId ?? body.deviceId;
+    const actor = actorDeviceId ? devices.get(actorDeviceId) : undefined;
+    if (!actor || !isDeviceActive(actor)) {
+      writeJson(response, 403, { error: 'device_revoke_not_authorized' });
+      return;
+    }
+    if (!canRevokeDevice(device.id, actor.id)) {
+      writeJson(response, 403, { error: 'device_revoke_not_authorized' });
+      return;
+    }
+    const revokedBindings = revokeDevice(device, actor.id);
+    writeJson(response, 200, {
+      device,
+      revokedBindings: revokedBindings.map(bindingResponse),
+    });
     return;
   }
 
@@ -222,6 +252,10 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const binding = body.bindingId ? bindings.get(body.bindingId) : undefined;
     if (!device) {
       writeJson(response, 401, { error: 'device_not_registered' });
+      return;
+    }
+    if (!isDeviceActive(device)) {
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     if (!binding || binding.status !== 'active') {
@@ -258,6 +292,10 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const daemon = body.daemonDeviceId ? devices.get(body.daemonDeviceId) : undefined;
     if (!daemon || daemon.kind !== 'daemon') {
       writeJson(response, 404, { error: 'daemon_not_registered' });
+      return;
+    }
+    if (!isDeviceActive(daemon)) {
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     if (activeBindingForDaemon(daemon.id)) {
@@ -309,6 +347,14 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 404, { error: 'phone_not_registered' });
       return;
     }
+    if (!isDeviceActive(phone)) {
+      audit('pairing_claim_rejected', {
+        deviceId: phone.id,
+        error: 'device_revoked',
+      });
+      writeJson(response, 403, { error: 'device_revoked' });
+      return;
+    }
     if (nonRevokedBindingsForPhone(phone.id).length >= FREE_ENTITLEMENT.maxBoundComputers) {
       audit('pairing_claim_rejected', {
         deviceId: phone.id,
@@ -324,6 +370,15 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
         error: 'pairing_code_not_found',
       });
       writeJson(response, 404, { error: 'pairing_code_not_found' });
+      return;
+    }
+    if (!isDeviceActive(devices.get(binding.daemonDeviceId))) {
+      audit('pairing_claim_rejected', {
+        bindingId: binding.id,
+        deviceId: phone.id,
+        error: 'device_revoked',
+      });
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     if (Date.parse(binding.expiresAt) < Date.now()) {
@@ -356,6 +411,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 404, { error: 'binding_not_found' });
       return;
     }
+    const device = devices.get(deviceId);
+    if (!isDeviceActive(device)) {
+      writeJson(response, 403, { error: 'device_revoked' });
+      return;
+    }
     writeJson(response, 200, { binding: bindingResponse(binding) });
     return;
   }
@@ -371,8 +431,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 403, { error: 'daemon_not_authorized_for_binding' });
       return;
     }
+    const daemon = devices.get(binding.daemonDeviceId);
+    if (!isDeviceActive(daemon)) {
+      writeJson(response, 403, { error: 'device_revoked' });
+      return;
+    }
     if (!binding.phoneDeviceId) {
       writeJson(response, 409, { error: 'binding_has_no_phone' });
+      return;
+    }
+    const phone = devices.get(binding.phoneDeviceId);
+    if (!isDeviceActive(phone)) {
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     const phoneBindingCount = nonRevokedBindingsForPhone(binding.phoneDeviceId)
@@ -398,6 +468,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     const binding = body.bindingId ? bindings.get(body.bindingId) : undefined;
     if (!binding || !isBindingParticipant(binding, body.deviceId)) {
       writeJson(response, 404, { error: 'binding_not_found' });
+      return;
+    }
+    const actor = devices.get(body.deviceId);
+    if (!isDeviceActive(actor)) {
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     binding.status = 'revoked';
@@ -439,6 +514,12 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     if (body.fromDeviceId === body.toDeviceId) {
       writeJson(response, 400, { error: 'same_source_and_destination' });
+      return;
+    }
+    const fromDevice = devices.get(body.fromDeviceId);
+    const toDevice = devices.get(body.toDeviceId);
+    if (!isDeviceActive(fromDevice) || !isDeviceActive(toDevice)) {
+      writeJson(response, 403, { error: 'device_revoked' });
       return;
     }
     const payloadValidation = validateRelayPayload(body.payload, body.fromDeviceId, body.toDeviceId);
@@ -495,13 +576,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       return;
     }
     const deviceId = url.searchParams.get('deviceId') ?? undefined;
-    if (!deviceId || !devices.has(deviceId)) {
+    const device = deviceId ? devices.get(deviceId) : undefined;
+    if (!device) {
       writeJson(response, 404, { error: 'device_not_registered' });
       return;
     }
-    const queue = messages.get(deviceId) ?? [];
-    messages.set(deviceId, []);
-    audit('message_poll', { deviceId, count: queue.length });
+    if (!isDeviceActive(device)) {
+      writeJson(response, 403, { error: 'device_revoked' });
+      return;
+    }
+    const queue = messages.get(device.id) ?? [];
+    messages.set(device.id, []);
+    audit('message_poll', { deviceId: device.id, count: queue.length });
     writeJson(response, 200, { messages: queue });
     return;
   }
@@ -561,6 +647,49 @@ function isBindingParticipant(binding: Binding, deviceId: string | undefined): d
   return Boolean(deviceId && (deviceId === binding.daemonDeviceId || deviceId === binding.phoneDeviceId));
 }
 
+function isDeviceActive(device: Device | undefined): boolean {
+  return Boolean(device && device.status !== 'revoked');
+}
+
+function canRevokeDevice(deviceId: string, actorDeviceId: string): boolean {
+  if (deviceId === actorDeviceId) {
+    return true;
+  }
+  return [...bindings.values()].some(
+    (binding) =>
+      binding.status !== 'revoked' &&
+      isBindingParticipant(binding, deviceId) &&
+      isBindingParticipant(binding, actorDeviceId),
+  );
+}
+
+function revokeDevice(device: Device, actorDeviceId: string): Binding[] {
+  const revokedAt = now();
+  const revokedBindings: Binding[] = [];
+  device.status = 'revoked';
+  device.revokedAt = device.revokedAt ?? revokedAt;
+  for (const binding of bindings.values()) {
+    if (binding.status === 'revoked' || !isBindingParticipant(binding, device.id)) {
+      continue;
+    }
+    binding.status = 'revoked';
+    binding.revokedAt = binding.revokedAt ?? revokedAt;
+    closeBindingSockets(binding, 'device_revoked');
+    clearBindingQueues(binding);
+    revokedBindings.push(binding);
+  }
+  closeDeviceSocket(device.id, 'device_revoked');
+  clearDeviceQueues(device.id);
+  persistRelayState();
+  audit('device_revoked', {
+    deviceKind: device.kind,
+    deviceId: device.id,
+    actorDeviceId,
+    revokedBindings: revokedBindings.length,
+  });
+  return revokedBindings;
+}
+
 type SocketAuthorization =
   | { ok: true; device: Device; binding: Binding }
   | { ok: false; statusCode: number; error: string };
@@ -574,6 +703,9 @@ function authorizeSocket(
   const device = deviceId ? devices.get(deviceId) : undefined;
   if (!device || device.kind !== expectedKind) {
     return { ok: false, statusCode: 401, error: 'device_not_registered' };
+  }
+  if (!isDeviceActive(device)) {
+    return { ok: false, statusCode: 403, error: 'device_revoked' };
   }
   const signature = authorizeSocketSignature(device, bindingId, params);
   if (!signature.ok) {
@@ -625,8 +757,17 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       websocket.close(4001, 'binding_not_active');
       return;
     }
+    if (!isDeviceActive(devices.get(device.id))) {
+      websocket.send(JSON.stringify({ type: 'error', error: 'device_revoked' }));
+      websocket.close(4001, 'device_revoked');
+      return;
+    }
     if (!isBindingParticipant(binding, message.toDeviceId) || message.toDeviceId === device.id) {
       websocket.send(JSON.stringify({ type: 'error', error: 'route_not_authorized' }));
+      return;
+    }
+    if (!isDeviceActive(devices.get(message.toDeviceId))) {
+      websocket.send(JSON.stringify({ type: 'error', error: 'device_revoked' }));
       return;
     }
     const payloadValidation = validateRelayPayload(message.payload, device.id, message.toDeviceId);
@@ -691,6 +832,14 @@ function closeBindingSockets(binding: Binding, reason: string): void {
   }
 }
 
+function closeDeviceSocket(deviceId: string, reason: string): void {
+  const socket = sockets.get(deviceId);
+  if (socket && socket.readyState === socket.OPEN) {
+    socket.send(JSON.stringify({ type: 'error', error: reason }));
+    socket.close(4001, reason);
+  }
+}
+
 function clearBindingQueues(binding: Binding): void {
   const participants = new Set(bindingDeviceIds(binding));
   for (const deviceId of participants) {
@@ -699,6 +848,20 @@ function clearBindingQueues(binding: Binding): void {
       continue;
     }
     messages.set(deviceId, queue.filter((message) => message.bindingId !== binding.id));
+  }
+}
+
+function clearDeviceQueues(deviceId: string): void {
+  messages.delete(deviceId);
+  for (const [targetDeviceId, queue] of messages) {
+    const filtered = queue.filter(
+      (message) => message.fromDeviceId !== deviceId && message.toDeviceId !== deviceId,
+    );
+    if (filtered.length === 0) {
+      messages.delete(targetDeviceId);
+    } else if (filtered.length !== queue.length) {
+      messages.set(targetDeviceId, filtered);
+    }
   }
 }
 
@@ -1010,7 +1173,10 @@ function loadRelayState(): void {
     if (!isPersistedDevice(device)) {
       throw new Error(`invalid relay device in ${relayStatePath}`);
     }
-    devices.set(device.id, device);
+    devices.set(device.id, {
+      ...device,
+      status: device.status ?? 'active',
+    });
   }
   for (const binding of parsed.bindings) {
     if (!isPersistedBinding(binding)) {
@@ -1048,7 +1214,9 @@ function isPersistedDevice(value: unknown): value is Device {
     typeof device.id === 'string' &&
     (device.kind === 'daemon' || device.kind === 'phone') &&
     typeof device.publicKey === 'string' &&
-    typeof device.createdAt === 'string'
+    typeof device.createdAt === 'string' &&
+    (device.status === undefined || device.status === 'active' || device.status === 'revoked') &&
+    (device.revokedAt === undefined || typeof device.revokedAt === 'string')
   );
 }
 

@@ -7,7 +7,7 @@ interface DeviceResponse {
 }
 
 interface BindingResponse {
-  binding: { id: string; code: string };
+  binding: { id: string; code: string; status?: string };
 }
 
 interface ChallengeResponse {
@@ -62,8 +62,47 @@ async function main(): Promise<void> {
 
   await expectSocketRejected('mobile', phone.id, binding.binding.id, phoneIdentity.privateKey);
 
+  const secondDaemonIdentity = generateSmokeIdentity();
+  const secondDaemon = await registerDevice('daemon', secondDaemonIdentity.publicKey);
+  const secondBinding = await postJson<BindingResponse>('/api/bind/start', { daemonDeviceId: secondDaemon.id });
+  await postJson('/api/bind/claim', { code: secondBinding.binding.code, phoneDeviceId: phone.id });
+  await postJson('/api/bind/confirm', { bindingId: secondBinding.binding.id, daemonDeviceId: secondDaemon.id });
+
+  const secondDaemonSocket = await connectSocket(
+    'daemon',
+    secondDaemon.id,
+    secondBinding.binding.id,
+    secondDaemonIdentity.privateKey,
+  );
+  const secondPhoneSocket = await connectSocket('mobile', phone.id, secondBinding.binding.id, phoneIdentity.privateKey);
+  const secondDaemonClosed = waitForClose(secondDaemonSocket);
+  const secondPhoneClosed = waitForClose(secondPhoneSocket);
+  const deviceRevoke = await postJson<{ revokedBindings: Array<{ id: string; status: string }> }>('/api/devices/revoke', {
+    deviceId: phone.id,
+    actorDeviceId: phone.id,
+  });
+  if (!deviceRevoke.revokedBindings.some((candidate) => candidate.id === secondBinding.binding.id && candidate.status === 'revoked')) {
+    throw new Error(`expected device revoke to revoke binding: ${JSON.stringify(deviceRevoke)}`);
+  }
+  const secondDaemonClose = await secondDaemonClosed;
+  const secondPhoneClose = await secondPhoneClosed;
+  if (secondDaemonClose.code !== 4001 || secondPhoneClose.code !== 4001) {
+    throw new Error(
+      `expected device revocation close code 4001, got ${secondDaemonClose.code}/${secondPhoneClose.code}`,
+    );
+  }
+  await expectSocketRejected('mobile', phone.id, secondBinding.binding.id, phoneIdentity.privateKey);
+  await expectPostError(
+    '/api/bind/claim',
+    { code: secondBinding.binding.code, phoneDeviceId: phone.id },
+    403,
+    'device_revoked',
+  );
+
   daemonSocket.close();
   phoneSocket.close();
+  secondDaemonSocket.close();
+  secondPhoneSocket.close();
   console.log(`relay websocket smoke passed binding=${binding.binding.id}`);
 }
 
@@ -82,6 +121,18 @@ async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
     throw new Error(`${path} failed: ${response.status} ${await response.text()}`);
   }
   return (await response.json()) as T;
+}
+
+async function expectPostError(path: string, body: unknown, status: number, error: string): Promise<void> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json()) as { error?: string };
+  if (response.status !== status || payload.error !== error) {
+    throw new Error(`expected ${path} ${status}/${error}, got ${response.status}/${JSON.stringify(payload)}`);
+  }
 }
 
 function generateSmokeIdentity(): { publicKey: string; privateKey: KeyObject } {

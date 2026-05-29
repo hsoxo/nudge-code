@@ -614,6 +614,7 @@ Baseline:
 - every websocket authenticates with a relay-issued signed challenge
 - binding is explicit and revocable
 - relay revocation closes participant sockets with `binding_revoked`; daemon and iOS persist/surface revoked local state and stop reconnect loops
+- relay device revocation marks a device revoked, revokes every associated binding, closes active participants with `device_revoked`, clears queued messages to/from the device, and rejects future relay access for that device
 - relay enforces route authorization
 - hosted relay disables legacy HTTP message send/poll endpoints with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`
 - `/readyz` exposes hosted relay hardening warnings and runtime counters for deployment checks
@@ -635,7 +636,7 @@ E2E envelope:
 Preferred future hardening:
 
 - key rotation
-- device revocation list
+- account-level revocation and managed storage-backed device revocation lists
 - extend audit coverage for approval actions after approval flows are first-class protocol messages
 - push notification signing
 
