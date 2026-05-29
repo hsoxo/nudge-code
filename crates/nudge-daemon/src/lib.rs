@@ -953,7 +953,12 @@ fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
     })
 }
 
-fn detect_agent_status(title: &str, screen_text: &str, tab_status: &TabStatus) -> AgentStatus {
+fn detect_agent_status(
+    title: &str,
+    screen_text: &str,
+    process_name: Option<&str>,
+    tab_status: &TabStatus,
+) -> AgentStatus {
     if matches!(tab_status, TabStatus::Exited | TabStatus::NeedsRestart) {
         return AgentStatus {
             kind: AgentKind::Unknown,
@@ -963,34 +968,59 @@ fn detect_agent_status(title: &str, screen_text: &str, tab_status: &TabStatus) -
         };
     }
 
+    let process = process_name.map(|name| name.to_lowercase());
     let title_lower = title.to_lowercase();
     let text_lower = screen_text.to_lowercase();
     let combined = format!("{title_lower}\n{text_lower}");
-    let (kind, source, mut confidence): (AgentKind, AgentDetectionSource, f64) =
-        if contains_any(&title_lower, &["claude"]) {
-            (AgentKind::Claude, AgentDetectionSource::Title, 0.78)
-        } else if contains_any(&title_lower, &["codex"]) {
-            (AgentKind::Codex, AgentDetectionSource::Title, 0.78)
-        } else if contains_any(&title_lower, &["opencode"]) {
-            (AgentKind::Opencode, AgentDetectionSource::Title, 0.72)
-        } else if contains_any(&title_lower, &["openclaw"]) {
-            (AgentKind::Openclaw, AgentDetectionSource::Title, 0.72)
-        } else if contains_any(
-            &text_lower,
-            &["claude code", "claude>", "claude >", "anthropic"],
-        ) {
-            (AgentKind::Claude, AgentDetectionSource::Screen, 0.72)
-        } else if contains_any(&text_lower, &["codex", "openai codex"]) {
-            (AgentKind::Codex, AgentDetectionSource::Screen, 0.72)
-        } else if contains_any(&text_lower, &["opencode"]) {
-            (AgentKind::Opencode, AgentDetectionSource::Screen, 0.68)
-        } else if contains_any(&text_lower, &["openclaw"]) {
-            (AgentKind::Openclaw, AgentDetectionSource::Screen, 0.68)
-        } else if looks_like_shell_prompt(&text_lower) {
-            (AgentKind::Shell, AgentDetectionSource::Screen, 0.62)
-        } else {
-            (AgentKind::Unknown, AgentDetectionSource::Unknown, 0.3)
-        };
+    let (kind, source, mut confidence): (AgentKind, AgentDetectionSource, f64) = if process
+        .as_deref()
+        .is_some_and(|name| is_command_name(name, &["claude"]))
+    {
+        (AgentKind::Claude, AgentDetectionSource::Process, 0.9)
+    } else if process
+        .as_deref()
+        .is_some_and(|name| is_command_name(name, &["codex"]))
+    {
+        (AgentKind::Codex, AgentDetectionSource::Process, 0.9)
+    } else if process
+        .as_deref()
+        .is_some_and(|name| is_command_name(name, &["opencode"]))
+    {
+        (AgentKind::Opencode, AgentDetectionSource::Process, 0.86)
+    } else if process
+        .as_deref()
+        .is_some_and(|name| is_command_name(name, &["openclaw"]))
+    {
+        (AgentKind::Openclaw, AgentDetectionSource::Process, 0.86)
+    } else if process
+        .as_deref()
+        .is_some_and(|name| is_shell_command_name(name))
+    {
+        (AgentKind::Shell, AgentDetectionSource::Process, 0.7)
+    } else if contains_any(&title_lower, &["claude"]) {
+        (AgentKind::Claude, AgentDetectionSource::Title, 0.78)
+    } else if contains_any(&title_lower, &["codex"]) {
+        (AgentKind::Codex, AgentDetectionSource::Title, 0.78)
+    } else if contains_any(&title_lower, &["opencode"]) {
+        (AgentKind::Opencode, AgentDetectionSource::Title, 0.72)
+    } else if contains_any(&title_lower, &["openclaw"]) {
+        (AgentKind::Openclaw, AgentDetectionSource::Title, 0.72)
+    } else if contains_any(
+        &text_lower,
+        &["claude code", "claude>", "claude >", "anthropic"],
+    ) {
+        (AgentKind::Claude, AgentDetectionSource::Screen, 0.72)
+    } else if contains_any(&text_lower, &["codex", "openai codex"]) {
+        (AgentKind::Codex, AgentDetectionSource::Screen, 0.72)
+    } else if contains_any(&text_lower, &["opencode"]) {
+        (AgentKind::Opencode, AgentDetectionSource::Screen, 0.68)
+    } else if contains_any(&text_lower, &["openclaw"]) {
+        (AgentKind::Openclaw, AgentDetectionSource::Screen, 0.68)
+    } else if looks_like_shell_prompt(&text_lower) {
+        (AgentKind::Shell, AgentDetectionSource::Screen, 0.62)
+    } else {
+        (AgentKind::Unknown, AgentDetectionSource::Unknown, 0.3)
+    };
 
     let state = if contains_any(
         &combined,
@@ -1034,6 +1064,24 @@ fn detect_agent_status(title: &str, screen_text: &str, tab_status: &TabStatus) -
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_command_name(command_name: &str, expected_names: &[&str]) -> bool {
+    let normalized = command_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(command_name)
+        .trim_start_matches('-');
+    expected_names
+        .iter()
+        .any(|expected| normalized == *expected || normalized.starts_with(&format!("{expected}-")))
+}
+
+fn is_shell_command_name(command_name: &str) -> bool {
+    is_command_name(
+        command_name,
+        &["sh", "bash", "zsh", "fish", "nu", "xonsh", "elvish"],
+    )
 }
 
 fn looks_like_shell_prompt(text: &str) -> bool {
@@ -1339,6 +1387,7 @@ impl DaemonRuntime {
     }
 
     async fn refresh_agent_status(&self, tab_id: &str, screen_text: &str) -> Result<AgentStatus> {
+        let process_name = self.runtime_tab_process_name(tab_id).await;
         let mut session = self.session.lock().await;
         let tab = session
             .tabs
@@ -1347,7 +1396,12 @@ impl DaemonRuntime {
             .ok_or_else(|| SessionError::TabNotFound {
                 tab_id: tab_id.to_string(),
             })?;
-        let detected = detect_agent_status(&tab.title, screen_text, &tab.status);
+        let detected = detect_agent_status(
+            &tab.title,
+            screen_text,
+            process_name.as_deref(),
+            &tab.status,
+        );
         if tab.agent_status != detected {
             tab.agent_status = detected.clone();
             tab.last_activity_at = now_string();
@@ -1368,16 +1422,24 @@ impl DaemonRuntime {
                         .expect("terminal grid lock poisoned")
                         .snapshot()
                         .text;
-                    (runtime_tab.tab_id.clone(), text)
+                    (
+                        runtime_tab.tab_id.clone(),
+                        text,
+                        runtime_tab
+                            .pty
+                            .as_ref()
+                            .map(|pty| pty.command_name().to_string()),
+                    )
                 })
                 .collect::<Vec<_>>()
         };
 
         let mut session = self.session.lock().await;
         let mut changed = false;
-        for (tab_id, text) in snapshots {
+        for (tab_id, text, process_name) in snapshots {
             if let Some(tab) = session.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                let detected = detect_agent_status(&tab.title, &text, &tab.status);
+                let detected =
+                    detect_agent_status(&tab.title, &text, process_name.as_deref(), &tab.status);
                 if tab.agent_status != detected {
                     tab.agent_status = detected;
                     tab.last_activity_at = now_string();
@@ -1390,6 +1452,18 @@ impl DaemonRuntime {
             self.state_store.save(&session)?;
         }
         Ok(())
+    }
+
+    async fn runtime_tab_process_name(&self, tab_id: &str) -> Option<String> {
+        let ptys = self.ptys.lock().await;
+        ptys.iter()
+            .find(|runtime_tab| runtime_tab.tab_id == tab_id)
+            .and_then(|runtime_tab| {
+                runtime_tab
+                    .pty
+                    .as_ref()
+                    .map(|pty| pty.command_name().to_string())
+            })
     }
 
     async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
@@ -2652,6 +2726,7 @@ mod tests {
         let status = detect_agent_status(
             "shell",
             "Claude Code\nPermission required. Allow this command?",
+            None,
             &TabStatus::Running,
         );
         assert_eq!(status.kind, AgentKind::Claude);
@@ -2664,6 +2739,7 @@ mod tests {
         let status = detect_agent_status(
             "codex",
             "Waiting for input. Enter your prompt",
+            None,
             &TabStatus::Running,
         );
         assert_eq!(status.kind, AgentKind::Codex);
@@ -2672,8 +2748,31 @@ mod tests {
     }
 
     #[test]
+    fn detects_agent_kind_from_process_name() {
+        let status = detect_agent_status(
+            "shell",
+            "$ ",
+            Some("/Users/me/.local/bin/codex"),
+            &TabStatus::Running,
+        );
+
+        assert_eq!(status.kind, AgentKind::Codex);
+        assert_eq!(status.source, AgentDetectionSource::Process);
+        assert!(status.confidence >= 0.9);
+    }
+
+    #[test]
+    fn process_name_does_not_override_exited_tabs() {
+        let status = detect_agent_status("shell", "$ ", Some("claude"), &TabStatus::NeedsRestart);
+
+        assert_eq!(status.kind, AgentKind::Unknown);
+        assert_eq!(status.state, AgentInteractionState::Exited);
+        assert_ne!(status.source, AgentDetectionSource::Process);
+    }
+
+    #[test]
     fn exited_tabs_do_not_get_high_confidence_agent_labels() {
-        let status = detect_agent_status("claude", "Claude Code", &TabStatus::NeedsRestart);
+        let status = detect_agent_status("claude", "Claude Code", None, &TabStatus::NeedsRestart);
         assert_eq!(status.kind, AgentKind::Unknown);
         assert_eq!(status.state, AgentInteractionState::Exited);
         assert!(status.confidence < 0.8);

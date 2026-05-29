@@ -21,6 +21,8 @@ impl Default for TerminalSize {
 
 pub struct PtyTab {
     child: Box<dyn Child + Send + Sync>,
+    child_pid: Option<u32>,
+    command_name: String,
     control_tx: Option<Sender<PtyCommand>>,
     output: Arc<Mutex<Vec<u8>>>,
     _reader_thread: JoinHandle<()>,
@@ -53,12 +55,14 @@ impl PtyTab {
             .context("failed to open pty")?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let command_name = command_name(&shell);
         let mut command = CommandBuilder::new(shell);
         command.env("TERM", "xterm-256color");
         let child = pair
             .slave
             .spawn_command(command)
             .context("failed to spawn shell in pty")?;
+        let child_pid = child.process_id();
         drop(pair.slave);
 
         let mut reader = pair
@@ -132,6 +136,8 @@ impl PtyTab {
 
         Ok(Self {
             child,
+            child_pid,
+            command_name,
             control_tx: Some(control_tx),
             output,
             _reader_thread: reader_thread,
@@ -151,6 +157,14 @@ impl PtyTab {
         let output = self.output.lock().expect("pty output lock poisoned");
         let start = output.len().saturating_sub(max_bytes);
         output[start..].to_vec()
+    }
+
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
+    }
+
+    pub fn command_name(&self) -> &str {
+        &self.command_name
     }
 
     fn send_command(&self, command: PtyCommand) -> Result<()> {
@@ -182,4 +196,13 @@ fn to_pty_size(size: TerminalSize) -> PtySize {
         pixel_width: 0,
         pixel_height: 0,
     }
+}
+
+fn command_name(command: &str) -> String {
+    command
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(command)
+        .to_string()
 }

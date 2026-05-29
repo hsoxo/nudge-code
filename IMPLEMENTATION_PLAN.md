@@ -335,9 +335,10 @@ Current implementation status:
 
 - `AgentStatus` is part of the shared Rust/TypeScript/protobuf tab state.
 - The daemon refreshes conservative title/screen-text heuristics when serving session state, snapshots, and render frames.
+- The daemon records the spawned PTY command name/PID and uses the command name as a process-source signal when it directly identifies Claude, Codex, Opencode, OpenClaw, or a shell.
 - Current heuristic kinds: `claude`, `codex`, `opencode`, `openclaw`, `shell`, `unknown`.
 - Current heuristic states: `running`, `waiting_for_input`, `needs_approval`, `exited`.
-- Foreground process-tree detection, event emission, and fixture-backed classifier expansion remain open Phase 7 work.
+- True foreground process-tree detection inside the PTY, event emission, and fixture-backed classifier expansion remain open Phase 7 work.
 
 Tasks:
 
