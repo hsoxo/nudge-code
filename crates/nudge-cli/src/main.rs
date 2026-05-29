@@ -23,6 +23,14 @@ enum Command {
     },
     /// Print current placeholder entitlement.
     Entitlement,
+    /// Print persisted session metadata.
+    SessionState,
+    /// Create a tab in the persisted session metadata.
+    CreateTab {
+        /// Tab title.
+        #[arg(long, default_value = "shell")]
+        title: String,
+    },
 }
 
 #[tokio::main]
@@ -41,6 +49,25 @@ async fn main() -> Result<()> {
                 entitlement.max_bound_computers,
                 entitlement.max_tabs_per_computer
             );
+        }
+        Some(Command::SessionState) => {
+            let session = nudge_daemon::load_session()?;
+            println!(
+                "session={} tabs={} plan={}",
+                session.id,
+                session.tabs.len(),
+                session.entitlement.plan
+            );
+            for tab in session.tabs {
+                println!(
+                    "tab id={} title={} status={:?}",
+                    tab.id, tab.title, tab.status
+                );
+            }
+        }
+        Some(Command::CreateTab { title }) => {
+            let session = nudge_daemon::create_tab(title)?;
+            println!("tab created; tabs={}", session.tabs.len());
         }
         None => {
             println!("nudge Phase 0 placeholder: interactive attach is implemented in Phase 3");
