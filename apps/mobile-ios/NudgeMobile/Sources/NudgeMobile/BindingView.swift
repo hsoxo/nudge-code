@@ -64,7 +64,7 @@ struct BindingView: View {
                 Stepper("Columns \(model.phoneProfile.cols)", value: $model.phoneProfile.cols, in: 32 ... 120)
             }
         }
-        .navigationTitle("Bind")
+        .navigationTitle("Bind Computer")
         .sheet(isPresented: $isShowingScanner) {
             NavigationStack {
                 QRCodeScannerView { value in

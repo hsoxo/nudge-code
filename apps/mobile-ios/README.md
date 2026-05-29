@@ -39,6 +39,7 @@ Shared protocol types are generated from the repo protobuf schema:
 Current scaffold:
 
 - SwiftUI app shell.
+- bind-first initial screen when no machine has been paired.
 - SwiftProtobuf-generated protocol types from `proto/nudge.proto`.
 - machine list and tab strip.
 - terminal preview rendered through bundled xterm.js inside `WKWebView`.

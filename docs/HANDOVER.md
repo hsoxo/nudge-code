@@ -164,35 +164,27 @@ Reference doc:
 docs/local-first-run.md
 ```
 
-## Important Current UI Observation
+## Initial iOS Bind Screen
 
-The current iOS first screen can look almost empty when there are no bound machines. That state is not a data bug: it means there is no selected/bound computer yet. However, it is not acceptable first-version UX.
+The iOS first screen now opens directly to `BindingView` when there are no bound machines. This avoids the earlier iPhone state where `NavigationSplitView` showed only an empty machine sidebar with a small QR toolbar button.
 
-Recommended next UI task:
+Current behavior:
 
-- Add a proper empty state in the iOS root/detail view:
-  - show "Bind Computer" as the primary action
-  - expose Scan QR Code and paste pairing URL flow
-  - show a short local-first hint that physical phone needs the Mac LAN URL or tunnel URL
-  - avoid leaving only a title and tiny QR toolbar button
-
-The existing `BindingView` already has the paste URL, scan QR, pending claim, and phone profile controls. The work is mostly navigation/empty-state presentation, not a new binding backend.
+- no machines: `NavigationStack { BindingView() }`
+- one or more machines: `NavigationSplitView` with machine list and terminal/binding detail
+- binding screen title: `Bind Computer`
+- existing paste URL, scan QR, pending claim, and phone profile controls stay in `BindingView`
 
 ## Next Implementation Tasks
 
-1. Do the empty-state UI task as a separate commit.
-
-Suggested commit:
-
-```text
-phase 6: add mobile bind empty state
-```
+1. Run one manual iPhone 13 bind using a LAN relay URL or Cloudflare Tunnel URL.
+2. Improve free-plan tab-limit feedback when creating a second tab is rejected.
+3. Add physical-device notes after the first successful iPhone bind.
 
 ## First-Version Gap List
 
 Highest priority for local-first handoff:
 
-- iOS empty state is too blank before binding.
 - Need real physical iPhone test on `10.10.10.xxx` LAN or Cloudflare Tunnel.
 - Need decide how to surface free-plan tab limit in UI. Current `New Tab` can be rejected by daemon; UI only sets machine status text to "Unable to create tab".
 - Need verify tab action UX under free entitlement:
@@ -223,10 +215,8 @@ What is already strong:
 
 What blocks a confident handoff to physical-device testing:
 
-- Improve the blank initial iOS state.
 - Run one manual iPhone 13 bind using LAN or Cloudflare Tunnel.
 
 Practical estimate from this point:
 
-- One commit to improve the iOS empty state.
 - One commit if physical-device testing reveals URL, ATS, local network permission, or QR/deep-link issues.

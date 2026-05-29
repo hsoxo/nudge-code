@@ -6,13 +6,21 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var model = model
-        NavigationSplitView {
-            MachineListView()
-        } detail: {
-            if model.selectedMachine == nil {
-                BindingView()
+        Group {
+            if model.machines.isEmpty {
+                NavigationStack {
+                    BindingView()
+                }
             } else {
-                TerminalWorkspaceView()
+                NavigationSplitView {
+                    MachineListView()
+                } detail: {
+                    if model.selectedMachine == nil {
+                        BindingView()
+                    } else {
+                        TerminalWorkspaceView()
+                    }
+                }
             }
         }
         .onChange(of: scenePhase) { _, phase in
