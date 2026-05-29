@@ -1,7 +1,8 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
+import { verifySocketSignature } from './auth.js';
 
 type DeviceKind = 'daemon' | 'phone';
 type BindingStatus = 'pending' | 'claimed' | 'active' | 'revoked';
@@ -37,6 +38,7 @@ interface RelayMessage {
 }
 
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
+const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const devices = new Map<string, Device>();
 const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
@@ -61,9 +63,7 @@ server.on('upgrade', (request, socket, head) => {
     return;
   }
   const expectedKind: DeviceKind = url.pathname === '/ws/daemon' ? 'daemon' : 'phone';
-  const deviceId = url.searchParams.get('deviceId') ?? undefined;
-  const bindingId = url.searchParams.get('bindingId') ?? undefined;
-  const authorization = authorizeSocket(expectedKind, deviceId, bindingId);
+  const authorization = authorizeSocket(expectedKind, url.searchParams);
   if (!authorization.ok) {
     socket.write(`HTTP/1.1 ${authorization.statusCode} ${authorization.error}\r\n\r\n`);
     socket.destroy();
@@ -293,12 +293,17 @@ type SocketAuthorization =
 
 function authorizeSocket(
   expectedKind: DeviceKind,
-  deviceId: string | undefined,
-  bindingId: string | undefined,
+  params: URLSearchParams,
 ): SocketAuthorization {
+  const deviceId = params.get('deviceId') ?? undefined;
+  const bindingId = params.get('bindingId') ?? undefined;
   const device = deviceId ? devices.get(deviceId) : undefined;
   if (!device || device.kind !== expectedKind) {
     return { ok: false, statusCode: 401, error: 'device_not_registered' };
+  }
+  const signature = authorizeSocketSignature(device, bindingId, params);
+  if (!signature.ok) {
+    return { ok: false, statusCode: 401, error: signature.error };
   }
   const binding = bindingId ? bindings.get(bindingId) : undefined;
   if (!binding || binding.status !== 'active') {
@@ -308,6 +313,23 @@ function authorizeSocket(
     return { ok: false, statusCode: 403, error: 'route_not_authorized' };
   }
   return { ok: true, device, binding };
+}
+
+type SignatureAuthorization =
+  | { ok: true }
+  | { ok: false; error: string };
+
+function authorizeSocketSignature(
+  device: Device,
+  bindingId: string | undefined,
+  params: URLSearchParams,
+): SignatureAuthorization {
+  return verifySocketSignature({
+    device,
+    bindingId,
+    params,
+    requireSignature: requireWebSocketSignature,
+  });
 }
 
 function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): void {

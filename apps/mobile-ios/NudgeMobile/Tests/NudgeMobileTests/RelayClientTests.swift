@@ -87,7 +87,7 @@ struct RelayClientTests {
 
         let state = try await client.fetchSessionState(machine: activeMachine)
 
-        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        assertSignedWebSocketURL(factory.urls.first)
         #expect(socket.sent.count == 1)
         #expect(socket.sent[0].contains(#""toDeviceId":"daemon_1""#))
         #expect(socket.sent[0].contains(#""type":"get_state""#))
@@ -121,7 +121,7 @@ struct RelayClientTests {
 
         try await client.sendTerminalInput(machine: activeMachine, tabID: "default", text: "echo hi", enter: true)
 
-        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        assertSignedWebSocketURL(factory.urls.first)
         #expect(socket.sent.count == 1)
         #expect(socket.sent[0].contains(#""toDeviceId":"daemon_1""#))
         #expect(socket.sent[0].contains(#""type":"terminal_input""#))
@@ -147,7 +147,7 @@ struct RelayClientTests {
 
         let snapshot = try await client.fetchTerminalSnapshot(machine: activeMachine, tabID: "default")
 
-        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        assertSignedWebSocketURL(factory.urls.first)
         #expect(socket.sent.count == 1)
         #expect(socket.sent[0].contains(#""type":"terminal_snapshot""#))
         #expect(socket.sent[0].contains(#""requestId":"ios-snapshot""#))
@@ -185,7 +185,7 @@ struct RelayClientTests {
         let inputEvent = try await session.receiveEvent()
         session.close()
 
-        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        assertSignedWebSocketURL(factory.urls.first)
         #expect(socket.sent.count == 3)
         #expect(socket.sent[0].contains(#""type":"get_state""#))
         #expect(socket.sent[1].contains(#""type":"terminal_output""#))
@@ -326,6 +326,27 @@ struct RelayClientTests {
             )
         )
     }
+
+    private func assertSignedWebSocketURL(_ url: URL?) {
+        guard let url,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems
+        else {
+            Issue.record("Expected websocket URL")
+            return
+        }
+        let query = Dictionary(uniqueKeysWithValues: queryItems.compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        #expect(components.scheme == "wss")
+        #expect(components.host == "relay.test")
+        #expect(components.path == "/ws/mobile")
+        #expect(query["deviceId"] == "phone_1")
+        #expect(query["bindingId"] == "bind_1")
+        #expect(query["authTimestamp"] != nil)
+        #expect(query["authNonce"]?.isEmpty == false)
+        #expect(query["authSignature"] == Data("signed:nudge.relay.websocket.v1\nphone_1\nbind_1\n\(query["authTimestamp"] ?? "")\n\(query["authNonce"] ?? "")".utf8).base64EncodedString())
+    }
 }
 
 private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
@@ -336,8 +357,7 @@ private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
     }
 
     func sign(_ message: Data) throws -> Data {
-        _ = message
-        return Data()
+        Data("signed:\(String(data: message, encoding: .utf8) ?? "")".utf8)
     }
 
     func reset() throws {}

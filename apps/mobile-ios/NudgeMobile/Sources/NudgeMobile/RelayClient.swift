@@ -186,10 +186,23 @@ struct HTTPRelayClient: RelayClient {
         default:
             throw RelayClientError.badURL
         }
+        let timestamp = String(Int(Date().timeIntervalSince1970 * 1000))
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let message = [
+            "nudge.relay.websocket.v1",
+            binding.phoneDeviceID,
+            binding.bindingID,
+            timestamp,
+            nonce
+        ].joined(separator: "\n")
+        let signature = try identityStore.sign(Data(message.utf8)).base64EncodedString()
         components?.path = "/ws/mobile"
         components?.queryItems = [
             URLQueryItem(name: "deviceId", value: binding.phoneDeviceID),
-            URLQueryItem(name: "bindingId", value: binding.bindingID)
+            URLQueryItem(name: "bindingId", value: binding.bindingID),
+            URLQueryItem(name: "authTimestamp", value: timestamp),
+            URLQueryItem(name: "authNonce", value: nonce),
+            URLQueryItem(name: "authSignature", value: signature)
         ]
         guard let url = components?.url else {
             throw RelayClientError.badURL
