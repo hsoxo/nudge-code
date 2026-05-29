@@ -79,6 +79,13 @@ enum Command {
         #[arg(long, default_value_t = 4096)]
         max_bytes: u32,
     },
+    /// Print daemon-owned terminal snapshot text.
+    #[command(hide = true)]
+    Snapshot {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+    },
     /// Resize a tab pty.
     #[command(hide = true)]
     ResizeTab {
@@ -233,6 +240,27 @@ async fn main() -> Result<()> {
                     anyhow::bail!("daemon returned {}: {}", error.code, error.message);
                 }
                 _ => anyhow::bail!("daemon returned an unexpected terminal output response"),
+            }
+        }
+        Some(Command::Snapshot { tab_id }) => {
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::TerminalSnapshotRequest(
+                    v1::TerminalSnapshotRequest { tab_id },
+                )))
+                .await?;
+            match response.payload {
+                Some(v1::envelope::Payload::TerminalSnapshot(snapshot)) => {
+                    println!(
+                        "snapshot tab={} rows={} cols={}",
+                        snapshot.tab_id, snapshot.rows, snapshot.cols
+                    );
+                    print!("{}", snapshot.text);
+                }
+                Some(v1::envelope::Payload::Error(error)) => {
+                    anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+                }
+                _ => anyhow::bail!("daemon returned an unexpected snapshot response"),
             }
         }
         Some(Command::ResizeTab { tab_id, rows, cols }) => {

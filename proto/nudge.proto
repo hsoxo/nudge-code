@@ -22,6 +22,8 @@ message Envelope {
     CloseTab close_tab = 24;
     ResizeTab resize_tab = 25;
     RestartTab restart_tab = 26;
+    TerminalSnapshotRequest terminal_snapshot_request = 27;
+    TerminalSnapshot terminal_snapshot = 28;
   }
 }
 
@@ -88,6 +90,18 @@ message ResizeTab {
 
 message RestartTab {
   string tab_id = 1;
+}
+
+message TerminalSnapshotRequest {
+  string tab_id = 1;
+}
+
+message TerminalSnapshot {
+  string tab_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+  string text = 4;
+  bytes formatted = 5;
 }
 
 message SessionState {

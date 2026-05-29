@@ -50,6 +50,18 @@ export interface TerminalOutput {
   data: Uint8Array;
 }
 
+export interface TerminalSnapshotRequest {
+  tabId: string;
+}
+
+export interface TerminalSnapshot {
+  tabId: string;
+  rows: number;
+  cols: number;
+  text: string;
+  formatted: Uint8Array;
+}
+
 export interface CreateTab {
   title: string;
 }

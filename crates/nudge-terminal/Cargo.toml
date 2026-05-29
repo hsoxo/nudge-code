@@ -7,3 +7,4 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+vt100.workspace = true

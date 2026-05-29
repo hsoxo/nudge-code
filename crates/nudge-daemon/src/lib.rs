@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
+use nudge_terminal::{TerminalGrid, TerminalSize as GridSize};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -383,6 +384,7 @@ impl DaemonRuntime {
             .map(|tab| RuntimeTab {
                 tab_id: tab.id.clone(),
                 pty: None,
+                grid: Arc::new(std::sync::Mutex::new(TerminalGrid::default())),
             })
             .collect();
         Self {
@@ -419,6 +421,7 @@ impl DaemonRuntime {
             self.ptys.lock().await.push(RuntimeTab {
                 tab_id: tab.id.clone(),
                 pty: None,
+                grid: Arc::new(std::sync::Mutex::new(TerminalGrid::default())),
             });
             self.state_store.save(&session)?;
         }
@@ -460,7 +463,12 @@ impl DaemonRuntime {
         {
             let mut ptys = self.ptys.lock().await;
             if let Some(runtime_tab) = ptys.iter_mut().find(|tab| tab.tab_id == tab_id) {
-                runtime_tab.pty = Some(spawn_pty_for_tab(tab_id).await?);
+                runtime_tab
+                    .grid
+                    .lock()
+                    .expect("terminal grid lock poisoned")
+                    .resize(GridSize::default());
+                runtime_tab.pty = Some(spawn_pty_for_tab(tab_id, runtime_tab.grid.clone()).await?);
             }
         }
         {
@@ -475,7 +483,8 @@ impl DaemonRuntime {
         let mut ptys = self.ptys.lock().await;
         for runtime_tab in ptys.iter_mut() {
             if runtime_tab.pty.is_none() {
-                runtime_tab.pty = Some(spawn_pty_for_tab(&runtime_tab.tab_id).await?);
+                runtime_tab.pty =
+                    Some(spawn_pty_for_tab(&runtime_tab.tab_id, runtime_tab.grid.clone()).await?);
             }
         }
         Ok(())
@@ -501,6 +510,26 @@ impl DaemonRuntime {
         Ok(pty.output_tail(max_bytes))
     }
 
+    async fn terminal_snapshot(&self, tab_id: &str) -> Result<v1::TerminalSnapshot> {
+        let ptys = self.ptys.lock().await;
+        let runtime_tab = ptys
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .with_context(|| format!("tab {tab_id} was not found"))?;
+        let snapshot = runtime_tab
+            .grid
+            .lock()
+            .expect("terminal grid lock poisoned")
+            .snapshot();
+        Ok(v1::TerminalSnapshot {
+            tab_id: tab_id.to_string(),
+            rows: snapshot.rows as u32,
+            cols: snapshot.cols as u32,
+            text: snapshot.text,
+            formatted: snapshot.formatted,
+        })
+    }
+
     async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
         let ptys = self.ptys.lock().await;
         let pty = ptys
@@ -508,6 +537,13 @@ impl DaemonRuntime {
             .find(|tab| tab.tab_id == tab_id)
             .and_then(|tab| tab.pty.as_ref())
             .with_context(|| format!("tab {tab_id} does not have a pty"))?;
+        if let Some(runtime_tab) = ptys.iter().find(|tab| tab.tab_id == tab_id) {
+            runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned")
+                .resize(GridSize::new(size.cols, size.rows));
+        }
         pty.resize(size)
     }
 }
@@ -515,14 +551,24 @@ impl DaemonRuntime {
 struct RuntimeTab {
     tab_id: String,
     pty: Option<PtyTab>,
+    grid: Arc<std::sync::Mutex<TerminalGrid>>,
 }
 
-async fn spawn_pty_for_tab(tab_id: &str) -> Result<PtyTab> {
+async fn spawn_pty_for_tab(
+    tab_id: &str,
+    grid: Arc<std::sync::Mutex<TerminalGrid>>,
+) -> Result<PtyTab> {
     let tab_id = tab_id.to_string();
-    task::spawn_blocking(move || PtyTab::spawn_shell(TerminalSize::default()))
-        .await
-        .context("pty spawn task failed")?
-        .with_context(|| format!("failed to spawn shell for tab {tab_id}"))
+    task::spawn_blocking(move || {
+        PtyTab::spawn_shell_with_output_hook(TerminalSize::default(), move |bytes| {
+            grid.lock()
+                .expect("terminal grid lock poisoned")
+                .process(bytes);
+        })
+    })
+    .await
+    .context("pty spawn task failed")?
+    .with_context(|| format!("failed to spawn shell for tab {tab_id}"))
 }
 
 pub async fn run_server(config: DaemonConfig) -> Result<()> {
@@ -681,6 +727,11 @@ async fn handle_payload(
                 tab_id: request.tab_id,
                 data,
             }))
+        }
+        Some(v1::envelope::Payload::TerminalSnapshotRequest(request)) => {
+            Some(v1::envelope::Payload::TerminalSnapshot(
+                runtime.terminal_snapshot(&request.tab_id).await?,
+            ))
         }
         Some(v1::envelope::Payload::CreateTab(request)) => Some(
             v1::envelope::Payload::SessionState(runtime.create_tab(request.title).await?),

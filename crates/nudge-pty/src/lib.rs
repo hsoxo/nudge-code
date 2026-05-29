@@ -35,6 +35,13 @@ enum PtyCommand {
 
 impl PtyTab {
     pub fn spawn_shell(size: TerminalSize) -> Result<Self> {
+        Self::spawn_shell_with_output_hook(size, |_| {})
+    }
+
+    pub fn spawn_shell_with_output_hook<F>(size: TerminalSize, output_hook: F) -> Result<Self>
+    where
+        F: Fn(&[u8]) + Send + 'static,
+    {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -72,6 +79,7 @@ impl PtyTab {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(bytes_read) => {
+                        output_hook(&buffer[..bytes_read]);
                         let mut output = reader_output.lock().expect("pty output lock poisoned");
                         output.extend_from_slice(&buffer[..bytes_read]);
                         let overflow = output.len().saturating_sub(128 * 1024);
