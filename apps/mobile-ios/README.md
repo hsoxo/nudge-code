@@ -48,4 +48,4 @@ Current scaffold:
 
 Still open:
 
-- Reconnect and true mobile-app process integration coverage for encrypted terminal input and live output.
+- True mobile-app process integration coverage for encrypted terminal input, live output, and reconnect replay.

@@ -240,7 +240,7 @@ Current implementation status:
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity and stores the daemon public key from binding claim/status responses.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
 - Daemon/iOS live relay paths perform a phone-initiated E2E handshake when binding public keys are available, wrap phone-to-daemon control requests, daemon responses, and post-handshake live terminal updates in encrypted envelopes, and fall back to plaintext only for legacy bindings without peer public keys.
-- A spawned-process E2E smoke now starts relay plus daemon and drives a simulated websocket phone client through E2E handshake, encrypted state request, encrypted terminal input, and encrypted live terminal output. Reconnect coverage, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
+- A spawned-process E2E smoke now starts relay plus daemon and drives a simulated websocket phone client through E2E handshake, encrypted state request, encrypted terminal input, encrypted live terminal output, and reconnect replay. Managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -249,7 +249,7 @@ Exit criteria:
 - relay routes state request/response.
 - relay refuses unbound phone.
 - relay refuses a second active computer binding for free entitlement.
-- spawned-process smoke starts relay and daemon, binds a simulated phone, performs E2E handshake, sends encrypted terminal input, and receives encrypted daemon response/live output.
+- spawned-process smoke starts relay and daemon, binds a simulated phone, performs E2E handshake, sends encrypted terminal input, receives encrypted daemon response/live output, reconnects the simulated phone, and replays encrypted terminal output.
 
 ## Phase 5: Binding CLI
 
@@ -538,7 +538,6 @@ Relay tests:
 - revocation
 - no terminal payload logging
 - spawned-process relay + daemon + simulated phone integration test for E2E handshake, encrypted terminal input, encrypted daemon response, and encrypted live terminal output
-- reconnect behavior in spawned relay + daemon + simulated phone integration
 
 Agent tests:
 

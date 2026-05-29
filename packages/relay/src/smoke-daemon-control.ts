@@ -63,6 +63,13 @@ interface E2ESession {
   decrypt(envelope: RelayMessage['message']['payload']): unknown;
 }
 
+interface SmokeContext {
+  daemonPublicKey: string;
+  daemonDeviceId: string;
+  phoneDeviceId: string;
+  phoneIdentity: { publicKey: string; privateKey: KeyObject };
+}
+
 const baseUrl = process.env.NUDGE_RELAY_SMOKE_URL ?? 'http://127.0.0.1:8787';
 const nudgeBin = process.env.NUDGE_SMOKE_NUDGE_BIN ?? join(process.cwd(), '..', '..', 'target', 'debug', 'nudge');
 const textEncoder = new TextEncoder();
@@ -109,26 +116,29 @@ async function main(): Promise<void> {
 
     await waitForDaemonRelay(env);
 
-    const phoneSocket = await connectPhone(phoneDevice.id, binding.binding.id, phoneIdentity.privateKey);
-    const e2eSession = await openE2ESession({
-      websocket: phoneSocket,
-      phoneDeviceId: phoneDevice.id,
-      daemonDeviceId: daemonDevice.id,
-      phoneIdentity,
+    const smokeContext: SmokeContext = {
       daemonPublicKey,
-    });
-    phoneSocket.send(JSON.stringify({
+      daemonDeviceId: daemonDevice.id,
+      phoneDeviceId: phoneDevice.id,
+      phoneIdentity,
+    };
+    let phoneConnection = await connectEncryptedPhone(smokeContext, binding.binding.id);
+    phoneConnection.websocket.send(JSON.stringify({
       toDeviceId: daemonDevice.id,
-      payload: e2eSession.encrypt('get_state', { type: 'get_state', requestId: 'state-1' }),
+      payload: phoneConnection.e2eSession.encrypt('get_state', { type: 'get_state', requestId: 'state-1' }),
     }));
-    const stateResponse = await waitForEncryptedDaemonResponse(phoneSocket, e2eSession, 'state-1');
+    const stateResponse = await waitForEncryptedDaemonResponse(
+      phoneConnection.websocket,
+      phoneConnection.e2eSession,
+      'state-1',
+    );
     if (!stateResponse.ok) {
       throw new Error(`state response failed: ${JSON.stringify(stateResponse)}`);
     }
 
-    phoneSocket.send(JSON.stringify({
+    phoneConnection.websocket.send(JSON.stringify({
       toDeviceId: daemonDevice.id,
-      payload: e2eSession.encrypt('terminal_input', {
+      payload: phoneConnection.e2eSession.encrypt('terminal_input', {
         type: 'terminal_input',
         requestId: 'input-1',
         tabId: 'default',
@@ -136,11 +146,19 @@ async function main(): Promise<void> {
         enter: true,
       }),
     }));
-    const inputResponse = await waitForEncryptedDaemonResponse(phoneSocket, e2eSession, 'input-1');
+    const inputResponse = await waitForEncryptedDaemonResponse(
+      phoneConnection.websocket,
+      phoneConnection.e2eSession,
+      'input-1',
+    );
     if (!inputResponse.ok) {
       throw new Error(`input response failed: ${JSON.stringify(inputResponse)}`);
     }
-    const liveOutput = await waitForEncryptedLiveOutput(phoneSocket, e2eSession, 'NUDGE_RELAY_CONTROL');
+    const liveOutput = await waitForEncryptedLiveOutput(
+      phoneConnection.websocket,
+      phoneConnection.e2eSession,
+      'NUDGE_RELAY_CONTROL',
+    );
 
     await sleep(300);
     const output = await runNudge(env, ['pty-output', '--max-bytes', '8192']);
@@ -148,8 +166,31 @@ async function main(): Promise<void> {
       throw new Error(`terminal output did not include relay input marker: ${output}`);
     }
 
-    phoneSocket.close();
-    console.log(`daemon relay e2e control smoke passed binding=${binding.binding.id}`);
+    phoneConnection.websocket.close();
+    await sleep(200);
+    await waitForDaemonRelay(env);
+    phoneConnection = await connectEncryptedPhone(smokeContext, binding.binding.id);
+    phoneConnection.websocket.send(JSON.stringify({
+      toDeviceId: daemonDevice.id,
+      payload: phoneConnection.e2eSession.encrypt('terminal_output', {
+        type: 'terminal_output',
+        requestId: 'replay-1',
+        tabId: 'default',
+        maxBytes: 8192,
+      }),
+    }));
+    const replayResponse = await waitForEncryptedDaemonResponse(
+      phoneConnection.websocket,
+      phoneConnection.e2eSession,
+      'replay-1',
+    );
+    const replayText = terminalOutputText(replayResponse.data);
+    if (!replayResponse.ok || !replayText.includes('NUDGE_RELAY_CONTROL')) {
+      throw new Error(`reconnected replay response did not include marker: ${JSON.stringify(replayResponse)}`);
+    }
+
+    phoneConnection.websocket.close();
+    console.log(`daemon relay e2e control reconnect smoke passed binding=${binding.binding.id}`);
   } finally {
     if (env) {
       try {
@@ -160,6 +201,21 @@ async function main(): Promise<void> {
     }
     await rm(tmp, { recursive: true, force: true });
   }
+}
+
+async function connectEncryptedPhone(
+  context: SmokeContext,
+  bindingId: string,
+): Promise<{ websocket: WebSocket; e2eSession: E2ESession }> {
+  const websocket = await connectPhone(context.phoneDeviceId, bindingId, context.phoneIdentity.privateKey);
+  const e2eSession = await openE2ESession({
+    websocket,
+    phoneDeviceId: context.phoneDeviceId,
+    daemonDeviceId: context.daemonDeviceId,
+    phoneIdentity: context.phoneIdentity,
+    daemonPublicKey: context.daemonPublicKey,
+  });
+  return { websocket, e2eSession };
 }
 
 async function registerDevice(kind: 'daemon' | 'phone', publicKey: string): Promise<{ id: string }> {
@@ -423,6 +479,20 @@ async function waitForEncryptedLiveOutput(
     }
   }
   throw new Error(`timed out waiting for encrypted live output containing ${expectedText}`);
+}
+
+function terminalOutputText(data: unknown): string {
+  if (!data || typeof data !== 'object') {
+    return '';
+  }
+  const output = data as { bytesBase64?: unknown; text?: unknown };
+  if (typeof output.bytesBase64 === 'string') {
+    return Buffer.from(output.bytesBase64, 'base64').toString('utf8');
+  }
+  if (typeof output.text === 'string') {
+    return output.text;
+  }
+  return '';
 }
 
 function deriveDirectionalKeys(input: {
