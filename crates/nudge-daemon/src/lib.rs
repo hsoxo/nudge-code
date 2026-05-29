@@ -586,9 +586,26 @@ impl MachineSession {
         self.updated_at = now_string();
     }
 
-    pub fn set_entitlement(&mut self, entitlement: Entitlement) {
+    pub fn set_entitlement(&mut self, entitlement: Entitlement) -> Vec<String> {
+        let allowed_tabs = entitlement.max_tabs_per_computer.max(1) as usize;
+        let now = now_string();
+        let mut suspended_tab_ids = Vec::new();
+        for tab in self.tabs.iter_mut().skip(allowed_tabs) {
+            suspended_tab_ids.push(tab.id.clone());
+            if !matches!(tab.status, TabStatus::NeedsRestart) {
+                tab.status = TabStatus::NeedsRestart;
+                tab.agent_status = AgentStatus {
+                    kind: AgentKind::Unknown,
+                    state: AgentInteractionState::Exited,
+                    confidence: 0.6,
+                    source: AgentDetectionSource::Heuristic,
+                };
+                tab.last_activity_at = now.clone();
+            }
+        }
         self.entitlement = entitlement;
-        self.updated_at = now_string();
+        self.updated_at = now;
+        suspended_tab_ids
     }
 
     pub fn clear_binding(&mut self) {
@@ -1538,9 +1555,10 @@ impl DaemonRuntime {
     }
 
     async fn ensure_ptys(&self) -> Result<()> {
+        let running_tab_ids = self.running_tab_ids().await;
         let mut ptys = self.ptys.lock().await;
         for runtime_tab in ptys.iter_mut() {
-            if runtime_tab.pty.is_none() {
+            if runtime_tab.pty.is_none() && running_tab_ids.contains(&runtime_tab.tab_id) {
                 runtime_tab.pty = Some(
                     self.spawn_pty_for_runtime_tab(&runtime_tab.tab_id, runtime_tab.grid.clone())
                         .await?,
@@ -1805,10 +1823,33 @@ impl DaemonRuntime {
     }
 
     async fn set_entitlement(&self, entitlement: Entitlement) -> Result<v1::SessionState> {
-        {
+        let suspended_tab_ids = {
             let mut session = self.session.lock().await;
-            session.set_entitlement(entitlement);
+            let suspended_tab_ids = session.set_entitlement(entitlement);
             self.state_store.save(&session)?;
+            suspended_tab_ids
+        };
+        if !suspended_tab_ids.is_empty() {
+            let mut ptys = self.ptys.lock().await;
+            for tab_id in &suspended_tab_ids {
+                if let Some(runtime_tab) = ptys.iter_mut().find(|tab| &tab.tab_id == tab_id) {
+                    runtime_tab.pty = None;
+                    runtime_tab
+                        .grid
+                        .lock()
+                        .expect("terminal grid lock poisoned")
+                        .resize(GridSize::default());
+                }
+                let _ = self.agent_status_changes.send(AgentStatusChange {
+                    tab_id: tab_id.clone(),
+                    status: AgentStatus {
+                        kind: AgentKind::Unknown,
+                        state: AgentInteractionState::Exited,
+                        confidence: 0.6,
+                        source: AgentDetectionSource::Heuristic,
+                    },
+                });
+            }
         }
         Ok(self.session_state().await)
     }
@@ -3217,12 +3258,13 @@ mod tests {
     #[test]
     fn entitlement_update_controls_tab_limit() {
         let mut session = MachineSession::new_default();
-        session.set_entitlement(Entitlement {
+        let suspended = session.set_entitlement(Entitlement {
             plan: "paid".to_string(),
             max_bound_computers: 1,
             max_tabs_per_computer: 3,
             updated_at: "1".to_string(),
         });
+        assert!(suspended.is_empty());
 
         session
             .create_tab("second".to_string())
@@ -3235,6 +3277,104 @@ mod tests {
             .expect("entitlement should be present");
         assert_eq!(entitlement.plan, "paid");
         assert_eq!(entitlement.max_tabs_per_computer, 3);
+    }
+
+    #[test]
+    fn entitlement_downgrade_suspends_excess_tabs_without_deleting_metadata() {
+        let mut session = MachineSession::new_default();
+        session.set_entitlement(Entitlement {
+            plan: "paid".to_string(),
+            max_bound_computers: 1,
+            max_tabs_per_computer: 3,
+            updated_at: "1".to_string(),
+        });
+        session
+            .create_tab("second".to_string())
+            .expect("paid entitlement should allow second tab");
+        session
+            .create_tab("third".to_string())
+            .expect("paid entitlement should allow third tab");
+
+        let suspended = session.set_entitlement(Entitlement::free());
+
+        assert_eq!(suspended, vec!["tab-2".to_string(), "tab-3".to_string()]);
+        assert_eq!(session.tabs.len(), 3);
+        assert!(matches!(session.tabs[0].status, TabStatus::Running));
+        assert!(matches!(session.tabs[1].status, TabStatus::NeedsRestart));
+        assert!(matches!(session.tabs[2].status, TabStatus::NeedsRestart));
+        assert_eq!(session.entitlement.max_tabs_per_computer, 1);
+        assert_eq!(
+            session.tabs[1].agent_status.state,
+            AgentInteractionState::Exited
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_entitlement_downgrade_stops_excess_tab_ptys() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-entitlement-downgrade-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        session.set_entitlement(Entitlement {
+            plan: "paid".to_string(),
+            max_bound_computers: 1,
+            max_tabs_per_computer: 3,
+            updated_at: "1".to_string(),
+        });
+        session
+            .create_tab("second".to_string())
+            .expect("paid entitlement should allow second tab");
+        session
+            .create_tab("third".to_string())
+            .expect("paid entitlement should allow third tab");
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        runtime.ensure_ptys().await.expect("ptys should start");
+        assert!(
+            runtime
+                .write_input("default", b"echo keep\r".to_vec())
+                .await
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .write_input("tab-2", b"echo suspend\r".to_vec())
+                .await
+                .is_ok()
+        );
+
+        let state = runtime
+            .set_entitlement(Entitlement::free())
+            .await
+            .expect("downgrade should apply");
+
+        assert_eq!(
+            state
+                .entitlement
+                .expect("entitlement")
+                .max_tabs_per_computer,
+            1
+        );
+        assert_eq!(state.tabs[0].status, "running");
+        assert_eq!(state.tabs[1].status, "needs_restart");
+        assert_eq!(state.tabs[2].status, "needs_restart");
+        assert!(
+            runtime
+                .write_input("default", b"echo still-running\r".to_vec())
+                .await
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .write_input("tab-2", b"echo should-fail\r".to_vec())
+                .await
+                .is_err()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

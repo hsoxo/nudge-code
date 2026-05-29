@@ -242,7 +242,7 @@ Current implementation status:
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
 - CLI persists relay-provided entitlement from binding confirmation into the daemon session through local IPC, so the daemon has the relay's current tab limit when enforcing local tab creation.
 - Daemon/iOS live relay paths perform a phone-initiated E2E handshake when binding public keys are available, wrap phone-to-daemon control requests, daemon responses, and post-handshake live terminal updates in encrypted envelopes, and fall back to plaintext only for legacy bindings without peer public keys.
-- The daemon-control spawned-process E2E smoke now self-starts an isolated hosted-mode relay with signed websocket challenges, required E2E envelopes, disabled legacy HTTP message endpoints, local relay persistence, a real daemon, and a simulated websocket phone client. It still accepts `NUDGE_RELAY_SMOKE_URL` when we need to point the same test at an external relay. Relay-side free entitlement enforcement covers claimed and active computer bindings, with smoke coverage for revoke-then-rebind. Hosted-mode deployment defaults and a production relay container build are documented in `docs/relay-hosted.md`; CI builds the relay container, smoke-checks hosted readiness, and publishes tagged images to GitHub Container Registry. Managed database storage, live hosted deployment, paid-plan downgrade behavior, and broader account/device revocation remain open.
+- The daemon-control spawned-process E2E smoke now self-starts an isolated hosted-mode relay with signed websocket challenges, required E2E envelopes, disabled legacy HTTP message endpoints, local relay persistence, a real daemon, and a simulated websocket phone client. It still accepts `NUDGE_RELAY_SMOKE_URL` when we need to point the same test at an external relay. Relay-side free entitlement enforcement covers claimed and active computer bindings, with smoke coverage for revoke-then-rebind. Hosted-mode deployment defaults and a production relay container build are documented in `docs/relay-hosted.md`; CI builds the relay container, smoke-checks hosted readiness, and publishes tagged images to GitHub Container Registry. Daemon entitlement downgrade enforcement suspends tabs beyond the new relay-provided tab limit and stops their PTYs while preserving metadata for restart after upgrade. Managed database storage, live hosted deployment, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -507,6 +507,7 @@ Daemon tests:
 - create/rename/close
 - free entitlement rejects second tab
 - relay-provided entitlement can raise/lower daemon tab limits
+- entitlement downgrade suspends excess running tabs and stops their PTYs
 - detach does not kill PTY
 - reconnect snapshot
 - metadata restore after daemon restart
