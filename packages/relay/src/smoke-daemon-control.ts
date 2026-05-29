@@ -1,9 +1,11 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import { socketSignatureMessage } from './auth.js';
 
 interface DeviceResponse {
   device: { id: string };
@@ -30,19 +32,21 @@ const nudgeBin = process.env.NUDGE_SMOKE_NUDGE_BIN ?? join(process.cwd(), '..', 
 
 async function main(): Promise<void> {
   const tmp = await mkdtemp(join(tmpdir(), 'nudge-daemon-control-'));
-  let daemon: ChildProcess | undefined;
+  let env: NodeJS.ProcessEnv | undefined;
   try {
-    const daemonDevice = await registerDevice('daemon', 'smoke-daemon-key');
-    const phoneDevice = await registerDevice('phone', 'smoke-phone-key');
-    const binding = await postJson<BindingResponse>('/api/bind/start', { daemonDeviceId: daemonDevice.id });
-    await postJson('/api/bind/claim', { code: binding.binding.code, phoneDeviceId: phoneDevice.id });
-    await postJson('/api/bind/confirm', { bindingId: binding.binding.id, daemonDeviceId: daemonDevice.id });
-
-    const env = {
+    env = {
       ...process.env,
       NUDGE_STATE_PATH: join(tmp, 'state', 'session.json'),
       NUDGE_RUNTIME_DIR: join(tmp, 'run'),
     };
+    const daemonPublicKey = (await runNudge(env, ['device-public-key'])).trim();
+    const phoneIdentity = generateSmokeIdentity();
+    const daemonDevice = await registerDevice('daemon', daemonPublicKey);
+    const phoneDevice = await registerDevice('phone', phoneIdentity.publicKey);
+    const binding = await postJson<BindingResponse>('/api/bind/start', { daemonDeviceId: daemonDevice.id });
+    await postJson('/api/bind/claim', { code: binding.binding.code, phoneDeviceId: phoneDevice.id });
+    await postJson('/api/bind/confirm', { bindingId: binding.binding.id, daemonDeviceId: daemonDevice.id });
+
     await runNudge(env, [
       'set-binding-state',
       '--relay-url',
@@ -58,11 +62,11 @@ async function main(): Promise<void> {
       '--bound-phone-id',
       phoneDevice.id,
     ]);
+    await runNudge(env, ['restart-tab']);
 
-    daemon = spawn(nudgeBin, ['daemon', 'run'], { env, stdio: 'ignore' });
     await waitForDaemonRelay(env);
 
-    const phoneSocket = await connectPhone(phoneDevice.id, binding.binding.id);
+    const phoneSocket = await connectPhone(phoneDevice.id, binding.binding.id, phoneIdentity.privateKey);
     phoneSocket.send(JSON.stringify({
       toDeviceId: daemonDevice.id,
       payload: { type: 'get_state', requestId: 'state-1' },
@@ -88,11 +92,14 @@ async function main(): Promise<void> {
     }
 
     phoneSocket.close();
-    await runNudge(env, ['daemon', 'stop']);
     console.log(`daemon relay control smoke passed binding=${binding.binding.id}`);
   } finally {
-    if (daemon && !daemon.killed) {
-      daemon.kill('SIGTERM');
+    if (env) {
+      try {
+        await runNudge(env, ['daemon', 'stop']);
+      } catch {
+        // daemon may not have started yet
+      }
     }
     await rm(tmp, { recursive: true, force: true });
   }
@@ -150,8 +157,16 @@ async function waitForDaemonRelay(env: NodeJS.ProcessEnv): Promise<void> {
   throw new Error('daemon did not connect to relay');
 }
 
-async function connectPhone(deviceId: string, bindingId: string): Promise<WebSocket> {
-  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/ws/mobile?deviceId=${deviceId}&bindingId=${bindingId}`;
+function generateSmokeIdentity(): { publicKey: string; privateKey: KeyObject } {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  return {
+    publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
+    privateKey,
+  };
+}
+
+async function connectPhone(deviceId: string, bindingId: string, privateKey: KeyObject): Promise<WebSocket> {
+  const wsUrl = signedPhoneWebSocketUrl(deviceId, bindingId, privateKey);
   const websocket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     websocket.once('open', () => resolve());
@@ -159,6 +174,19 @@ async function connectPhone(deviceId: string, bindingId: string): Promise<WebSoc
   });
   await waitForMessage(websocket, (message) => message.type === 'connected');
   return websocket;
+}
+
+function signedPhoneWebSocketUrl(deviceId: string, bindingId: string, privateKey: KeyObject): string {
+  const url = new URL(`${baseUrl.replace(/^http/, 'ws')}/ws/mobile`);
+  const timestamp = String(Date.now());
+  const nonce = `nonce-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
+  url.searchParams.set('deviceId', deviceId);
+  url.searchParams.set('bindingId', bindingId);
+  url.searchParams.set('authTimestamp', timestamp);
+  url.searchParams.set('authNonce', nonce);
+  url.searchParams.set('authSignature', sign(null, Buffer.from(message), privateKey).toString('base64'));
+  return url.toString();
 }
 
 async function waitForDaemonResponse(websocket: WebSocket, requestId: string): Promise<RelayMessage> {

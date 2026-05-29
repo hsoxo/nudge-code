@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
@@ -21,6 +25,7 @@ use tokio::task;
 use tokio::time::{MissedTickBehavior, interval, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -42,6 +47,8 @@ pub struct MachineSession {
     pub phone_profile: Option<PhoneProfile>,
     #[serde(default)]
     pub binding: Option<BindingState>,
+    #[serde(default)]
+    pub device_identity: Option<DeviceIdentity>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -154,6 +161,13 @@ pub struct BindingState {
     #[serde(default)]
     pub bound_phone_id: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    pub public_key: String,
+    pub signing_key: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,12 +346,18 @@ impl StateStore {
         if self.path.exists() {
             let bytes = fs::read(&self.path)
                 .with_context(|| format!("failed to read {}", self.path.display()))?;
-            let session = serde_json::from_slice(&bytes)
+            let mut session: MachineSession = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", self.path.display()))?;
+            if session.ensure_device_identity()? {
+                self.save(&session)?;
+            } else {
+                self.secure_file_permissions()?;
+            }
             return Ok(session);
         }
 
-        let session = MachineSession::new_default();
+        let mut session = MachineSession::new_default();
+        session.ensure_device_identity()?;
         self.save(&session)?;
         Ok(session)
     }
@@ -346,25 +366,51 @@ impl StateStore {
         if self.path.exists() {
             let bytes = fs::read(&self.path)
                 .with_context(|| format!("failed to read {}", self.path.display()))?;
-            let session = serde_json::from_slice(&bytes)
+            let mut session: MachineSession = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", self.path.display()))?;
+            if session.ensure_device_identity()? {
+                self.save(&session)?;
+            } else {
+                self.secure_file_permissions()?;
+            }
             return Ok((session, true));
         }
 
-        let session = MachineSession::new_default();
+        let mut session = MachineSession::new_default();
+        session.ensure_device_identity()?;
         self.save(&session)?;
         Ok((session, false))
     }
 
     pub fn save(&self, session: &MachineSession) -> Result<()> {
         if let Some(parent) = self.path.parent() {
+            let parent_existed = parent.exists();
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
+            if !parent_existed {
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).with_context(
+                    || format!("failed to set permissions on {}", parent.display()),
+                )?;
+            }
         }
         let bytes = serde_json::to_vec_pretty(session)?;
-        fs::write(&self.path, bytes)
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set permissions on {}", self.path.display()))?;
+        file.write_all(&bytes)
             .with_context(|| format!("failed to write {}", self.path.display()))?;
         Ok(())
+    }
+
+    fn secure_file_permissions(&self) -> Result<()> {
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set permissions on {}", self.path.display()))
     }
 }
 
@@ -377,9 +423,26 @@ impl MachineSession {
             entitlement: Entitlement::free(),
             phone_profile: None,
             binding: None,
+            device_identity: None,
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    pub fn ensure_device_identity(&mut self) -> Result<bool> {
+        if self.device_identity.is_some() {
+            return Ok(false);
+        }
+        self.device_identity = Some(DeviceIdentity::generate()?);
+        self.updated_at = now_string();
+        Ok(true)
+    }
+
+    pub fn device_identity(&mut self) -> Result<&DeviceIdentity> {
+        self.ensure_device_identity()?;
+        self.device_identity
+            .as_ref()
+            .context("device identity should exist")
     }
 
     pub fn create_tab(&mut self, title: String) -> std::result::Result<&TerminalTab, SessionError> {
@@ -680,6 +743,39 @@ impl BindingState {
             expires_at: self.expires_at.clone(),
             status: self.status.as_str().to_string(),
             bound_phone_id: self.bound_phone_id.clone().unwrap_or_default(),
+        }
+    }
+}
+
+impl DeviceIdentity {
+    pub fn generate() -> Result<Self> {
+        let mut secret_key = [0u8; 32];
+        getrandom::fill(&mut secret_key).context("failed to generate daemon signing key")?;
+        let signing_key = SigningKey::from_bytes(&secret_key);
+        Ok(Self::from_signing_key(&signing_key))
+    }
+
+    pub fn from_secret_key(secret_key: [u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(&secret_key);
+        Self::from_signing_key(&signing_key)
+    }
+
+    pub fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    pub fn sign(&self, message: &[u8]) -> Result<String> {
+        let secret_key = decode_fixed_base64::<32>(&self.signing_key)
+            .context("stored daemon signing key is invalid")?;
+        let signing_key = SigningKey::from_bytes(&secret_key);
+        Ok(BASE64_STANDARD.encode(signing_key.sign(message).to_bytes()))
+    }
+
+    fn from_signing_key(signing_key: &SigningKey) -> Self {
+        Self {
+            public_key: BASE64_STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            signing_key: BASE64_STANDARD.encode(signing_key.to_bytes()),
+            created_at: now_string(),
         }
     }
 }
@@ -1340,6 +1436,17 @@ impl DaemonRuntime {
         Ok(self.session_state().await)
     }
 
+    async fn device_identity(&self) -> Result<DeviceIdentity> {
+        let mut session = self.session.lock().await;
+        if session.ensure_device_identity()? {
+            self.state_store.save(&session)?;
+        }
+        session
+            .device_identity
+            .clone()
+            .context("device identity should exist")
+    }
+
     async fn current_active_binding(&self) -> Option<BindingState> {
         self.session
             .lock()
@@ -1461,7 +1568,8 @@ async fn relay_connection_loop(runtime: DaemonRuntime) {
 }
 
 async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> Result<()> {
-    let url = relay_websocket_url(binding)?;
+    let identity = runtime.device_identity().await?;
+    let url = signed_relay_websocket_url(binding, &identity)?;
     let bound_phone_id = binding
         .bound_phone_id
         .clone()
@@ -1899,6 +2007,62 @@ fn relay_websocket_url(binding: &BindingState) -> Result<String> {
         "{ws_base}/ws/daemon?deviceId={}&bindingId={}",
         binding.daemon_device_id, binding.binding_id
     ))
+}
+
+fn signed_relay_websocket_url(binding: &BindingState, identity: &DeviceIdentity) -> Result<String> {
+    let mut url = Url::parse(&relay_websocket_url(binding)?)
+        .context("failed to parse relay websocket url")?;
+    let timestamp = current_unix_millis().to_string();
+    let nonce = random_nonce()?;
+    let message = socket_signature_message(
+        &binding.daemon_device_id,
+        &binding.binding_id,
+        &timestamp,
+        &nonce,
+    );
+    let signature = identity.sign(message.as_bytes())?;
+    url.query_pairs_mut()
+        .append_pair("authTimestamp", &timestamp)
+        .append_pair("authNonce", &nonce)
+        .append_pair("authSignature", &signature);
+    Ok(url.to_string())
+}
+
+fn socket_signature_message(
+    device_id: &str,
+    binding_id: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> String {
+    [
+        "nudge.relay.websocket.v1",
+        device_id,
+        binding_id,
+        timestamp,
+        nonce,
+    ]
+    .join("\n")
+}
+
+fn random_nonce() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).context("failed to generate websocket auth nonce")?;
+    Ok(BASE64_STANDARD.encode(bytes))
+}
+
+fn current_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn decode_fixed_base64<const N: usize>(value: &str) -> Result<[u8; N]> {
+    let bytes = BASE64_STANDARD.decode(value)?;
+    let length = bytes.len();
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected {N} decoded bytes, got {length}"))
 }
 
 pub async fn run_server(config: DaemonConfig) -> Result<()> {
@@ -2357,6 +2521,58 @@ mod tests {
         let parsed = binding_from_proto(binding).expect("proto binding should parse");
         assert_eq!(parsed.status, BindingStatus::Pending);
         assert_eq!(parsed.bound_phone_id, None);
+    }
+
+    #[test]
+    fn device_identity_generates_stable_public_key_and_signature() {
+        let identity = DeviceIdentity::from_secret_key([7; 32]);
+
+        assert_eq!(identity.public_key.len(), 44);
+        assert_eq!(identity.signing_key.len(), 44);
+        assert_eq!(identity.sign(b"hello").expect("signature").len(), 88);
+    }
+
+    #[test]
+    fn signed_relay_websocket_url_adds_auth_parameters() {
+        let binding = BindingState::pending(
+            "https://relay.example".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        );
+        let identity = DeviceIdentity::from_secret_key([9; 32]);
+
+        let url = signed_relay_websocket_url(&binding, &identity).expect("signed url");
+
+        assert!(
+            url.starts_with("wss://relay.example/ws/daemon?deviceId=daemon_1&bindingId=bind_1")
+        );
+        assert!(url.contains("authTimestamp="));
+        assert!(url.contains("authNonce="));
+        assert!(url.contains("authSignature="));
+    }
+
+    #[test]
+    fn state_store_writes_private_session_file() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-state-permissions-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let store = StateStore::new(state_path.clone());
+        let session = MachineSession::new_default();
+
+        store.save(&session).expect("state should save");
+
+        let mode = fs::metadata(&state_path)
+            .expect("state file should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

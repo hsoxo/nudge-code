@@ -9,6 +9,7 @@ const nonce = 'nonce-1234567890';
 
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const publicKeyBase64 = publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
+const rawPublicKeyBase64 = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
 const message = socketSignatureMessage({ deviceId, bindingId, timestamp, nonce });
 const signature = sign(null, Buffer.from(message), privateKey).toString('base64');
 
@@ -20,6 +21,14 @@ const validParams = new URLSearchParams({
 
 expectOk(verifySocketSignature({
   device: { id: deviceId, publicKey: publicKeyBase64 },
+  bindingId,
+  params: validParams,
+  requireSignature: true,
+  nowMs,
+}));
+
+expectOk(verifySocketSignature({
+  device: { id: deviceId, publicKey: rawPublicKeyBase64 },
   bindingId,
   params: validParams,
   requireSignature: true,

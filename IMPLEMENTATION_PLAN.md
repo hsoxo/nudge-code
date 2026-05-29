@@ -225,8 +225,9 @@ Current implementation status:
 
 - Relay has device registration, bind start/claim/confirm/revoke, daemon/mobile websocket endpoints, participant route authorization, free one-computer binding enforcement, and message forwarding.
 - Relay supports Ed25519 signed websocket auth query parameters in compatibility mode, and can require them with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
+- Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
-- Daemon websocket signatures, E2E encrypted envelopes, persistent relay storage, and hosted deployment remain open.
+- E2E encrypted envelopes, persistent relay storage, and hosted deployment remain open.
 
 Exit criteria:
 
@@ -249,7 +250,7 @@ Current implementation status:
 - `nudge bind phone` renders a terminal QR code and can `--wait --yes` for simulated phone claim and computer confirmation.
 - Hidden smoke helpers can simulate phone claim and computer confirmation until the native iOS binding UI exists.
 - `nudge bind revoke` revokes the relay binding and clears local binding state.
-- Native iOS QR scanning and signed mobile websocket URLs are implemented. Daemon websocket signatures and E2E encryption remain open Phase 5/relay work.
+- Native iOS QR scanning, phone signed websocket URLs, and daemon signed websocket URLs are implemented. E2E encryption remains open Phase 5/relay work.
 
 Tasks:
 
@@ -285,7 +286,7 @@ Current implementation status:
 
 - `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
 - The scaffold includes machine list, tab strip, terminal preview WebView with bundled xterm.js assets, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, replayed terminal output tail, throttled ephemeral daemon-pushed live terminal byte updates, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
-- iOS signs mobile websocket URLs; daemon websocket signatures, E2E encryption, and richer scrollback replay remain open.
+- iOS and daemon websocket signatures are implemented; E2E encryption and richer scrollback replay remain open.
 
 Tasks:
 
@@ -439,7 +440,7 @@ Goals:
 
 Tasks:
 
-- Add signed websocket challenge flow.
+- Harden signed websocket auth with server-issued challenges or nonce replay tracking.
 - Add binding revocation propagation.
 - Add entitlement revocation/downgrade behavior.
 - Validate E2E encrypted envelope for terminal/control streams.

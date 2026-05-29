@@ -60,6 +60,9 @@ enum Command {
     /// Print persisted session metadata.
     #[command(hide = true)]
     SessionState,
+    /// Print daemon signing public key for relay smoke tests.
+    #[command(hide = true)]
+    DevicePublicKey,
     /// Create a tab in the persisted session metadata.
     #[command(hide = true)]
     CreateTab {
@@ -336,6 +339,9 @@ async fn main() -> Result<()> {
             ensure_daemon().await?;
             let state = get_session_state().await?;
             print_session_state(&state);
+        }
+        Some(Command::DevicePublicKey) => {
+            println!("{}", daemon_public_key()?);
         }
         Some(Command::CreateTab { title }) => {
             ensure_daemon().await?;
@@ -639,14 +645,9 @@ async fn bind_phone(relay_url: &str, wait: bool, yes: bool, timeout_seconds: u64
         }
     }
 
+    let daemon_public_key = daemon_public_key()?;
     let client = reqwest::Client::new();
-    let daemon_device = register_device(
-        &client,
-        &relay_url,
-        "daemon",
-        &format!("nudge-daemon-dev-key-{}", now_millis()),
-    )
-    .await?;
+    let daemon_device = register_device(&client, &relay_url, "daemon", &daemon_public_key).await?;
     let binding_response = post_json::<StartBindingRequest, BindingResponse>(
         &client,
         &relay_url,
@@ -1001,6 +1002,12 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+fn daemon_public_key() -> Result<String> {
+    let mut session = nudge_daemon::load_session()?;
+    let identity = session.device_identity()?;
+    Ok(identity.public_key().to_string())
 }
 
 fn print_qr_code(value: &str) -> Result<()> {

@@ -40,8 +40,8 @@ Current scaffold:
 - terminal snapshot fetch and ephemeral daemon-pushed live terminal bytes into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
+- signed mobile websocket authentication with the Keychain-backed phone identity.
 
 Still open:
 
-- signed relay authentication.
 - E2E encrypted terminal/control stream.
