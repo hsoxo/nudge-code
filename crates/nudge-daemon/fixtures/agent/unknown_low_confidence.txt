@@ -1,0 +1,3 @@
+build finished successfully
+
+no interactive coding agent is visible here

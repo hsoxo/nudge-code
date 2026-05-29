@@ -1,0 +1,5 @@
+Claude Code
+
+Permission required. Allow this command?
+
+$ git status

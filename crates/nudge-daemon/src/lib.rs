@@ -2840,7 +2840,7 @@ mod tests {
     fn detects_claude_approval_from_screen_text() {
         let status = detect_agent_status(
             "shell",
-            "Claude Code\nPermission required. Allow this command?",
+            include_str!("../fixtures/agent/claude_approval.txt"),
             None,
             &TabStatus::Running,
         );
@@ -2853,13 +2853,27 @@ mod tests {
     fn detects_codex_waiting_from_title_and_screen_text() {
         let status = detect_agent_status(
             "codex",
-            "Waiting for input. Enter your prompt",
+            include_str!("../fixtures/agent/codex_waiting.txt"),
             None,
             &TabStatus::Running,
         );
         assert_eq!(status.kind, AgentKind::Codex);
         assert_eq!(status.state, AgentInteractionState::WaitingForInput);
         assert_eq!(status.source, AgentDetectionSource::Title);
+    }
+
+    #[test]
+    fn unknown_fixture_stays_low_confidence() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/unknown_low_confidence.txt"),
+            None,
+            &TabStatus::Running,
+        );
+
+        assert_eq!(status.kind, AgentKind::Unknown);
+        assert_eq!(status.state, AgentInteractionState::Running);
+        assert!(status.confidence < 0.5);
     }
 
     #[test]
