@@ -34,11 +34,11 @@ async function main(): Promise<void> {
     payload: {
       type: 'daemon_response',
       ok: true,
-      data: { tabId: 'default', rows: 24, cols: 80, text: 'live update' },
+      data: { tabId: 'default', bytesBase64: 'bGl2ZSB1cGRhdGU=' },
     },
   }));
   const update = await liveUpdate;
-  if (update.message?.payload?.data?.text !== 'live update') {
+  if (update.message?.payload?.data?.bytesBase64 !== 'bGl2ZSB1cGRhdGU=') {
     throw new Error(`unexpected live update payload: ${JSON.stringify(update)}`);
   }
 

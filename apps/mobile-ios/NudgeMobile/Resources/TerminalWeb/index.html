@@ -66,6 +66,12 @@
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight;
         });
+      },
+      writeOutput(text) {
+        term.write(text || '');
+        requestAnimationFrame(() => {
+          container.scrollTop = container.scrollHeight;
+        });
       }
     };
   </script>

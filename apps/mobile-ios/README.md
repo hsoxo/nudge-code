@@ -34,10 +34,10 @@ Current scaffold:
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
 - one-shot relay binding status refresh when opening a pending machine.
-- long-lived `/ws/mobile` session for state, snapshot, live terminal snapshot, input-response, phone-profile, and width-mode sync.
+- long-lived `/ws/mobile` session for state, snapshot, live terminal byte, input-response, phone-profile, and width-mode sync.
 - automatic relay session reconnect with stale-state banner.
 - bundled xterm.js runtime assets copied from `@xterm/xterm`.
-- terminal snapshot fetch and ephemeral daemon-pushed live terminal snapshots into the native terminal preview.
+- terminal snapshot fetch and ephemeral daemon-pushed live terminal bytes into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 

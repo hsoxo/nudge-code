@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -192,6 +192,7 @@ struct RelayRoutedMessage {
 #[derive(Debug, Clone)]
 struct TerminalChange {
     tab_id: String,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1401,6 +1402,7 @@ async fn spawn_pty_for_tab(
                 .process(bytes);
             let _ = terminal_changes.send(TerminalChange {
                 tab_id: output_tab_id.clone(),
+                data: bytes.to_vec(),
             });
         })
     })
@@ -1464,7 +1466,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         .set_relay_state(RelayConnectionState::connected(binding))
         .await;
     let mut terminal_changes = runtime.subscribe_terminal_changes();
-    let mut pending_terminal_tabs = BTreeSet::new();
+    let mut pending_terminal_outputs = BTreeMap::new();
     let mut terminal_flush = interval(Duration::from_millis(100));
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -1474,20 +1476,32 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
             change = terminal_changes.recv() => {
                 match change {
                     Ok(change) => {
-                        pending_terminal_tabs.insert(change.tab_id);
+                        let output = pending_terminal_outputs
+                            .entry(change.tab_id)
+                            .or_insert_with(Vec::new);
+                        output.extend_from_slice(&change.data);
+                        let overflow = output.len().saturating_sub(64 * 1024);
+                        if overflow > 0 {
+                            output.drain(..overflow);
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        pending_terminal_tabs.extend(runtime.running_tab_ids().await);
+                        for tab_id in runtime.running_tab_ids().await {
+                            pending_terminal_outputs.entry(tab_id).or_insert_with(Vec::new);
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            _ = terminal_flush.tick(), if !pending_terminal_tabs.is_empty() => {
-                let tab_ids = std::mem::take(&mut pending_terminal_tabs);
-                for tab_id in tab_ids {
-                    if let Some(message) =
+            _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() => {
+                let outputs = std::mem::take(&mut pending_terminal_outputs);
+                for (tab_id, data) in outputs {
+                    let message = if data.is_empty() {
                         live_terminal_snapshot_json(runtime, binding, &bound_phone_id, &tab_id).await
-                    {
+                    } else {
+                        Some(relay_live_terminal_output_json(&bound_phone_id, binding, &tab_id, &data))
+                    };
+                    if let Some(message) = message {
                         websocket
                             .send(WebSocketMessage::Text(message.into()))
                             .await
@@ -1730,6 +1744,32 @@ fn relay_live_terminal_snapshot_json(
     .expect("relay live terminal snapshot should serialize")
 }
 
+fn relay_live_terminal_output_json(
+    to_device_id: &str,
+    binding: &BindingState,
+    tab_id: &str,
+    data: &[u8],
+) -> String {
+    serde_json::to_string(&json!({
+        "toDeviceId": to_device_id,
+        "ephemeral": true,
+        "payload": {
+            "type": "daemon_response",
+            "bindingId": binding.binding_id,
+            "ok": true,
+            "data": terminal_output_json(tab_id, data),
+        }
+    }))
+    .expect("relay live terminal output should serialize")
+}
+
+fn terminal_output_json(tab_id: &str, data: &[u8]) -> Value {
+    json!({
+        "tabId": tab_id,
+        "bytesBase64": base64_encode(data),
+    })
+}
+
 fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
     json!({
         "tabId": snapshot.tab_id,
@@ -1737,6 +1777,30 @@ fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
         "cols": snapshot.cols,
         "text": snapshot.text,
     })
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        let value = ((first as u32) << 16) | ((second as u32) << 8) | third as u32;
+        encoded.push(ALPHABET[((value >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((value >> 12) & 0x3f) as usize] as char);
+        if chunk.len() >= 2 {
+            encoded.push(ALPHABET[((value >> 6) & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() == 3 {
+            encoded.push(ALPHABET[(value & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }
 
 fn session_state_json(state: v1::SessionState) -> Value {
@@ -2295,6 +2359,38 @@ mod tests {
         assert_eq!(value["payload"]["data"]["rows"], 24);
         assert_eq!(value["payload"]["data"]["cols"], 80);
         assert_eq!(value["payload"]["data"]["text"], "ready");
+    }
+
+    #[test]
+    fn live_terminal_output_uses_base64_bytes() {
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string());
+
+        let json =
+            relay_live_terminal_output_json("phone_1", &binding, "default", b"\x1b[31mred\n");
+        let value: Value = serde_json::from_str(&json).expect("live output json should parse");
+
+        assert_eq!(value["toDeviceId"], "phone_1");
+        assert_eq!(value["ephemeral"], true);
+        assert_eq!(value["payload"]["type"], "daemon_response");
+        assert_eq!(value["payload"]["bindingId"], "bind_1");
+        assert_eq!(value["payload"]["ok"], true);
+        assert_eq!(value["payload"]["data"]["tabId"], "default");
+        assert_eq!(value["payload"]["data"]["bytesBase64"], "G1szMW1yZWQK");
+    }
+
+    #[test]
+    fn base64_encoder_handles_padding() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+        assert_eq!(base64_encode(b"abc"), "YWJj");
     }
 
     #[test]

@@ -295,9 +295,15 @@ struct TerminalSnapshot: Equatable, Sendable {
     var text: String
 }
 
+struct TerminalOutput: Equatable, Sendable {
+    var tabID: String
+    var text: String
+}
+
 enum RelaySessionEvent: Equatable, Sendable {
     case sessionState(RemoteSessionState)
     case terminalSnapshot(TerminalSnapshot)
+    case terminalOutput(TerminalOutput)
     case terminalInputAccepted(tabID: String?)
 }
 
@@ -532,6 +538,12 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 text: snapshot.text
             ))
         }
+        if let output = data.output {
+            return .terminalOutput(TerminalOutput(
+                tabID: output.tabId,
+                text: output.text
+            ))
+        }
         if data.accepted == true {
             return .terminalInputAccepted(tabID: nil)
         }
@@ -634,6 +646,7 @@ private struct RelayDaemonDataResponse: Decodable {
     var rows: Int?
     var cols: Int?
     var text: String?
+    var bytesBase64: String?
     var accepted: Bool?
     var error: String?
 
@@ -648,12 +661,27 @@ private struct RelayDaemonDataResponse: Decodable {
         }
         return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text)
     }
+
+    var output: RelayTerminalOutputResponse? {
+        guard let tabId, let bytesBase64,
+              let data = Data(base64Encoded: bytesBase64),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        return RelayTerminalOutputResponse(tabId: tabId, text: text)
+    }
 }
 
 private struct RelayTerminalSnapshotResponse: Decodable {
     var tabId: String
     var rows: Int
     var cols: Int
+    var text: String
+}
+
+private struct RelayTerminalOutputResponse: Decodable {
+    var tabId: String
     var text: String
 }
 

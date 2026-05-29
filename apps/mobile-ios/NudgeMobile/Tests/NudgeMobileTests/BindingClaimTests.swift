@@ -306,6 +306,52 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 24, cols: 80))
     }
 
+    @Test func appModelAppliesLiveTerminalOutputWithoutSnapshotRequest() async throws {
+        let machine = activeMachine()
+        let remoteTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "$ "
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "echo hi\r\nhi\r\n"))
+        ], suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.outputSequence == 1
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.snapshotRequests == ["default"])
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ ")
+        #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputText == "echo hi\r\nhi\r\n")
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
+    }
+
     @Test func appModelMarksRelaySessionReconnectingAfterDrop() async throws {
         let machine = activeMachine()
         let session = RecordingRelaySession()

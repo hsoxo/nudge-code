@@ -345,6 +345,8 @@ final class AppModel {
             }
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)
+        case .terminalOutput(let output):
+            applyTerminalOutput(output, machineID: machineID)
         case .terminalInputAccepted(let tabID):
             if let tabID {
                 try await session.requestTerminalSnapshot(tabID: tabID)
@@ -393,6 +395,15 @@ final class AppModel {
         }
         tabsByMachine[machineID]?[tabIndex].profile = snapshot.profile
         tabsByMachine[machineID]?[tabIndex].previewText = snapshot.text
+        tabsByMachine[machineID]?[tabIndex].pendingOutputText = ""
+    }
+
+    private func applyTerminalOutput(_ output: TerminalOutput, machineID: String) {
+        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == output.tabID }) else {
+            return
+        }
+        tabsByMachine[machineID]?[tabIndex].pendingOutputText = output.text
+        tabsByMachine[machineID]?[tabIndex].outputSequence += 1
     }
 
     static func preview() -> AppModel {

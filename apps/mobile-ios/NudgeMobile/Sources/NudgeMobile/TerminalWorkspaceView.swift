@@ -98,7 +98,12 @@ struct TerminalView: View {
     var tab: TerminalTab
 
     var body: some View {
-        TerminalWebView(text: tab.previewText, widthMode: tab.widthMode)
+        TerminalWebView(
+            snapshotText: tab.previewText,
+            widthMode: tab.widthMode,
+            outputText: tab.pendingOutputText,
+            outputSequence: tab.outputSequence
+        )
             .background(Color.black)
             .overlay(alignment: .topTrailing) {
                 AgentBadge(status: tab.agentStatus)
@@ -108,8 +113,10 @@ struct TerminalView: View {
 }
 
 struct TerminalWebView: UIViewRepresentable {
-    var text: String
+    var snapshotText: String
     var widthMode: WidthMode
+    var outputText: String
+    var outputSequence: Int
 
     func makeUIView(context: Context) -> WKWebView {
         let webView = WKWebView(frame: .zero)
@@ -121,7 +128,13 @@ struct TerminalWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.update(text: text, widthMode: widthMode, in: webView)
+        context.coordinator.update(
+            snapshotText: snapshotText,
+            widthMode: widthMode,
+            outputText: outputText,
+            outputSequence: outputSequence,
+            in: webView
+        )
     }
 
     func makeCoordinator() -> Coordinator {
@@ -132,6 +145,8 @@ struct TerminalWebView: UIViewRepresentable {
         private var isLoaded = false
         private var pendingSnapshot: (text: String, widthMode: WidthMode)?
         private var lastSnapshot: (text: String, widthMode: WidthMode)?
+        private var pendingOutput: (text: String, sequence: Int)?
+        private var lastOutputSequence = 0
 
         func loadTerminal(in webView: WKWebView) {
             guard let url = TerminalWebAssets.indexURL() else {
@@ -141,16 +156,27 @@ struct TerminalWebView: UIViewRepresentable {
             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         }
 
-        func update(text: String, widthMode: WidthMode, in webView: WKWebView) {
-            let snapshot = (text: text, widthMode: widthMode)
+        func update(
+            snapshotText: String,
+            widthMode: WidthMode,
+            outputText: String,
+            outputSequence: Int,
+            in webView: WKWebView
+        ) {
+            let snapshot = (text: snapshotText, widthMode: widthMode)
             guard isLoaded else {
                 pendingSnapshot = snapshot
+                if outputSequence > lastOutputSequence {
+                    pendingOutput = (text: outputText, sequence: outputSequence)
+                }
                 return
             }
-            guard lastSnapshot?.text != text || lastSnapshot?.widthMode != widthMode else {
-                return
+            if lastSnapshot?.text != snapshotText || lastSnapshot?.widthMode != widthMode {
+                apply(snapshot, in: webView)
             }
-            apply(snapshot, in: webView)
+            if outputSequence > lastOutputSequence {
+                applyOutput(outputText, sequence: outputSequence, in: webView)
+            }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -158,6 +184,10 @@ struct TerminalWebView: UIViewRepresentable {
             if let pendingSnapshot {
                 apply(pendingSnapshot, in: webView)
                 self.pendingSnapshot = nil
+            }
+            if let pendingOutput {
+                applyOutput(pendingOutput.text, sequence: pendingOutput.sequence, in: webView)
+                self.pendingOutput = nil
             }
         }
 
@@ -167,6 +197,14 @@ struct TerminalWebView: UIViewRepresentable {
             let encodedWidthMode = Self.javascriptString(snapshot.widthMode.rawValue)
             webView.evaluateJavaScript(
                 "window.nudgeTerminal && window.nudgeTerminal.setSnapshot(\(encodedText), \(encodedWidthMode));"
+            )
+        }
+
+        private func applyOutput(_ text: String, sequence: Int, in webView: WKWebView) {
+            lastOutputSequence = sequence
+            let encodedText = Self.javascriptString(text)
+            webView.evaluateJavaScript(
+                "window.nudgeTerminal && window.nudgeTerminal.writeOutput(\(encodedText));"
             )
         }
 
