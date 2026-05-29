@@ -43,7 +43,7 @@ async function main(): Promise<void> {
       bindingId: binding.binding.id,
       fromDeviceId: phone.id,
       toDeviceId: daemon.id,
-      payload: encryptedPayload('terminal_input'),
+      payload: encryptedPayload(phone.id, daemon.id, 'terminal_input', 1),
     });
     const polled = await getJson<{ messages: Array<{ payload: { type?: string; ciphertextBase64?: string } }> }>(
       `/api/messages/poll?deviceId=${encodeURIComponent(daemon.id)}`,
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
     const routed = waitForMessage(daemonSocket, (message) => message.type === 'message');
     phoneSocket.send(JSON.stringify({
       toDeviceId: daemon.id,
-      payload: encryptedPayload('get_state'),
+      payload: encryptedPayload(phone.id, daemon.id, 'get_state', '2'),
     }));
     const routedMessage = await routed;
     if (routedMessage.message?.payload?.type !== 'e2e_envelope') {
@@ -174,13 +174,19 @@ async function getJson<T = unknown>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-function encryptedPayload(messageType: string): Record<string, unknown> {
+function encryptedPayload(
+  senderDeviceId: string,
+  recipientDeviceId: string,
+  messageType: string,
+  sequence: number | string,
+): Record<string, unknown> {
   return {
     type: 'e2e_envelope',
-    version: 1,
+    sessionId: 'session_1',
+    senderDeviceId,
+    recipientDeviceId,
     messageType,
-    senderKeyId: 'phone-key-1',
-    recipientKeyId: 'daemon-key-1',
+    sequence,
     nonceBase64: Buffer.from('nonce-000001').toString('base64'),
     ciphertextBase64: Buffer.from('opaque ciphertext bytes').toString('base64'),
   };

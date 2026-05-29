@@ -434,7 +434,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 400, { error: 'same_source_and_destination' });
       return;
     }
-    const payloadValidation = validateRelayPayload(body.payload);
+    const payloadValidation = validateRelayPayload(body.payload, body.fromDeviceId, body.toDeviceId);
     if (!payloadValidation.ok) {
       audit('message_rejected', {
         bindingId: binding.id,
@@ -622,7 +622,7 @@ function bindWebSocket(websocket: WebSocket, device: Device, binding: Binding): 
       websocket.send(JSON.stringify({ type: 'error', error: 'route_not_authorized' }));
       return;
     }
-    const payloadValidation = validateRelayPayload(message.payload);
+    const payloadValidation = validateRelayPayload(message.payload, device.id, message.toDeviceId);
     if (!payloadValidation.ok) {
       audit('message_rejected', {
         bindingId: binding.id,
@@ -715,7 +715,11 @@ type PayloadValidation =
   | { ok: true }
   | { ok: false; error: 'e2e_payload_required' | 'invalid_e2e_payload' };
 
-function validateRelayPayload(payload: unknown): PayloadValidation {
+function validateRelayPayload(
+  payload: unknown,
+  fromDeviceId?: string,
+  toDeviceId?: string,
+): PayloadValidation {
   if (!requireE2EPayload) {
     return { ok: true };
   }
@@ -727,18 +731,35 @@ function validateRelayPayload(payload: unknown): PayloadValidation {
     return { ok: false, error: 'e2e_payload_required' };
   }
   if (
-    typeof candidate.version !== 'number' ||
-    !Number.isInteger(candidate.version) ||
-    candidate.version < 1 ||
+    typeof candidate.sessionId !== 'string' ||
+    typeof candidate.senderDeviceId !== 'string' ||
+    typeof candidate.recipientDeviceId !== 'string' ||
     typeof candidate.messageType !== 'string' ||
+    !isUint64Json(candidate.sequence) ||
     typeof candidate.ciphertextBase64 !== 'string' ||
-    typeof candidate.nonceBase64 !== 'string' ||
-    typeof candidate.senderKeyId !== 'string' ||
-    typeof candidate.recipientKeyId !== 'string'
+    typeof candidate.nonceBase64 !== 'string'
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.sessionId.length === 0 ||
+    candidate.senderDeviceId.length === 0 ||
+    candidate.recipientDeviceId.length === 0 ||
+    candidate.messageType.length === 0 ||
+    candidate.ciphertextBase64.length === 0
+  ) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (
+    candidate.senderDeviceId !== fromDeviceId ||
+    candidate.recipientDeviceId !== toDeviceId
   ) {
     return { ok: false, error: 'invalid_e2e_payload' };
   }
   if (!isBase64(candidate.ciphertextBase64) || !isBase64(candidate.nonceBase64)) {
+    return { ok: false, error: 'invalid_e2e_payload' };
+  }
+  if (Buffer.from(candidate.nonceBase64, 'base64').length !== 12) {
     return { ok: false, error: 'invalid_e2e_payload' };
   }
   return { ok: true };
@@ -749,6 +770,16 @@ function isBase64(value: string): boolean {
     return false;
   }
   return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+function isUint64Json(value: unknown): boolean {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    return false;
+  }
+  return BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 function readiness(): Record<string, unknown> {
