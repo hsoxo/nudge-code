@@ -630,7 +630,7 @@ E2E envelope:
 - include monotonically increasing sequence numbers to reject replay
 - relay sees route metadata, device ids, message type class, and ciphertext length, but not terminal/control contents
 - `proto/nudge.proto` defines the shared handshake and encrypted envelope messages; daemon and iOS implement transcript signing/verification plus X25519/HKDF/ChaCha20-Poly1305 envelopes for relay control requests, daemon responses, and post-handshake live terminal updates
-- hosted relay should run with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1` once the spawned-process relay/daemon/mobile integration test is in CI
+- hosted relay should run with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; the spawned relay/daemon/simulated-phone smoke covers the encrypted control path, and reconnect/mobile-app process coverage should follow in CI
 
 Preferred future hardening:
 

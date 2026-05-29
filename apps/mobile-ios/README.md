@@ -48,4 +48,4 @@ Current scaffold:
 
 Still open:
 
-- Full spawned-process relay/daemon/mobile integration coverage for encrypted terminal input, live output, and reconnect behavior.
+- Reconnect and true mobile-app process integration coverage for encrypted terminal input and live output.

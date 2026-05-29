@@ -240,7 +240,7 @@ Current implementation status:
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity and stores the daemon public key from binding claim/status responses.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
 - Daemon/iOS live relay paths perform a phone-initiated E2E handshake when binding public keys are available, wrap phone-to-daemon control requests, daemon responses, and post-handshake live terminal updates in encrypted envelopes, and fall back to plaintext only for legacy bindings without peer public keys.
-- A full spawned-process integration test that starts relay plus daemon and drives a websocket phone client remains open; managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation also remain open.
+- A spawned-process E2E smoke now starts relay plus daemon and drives a simulated websocket phone client through E2E handshake, encrypted state request, encrypted terminal input, and encrypted live terminal output. Reconnect coverage, managed database storage, hosted deployment, entitlement downgrade behavior, and broader account/device revocation remain open.
 
 Exit criteria:
 
@@ -249,7 +249,7 @@ Exit criteria:
 - relay routes state request/response.
 - relay refuses unbound phone.
 - relay refuses a second active computer binding for free entitlement.
-- spawned-process integration test starts relay and daemon, binds a simulated phone, performs E2E handshake, sends encrypted terminal input, receives encrypted live output/state, and verifies the relay never sees plaintext terminal/control contents.
+- spawned-process smoke starts relay and daemon, binds a simulated phone, performs E2E handshake, sends encrypted terminal input, and receives encrypted daemon response/live output.
 
 ## Phase 5: Binding CLI
 
@@ -264,7 +264,7 @@ Current implementation status:
 - `nudge bind phone` renders a terminal QR code and can `--wait --yes` for simulated phone claim and computer confirmation.
 - Hidden smoke helpers can simulate phone claim and computer confirmation until the native iOS binding UI exists.
 - `nudge bind revoke` revokes the relay binding and clears local binding state.
-- Native iOS QR scanning, phone signed websocket URLs, daemon signed websocket URLs, participant public key caching, and live relay E2E encryption wiring are implemented. Full spawned-process relay/daemon/mobile integration coverage remains open Phase 5/relay work.
+- Native iOS QR scanning, phone signed websocket URLs, daemon signed websocket URLs, participant public key caching, live relay E2E encryption wiring, and spawned relay/daemon/simulated-phone E2E smoke coverage are implemented. Reconnect and true mobile-app process integration coverage remain open Phase 5/relay work.
 
 Tasks:
 
@@ -300,7 +300,7 @@ Current implementation status:
 
 - `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
 - The scaffold includes machine list, tab strip, terminal preview WebView with bundled xterm.js assets, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, replayed terminal output tail, throttled ephemeral daemon-pushed live terminal byte updates, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
-- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. Richer scrollback replay and full spawned-process relay/daemon/mobile integration coverage remain open.
+- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. Richer scrollback replay, reconnect integration, and true mobile-app process integration coverage remain open.
 
 Tasks:
 
@@ -537,7 +537,8 @@ Relay tests:
 - route authorization
 - revocation
 - no terminal payload logging
-- spawned-process relay + daemon + simulated phone integration test for E2E handshake, encrypted terminal input, encrypted daemon response, encrypted live terminal output, and reconnect behavior
+- spawned-process relay + daemon + simulated phone integration test for E2E handshake, encrypted terminal input, encrypted daemon response, and encrypted live terminal output
+- reconnect behavior in spawned relay + daemon + simulated phone integration
 
 Agent tests:
 
