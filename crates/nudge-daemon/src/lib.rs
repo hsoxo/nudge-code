@@ -1112,6 +1112,7 @@ fn looks_like_shell_prompt(text: &str) -> bool {
 struct ProcessEntry {
     pid: u32,
     parent_pid: u32,
+    foreground: bool,
     command: String,
 }
 
@@ -1130,8 +1131,29 @@ fn process_signal_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Optio
     descendants
         .iter()
         .rev()
-        .find(|entry| is_agent_command_name(&entry.command))
+        .find(|entry| entry.foreground && is_agent_command_name(&entry.command))
         .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        .or_else(|| {
+            descendants
+                .iter()
+                .rev()
+                .find(|entry| entry.foreground && !is_shell_command_name(&entry.command))
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        })
+        .or_else(|| {
+            descendants
+                .iter()
+                .rev()
+                .find(|entry| entry.foreground)
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        })
+        .or_else(|| {
+            descendants
+                .iter()
+                .rev()
+                .find(|entry| is_agent_command_name(&entry.command))
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        })
         .or_else(|| {
             descendants
                 .iter()
@@ -1164,7 +1186,7 @@ fn process_descendants(root_pid: u32, entries: &[ProcessEntry]) -> Vec<ProcessEn
 
 fn process_entries() -> Result<Vec<ProcessEntry>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm="])
+        .args(["-axo", "pid=,ppid=,stat=,comm="])
         .output()
         .context("failed to run ps for process detection")?;
     if !output.status.success() {
@@ -1187,8 +1209,12 @@ fn parse_process_entry(line: &str) -> Result<ProcessEntry> {
         anyhow::bail!("missing process pid in ps row: {line}");
     };
     let rest = rest.trim_start();
-    let Some((parent_pid, command)) = rest.split_once(char::is_whitespace) else {
+    let Some((parent_pid, rest)) = rest.split_once(char::is_whitespace) else {
         anyhow::bail!("missing process parent pid in ps row: {line}");
+    };
+    let rest = rest.trim_start();
+    let Some((stat, command)) = rest.split_once(char::is_whitespace) else {
+        anyhow::bail!("missing process stat in ps row: {line}");
     };
     let command = command.trim();
     if command.is_empty() {
@@ -1201,6 +1227,7 @@ fn parse_process_entry(line: &str) -> Result<ProcessEntry> {
         parent_pid: parent_pid
             .parse()
             .with_context(|| format!("invalid process parent pid in ps row: {line}"))?,
+        foreground: stat.contains('+'),
         command: command.to_string(),
     })
 }
@@ -3077,13 +3104,15 @@ mod tests {
 
     #[test]
     fn process_entries_parse_ps_rows() {
-        let entries =
-            parse_process_entries("  100     1 /bin/zsh\n  101   100 /Users/me/.local/bin/codex\n")
-                .expect("process rows should parse");
+        let entries = parse_process_entries(
+            "  100     1 Ss   /bin/zsh\n  101   100 S+   /Users/me/.local/bin/codex\n",
+        )
+        .expect("process rows should parse");
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].pid, 101);
         assert_eq!(entries[1].parent_pid, 100);
+        assert!(entries[1].foreground);
         assert_eq!(entries[1].command, "/Users/me/.local/bin/codex");
     }
 
@@ -3093,16 +3122,19 @@ mod tests {
             ProcessEntry {
                 pid: 100,
                 parent_pid: 1,
+                foreground: true,
                 command: "zsh".to_string(),
             },
             ProcessEntry {
                 pid: 101,
                 parent_pid: 100,
+                foreground: true,
                 command: "python".to_string(),
             },
             ProcessEntry {
                 pid: 102,
                 parent_pid: 101,
+                foreground: true,
                 command: "/opt/homebrew/bin/claude".to_string(),
             },
         ];
@@ -3114,10 +3146,40 @@ mod tests {
     }
 
     #[test]
+    fn process_signal_prefers_foreground_descendant_over_background_agent() {
+        let entries = vec![
+            ProcessEntry {
+                pid: 100,
+                parent_pid: 1,
+                foreground: true,
+                command: "zsh".to_string(),
+            },
+            ProcessEntry {
+                pid: 101,
+                parent_pid: 100,
+                foreground: false,
+                command: "claude".to_string(),
+            },
+            ProcessEntry {
+                pid: 102,
+                parent_pid: 100,
+                foreground: true,
+                command: "vim".to_string(),
+            },
+        ];
+
+        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+
+        assert_eq!(signal.command, "vim");
+        assert_eq!(signal.pid, Some(102));
+    }
+
+    #[test]
     fn process_signal_falls_back_to_root_process() {
         let entries = vec![ProcessEntry {
             pid: 100,
             parent_pid: 1,
+            foreground: true,
             command: "zsh".to_string(),
         }];
 

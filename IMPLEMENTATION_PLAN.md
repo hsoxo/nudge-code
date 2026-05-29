@@ -340,16 +340,16 @@ Current implementation status:
 - `AgentStatus` is part of the shared Rust/TypeScript/protobuf tab state.
 - The daemon refreshes conservative title/screen-text heuristics when serving session state, snapshots, and render frames.
 - The daemon records the spawned PTY command name/PID and uses the command name as a process-source signal when it directly identifies Claude, Codex, Opencode, OpenClaw, or a shell.
-- On macOS/Linux, the daemon scans the PTY child process descendants through `ps` and prefers detected Claude/Codex/Opencode/OpenClaw descendant commands over shell/title/screen heuristics.
+- On macOS/Linux, the daemon scans the PTY child process descendants through `ps -axo pid=,ppid=,stat=,comm=` and prefers foreground (`STAT` contains `+`) agent/non-shell descendants before falling back to descendant agent commands, root shell command, title, and screen heuristics.
 - The daemon has fixture-backed classifier tests for Claude approval, Codex waiting-for-input, and low-confidence unknown output.
 - Current heuristic kinds: `claude`, `codex`, `opencode`, `openclaw`, `shell`, `unknown`.
 - Current heuristic states: `running`, `waiting_for_input`, `needs_approval`, `exited`.
-- Controlling-terminal foreground process detection, event emission, and broader classifier fixture expansion remain open Phase 7 work.
+- Direct controlling-terminal process group queries, event emission, and broader classifier fixture expansion remain open Phase 7 work.
 
 Tasks:
 
-- Implement foreground process detection on macOS and Linux.
-- Walk process tree for PTY foreground process.
+- Implement foreground-aware process detection on macOS and Linux.
+- Walk process tree for PTY foreground and agent process signals.
 - Classify process command:
   - `claude`
   - `codex`
