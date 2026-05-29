@@ -892,6 +892,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "dirs",
  "nudge-daemon",
  "nudge-protocol",
  "qrcode",

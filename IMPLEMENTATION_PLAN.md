@@ -7,6 +7,11 @@ Goals:
 - establish Rust-first computer app structure
 - keep daemon, CLI, relay, mobile, and protocol boundaries clear
 
+Repository management:
+
+- Use a monorepo. The Rust workspace, npm workspaces, protobuf schema, relay, installer scripts, docs, and native iOS app should ship from one repository while the protocol and product shape are still changing quickly.
+- Avoid splitting CLI, relay, and mobile into separate repositories until public APIs, release cadence, and ownership boundaries are stable.
+
 Tasks:
 
 - Create workspace layout:
@@ -383,6 +388,14 @@ Goals:
 
 - make native install practical
 - keep daemon alive without a desktop app
+
+Current implementation status:
+
+- `nudge service install --dry-run` renders the platform-specific user service file.
+- macOS service support writes `~/Library/LaunchAgents/dev.nudgecode.nudge.daemon.plist` and uses `launchctl bootstrap/kickstart`.
+- Linux service support writes `~/.config/systemd/user/nudge.service` and uses `systemctl --user enable --now`.
+- `nudge service uninstall --dry-run`, `nudge service status`, and `nudge service logs` have first-pass command wiring.
+- Release artifact download, checksum/signature verification, and CI-built binaries remain open.
 
 Tasks:
 

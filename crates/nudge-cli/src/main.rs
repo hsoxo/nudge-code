@@ -1,5 +1,7 @@
+use std::fs;
 use std::io::{Write, stdout};
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -37,6 +39,11 @@ enum Command {
         placeholder: bool,
         #[command(subcommand)]
         command: Option<DaemonCommand>,
+    },
+    /// Install, inspect, or remove the user-level daemon service.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
     /// Bind or revoke a phone through the relay.
     Bind {
@@ -187,6 +194,36 @@ enum DaemonCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Install a launchd/systemd user service that keeps the daemon running.
+    Install {
+        /// Print files and commands without changing the machine.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not start or restart the service after installing it.
+        #[arg(long)]
+        no_start: bool,
+        /// Binary path to use in the service file.
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
+    /// Stop and remove the launchd/systemd user service.
+    Uninstall {
+        /// Print commands without changing the machine.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print OS service manager status for the daemon service.
+    Status,
+    /// Print recent daemon service logs.
+    Logs {
+        /// Number of recent lines to print.
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum BindCommand {
     /// Start phone binding and print the pairing code.
     Phone {
@@ -257,6 +294,16 @@ async fn main() -> Result<()> {
             command: Some(DaemonCommand::Stop),
             ..
         }) => stop_daemon().await?,
+        Some(Command::Service { command }) => match command {
+            ServiceCommand::Install {
+                dry_run,
+                no_start,
+                binary,
+            } => service_install(dry_run, no_start, binary.as_deref()).await?,
+            ServiceCommand::Uninstall { dry_run } => service_uninstall(dry_run).await?,
+            ServiceCommand::Status => service_status()?,
+            ServiceCommand::Logs { lines } => service_logs(lines)?,
+        },
         Some(Command::Bind { command }) => match command {
             BindCommand::Phone {
                 relay_url,
@@ -1373,6 +1420,427 @@ async fn stop_daemon() -> Result<()> {
         }
         _ => anyhow::bail!("daemon returned an unexpected stop response"),
     }
+}
+
+async fn service_install(dry_run: bool, no_start: bool, binary: Option<&Path>) -> Result<()> {
+    let executable = match binary {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_exe().context("failed to locate current executable")?,
+    };
+    let service = ServiceSpec::detect(&executable)?;
+    if dry_run {
+        println!("nudge service install dry run");
+        println!("platform={}", service.platform_name());
+        println!("service_file={}", service.path.display());
+        println!("binary={}", service.binary.display());
+        println!("{}", service.contents);
+        if !no_start {
+            for command in service.install_commands() {
+                let prefix = if command.ignore_failure {
+                    "would try"
+                } else {
+                    "would run"
+                };
+                println!("{prefix}: {}", shell_words(&command));
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = service.path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&service.path, service.contents.as_bytes())
+        .with_context(|| format!("failed to write {}", service.path.display()))?;
+    println!("service file installed at {}", service.path.display());
+
+    if !no_start {
+        for command in service.install_commands() {
+            run_status_command(&command)?;
+        }
+    }
+    Ok(())
+}
+
+async fn service_uninstall(dry_run: bool) -> Result<()> {
+    let executable = std::env::current_exe().context("failed to locate current executable")?;
+    let service = ServiceSpec::detect(&executable)?;
+    if dry_run {
+        println!("nudge service uninstall dry run");
+        println!("platform={}", service.platform_name());
+        println!("service_file={}", service.path.display());
+        for command in service.uninstall_commands() {
+            let prefix = if command.ignore_failure {
+                "would try"
+            } else {
+                "would run"
+            };
+            println!("{prefix}: {}", shell_words(&command));
+        }
+        println!("would remove: {}", service.path.display());
+        return Ok(());
+    }
+
+    for command in service.uninstall_commands() {
+        let status = StdCommand::new(&command.program)
+            .args(&command.args)
+            .status()
+            .with_context(|| format!("failed to run {}", shell_words(&command)))?;
+        if !status.success() {
+            eprintln!("command exited with {status}: {}", shell_words(&command));
+        }
+    }
+    match fs::remove_file(&service.path) {
+        Ok(()) => println!("removed {}", service.path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("service file already absent: {}", service.path.display());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to remove {}", service.path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn service_status() -> Result<()> {
+    let executable = std::env::current_exe().context("failed to locate current executable")?;
+    let service = ServiceSpec::detect(&executable)?;
+    println!("platform={}", service.platform_name());
+    println!("service_file={}", service.path.display());
+    run_inherited_command(&service.status_command())
+}
+
+fn service_logs(lines: usize) -> Result<()> {
+    let executable = std::env::current_exe().context("failed to locate current executable")?;
+    let service = ServiceSpec::detect(&executable)?;
+    run_inherited_command(&service.logs_command(lines))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ServicePlatform {
+    MacosLaunchd,
+    LinuxSystemd,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceSpec {
+    platform: ServicePlatform,
+    path: PathBuf,
+    binary: PathBuf,
+    contents: String,
+}
+
+impl ServiceSpec {
+    fn detect(binary: &Path) -> Result<Self> {
+        let binary = binary.to_path_buf();
+        let home = dirs::home_dir().context("failed to locate home directory")?;
+        match std::env::consts::OS {
+            "macos" => {
+                let path = home
+                    .join("Library")
+                    .join("LaunchAgents")
+                    .join("dev.nudgecode.nudge.daemon.plist");
+                Ok(Self {
+                    platform: ServicePlatform::MacosLaunchd,
+                    contents: launchd_plist(&binary),
+                    path,
+                    binary,
+                })
+            }
+            "linux" => {
+                let path = home
+                    .join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join("nudge.service");
+                Ok(Self {
+                    platform: ServicePlatform::LinuxSystemd,
+                    contents: systemd_unit(&binary),
+                    path,
+                    binary,
+                })
+            }
+            other => anyhow::bail!("unsupported service platform: {other}"),
+        }
+    }
+
+    fn platform_name(&self) -> &'static str {
+        match self.platform {
+            ServicePlatform::MacosLaunchd => "macos-launchd",
+            ServicePlatform::LinuxSystemd => "linux-systemd-user",
+        }
+    }
+
+    fn install_commands(&self) -> Vec<OsCommand> {
+        match self.platform {
+            ServicePlatform::MacosLaunchd => vec![
+                OsCommand::new_optional(
+                    "launchctl",
+                    [
+                        "bootout".to_string(),
+                        format!("gui/{}", unsafe { libc_getuid() }),
+                        self.path.display().to_string(),
+                    ],
+                ),
+                OsCommand::new_required(
+                    "launchctl",
+                    [
+                        "bootstrap".to_string(),
+                        format!("gui/{}", unsafe { libc_getuid() }),
+                        self.path.display().to_string(),
+                    ],
+                ),
+                OsCommand::new_required(
+                    "launchctl",
+                    [
+                        "kickstart".to_string(),
+                        "-k".to_string(),
+                        format!("gui/{}/dev.nudgecode.nudge.daemon", unsafe {
+                            libc_getuid()
+                        }),
+                    ],
+                ),
+            ],
+            ServicePlatform::LinuxSystemd => vec![
+                OsCommand::new_required("systemctl", ["--user", "daemon-reload"]),
+                OsCommand::new_required(
+                    "systemctl",
+                    ["--user", "enable", "--now", "nudge.service"],
+                ),
+            ],
+        }
+    }
+
+    fn uninstall_commands(&self) -> Vec<OsCommand> {
+        match self.platform {
+            ServicePlatform::MacosLaunchd => vec![OsCommand::new_optional(
+                "launchctl",
+                [
+                    "bootout".to_string(),
+                    format!("gui/{}", unsafe { libc_getuid() }),
+                    self.path.display().to_string(),
+                ],
+            )],
+            ServicePlatform::LinuxSystemd => vec![
+                OsCommand::new_optional(
+                    "systemctl",
+                    ["--user", "disable", "--now", "nudge.service"],
+                ),
+                OsCommand::new_required("systemctl", ["--user", "daemon-reload"]),
+            ],
+        }
+    }
+
+    fn status_command(&self) -> OsCommand {
+        match self.platform {
+            ServicePlatform::MacosLaunchd => OsCommand::new_required(
+                "launchctl",
+                [
+                    "print".to_string(),
+                    format!("gui/{}/dev.nudgecode.nudge.daemon", unsafe {
+                        libc_getuid()
+                    }),
+                ],
+            ),
+            ServicePlatform::LinuxSystemd => {
+                OsCommand::new_required("systemctl", ["--user", "status", "nudge.service"])
+            }
+        }
+    }
+
+    fn logs_command(&self, lines: usize) -> OsCommand {
+        match self.platform {
+            ServicePlatform::MacosLaunchd => OsCommand::new_required(
+                "tail",
+                [
+                    "-n".to_string(),
+                    lines.to_string(),
+                    launchd_log_path().display().to_string(),
+                ],
+            ),
+            ServicePlatform::LinuxSystemd => OsCommand::new_required(
+                "journalctl",
+                [
+                    "--user".to_string(),
+                    "-u".to_string(),
+                    "nudge.service".to_string(),
+                    "-n".to_string(),
+                    lines.to_string(),
+                    "--no-pager".to_string(),
+                ],
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OsCommand {
+    program: String,
+    args: Vec<String>,
+    ignore_failure: bool,
+}
+
+impl OsCommand {
+    fn new_required<I, S>(program: &str, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            program: program.to_string(),
+            args: args.into_iter().map(Into::into).collect(),
+            ignore_failure: false,
+        }
+    }
+
+    fn new_optional<I, S>(program: &str, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            program: program.to_string(),
+            args: args.into_iter().map(Into::into).collect(),
+            ignore_failure: true,
+        }
+    }
+}
+
+fn run_status_command(command: &OsCommand) -> Result<()> {
+    let status = StdCommand::new(&command.program)
+        .args(&command.args)
+        .status()
+        .with_context(|| format!("failed to run {}", shell_words(command)))?;
+    if !status.success() && !command.ignore_failure {
+        anyhow::bail!("command exited with {status}: {}", shell_words(command));
+    }
+    Ok(())
+}
+
+fn run_inherited_command(command: &OsCommand) -> Result<()> {
+    let status = StdCommand::new(&command.program)
+        .args(&command.args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to run {}", shell_words(command)))?;
+    if !status.success() {
+        anyhow::bail!("command exited with {status}: {}", shell_words(command));
+    }
+    Ok(())
+}
+
+fn shell_words(command: &OsCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_./:@".contains(character))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn launchd_plist(binary: &Path) -> String {
+    let binary = xml_escape(&binary.display().to_string());
+    let stdout = xml_escape(&launchd_log_path().display().to_string());
+    let stderr = xml_escape(&launchd_error_log_path().display().to_string());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.nudgecode.nudge.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{binary}</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{stdout}</string>
+  <key>StandardErrorPath</key>
+  <string>{stderr}</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn systemd_unit(binary: &Path) -> String {
+    let binary = systemd_escape_path(binary);
+    format!(
+        r#"[Unit]
+Description=Nudge daemon
+After=network-online.target
+
+[Service]
+ExecStart={binary} daemon run
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+"#
+    )
+}
+
+fn launchd_log_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library")
+        .join("Logs")
+        .join("nudge.log")
+}
+
+fn launchd_error_log_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library")
+        .join("Logs")
+        .join("nudge.err.log")
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn systemd_escape_path(path: &Path) -> String {
+    let path = path.display().to_string();
+    if path.contains(char::is_whitespace) {
+        format!("\"{}\"", path.replace('"', "\\\""))
+    } else {
+        path
+    }
+}
+
+#[cfg(unix)]
+unsafe fn libc_getuid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
 }
 
 fn print_session_state(state: &v1::SessionState) {

@@ -18,6 +18,8 @@ computer daemon <-> local Unix socket <-> nudge CLI
 
 The computer daemon is the terminal authority. The relay is the device and routing authority. The CLI and phone are clients.
 
+Nudge is managed as a monorepo. The Rust workspace, Node/npm workspaces, protobuf schema, installer scripts, docs, and native iOS app belong in one repository because the product depends on synchronized protocol, entitlement, relay, daemon, and mobile changes. Split repositories would add coordination overhead before the APIs are stable.
+
 MVP platform targets:
 
 - CLI/daemon: macOS and Linux.
