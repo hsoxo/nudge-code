@@ -11,6 +11,7 @@ cargo build
 cargo run -p nudge-cli -- --help
 npm install
 npm run build
+npm run smoke:persistence --workspace @nudge/relay
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh
 cd apps/mobile-ios && xcodegen generate --spec project.yml
 ```

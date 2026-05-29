@@ -224,10 +224,11 @@ Tasks:
 Current implementation status:
 
 - Relay has device registration, bind start/claim/confirm/revoke, daemon/mobile websocket endpoints, participant route authorization, free one-computer binding enforcement, and message forwarding.
+- Relay can persist devices and bindings to a local JSON file when `NUDGE_RELAY_STATE_PATH` is set; queued messages remain process-local so terminal/control payloads are not written to disk by default.
 - Relay supports Ed25519 signed websocket auth query parameters in compatibility mode, and can require them with `NUDGE_RELAY_REQUIRE_WS_SIGNATURE=1`.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
-- E2E encrypted envelopes, persistent relay storage, and hosted deployment remain open.
+- E2E encrypted envelopes, managed database storage, and hosted deployment remain open.
 
 Exit criteria:
 

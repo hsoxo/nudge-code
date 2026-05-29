@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { dirname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
 import { verifySocketSignature } from './auth.js';
@@ -37,12 +39,22 @@ interface RelayMessage {
   createdAt: string;
 }
 
+interface PersistedRelayState {
+  version: 1;
+  devices: Device[];
+  bindings: Binding[];
+  updatedAt: string;
+}
+
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
+const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
 const devices = new Map<string, Device>();
 const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
 const sockets = new Map<string, WebSocket>();
+
+loadRelayState();
 
 const server = createServer(async (request, response) => {
   try {
@@ -106,6 +118,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       createdAt: now(),
     };
     devices.set(device.id, device);
+    persistRelayState();
     writeJson(response, 201, { device });
     return;
   }
@@ -130,6 +143,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     };
     bindings.set(binding.id, binding);
+    persistRelayState();
     writeJson(response, 201, { binding });
     return;
   }
@@ -157,6 +171,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     binding.phoneDeviceId = phone.id;
     binding.status = 'claimed';
     binding.claimedAt = now();
+    persistRelayState();
     writeJson(response, 200, { binding });
     return;
   }
@@ -190,6 +205,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     binding.status = 'active';
     binding.confirmedAt = now();
+    persistRelayState();
     writeJson(response, 200, { binding, entitlement: FREE_ENTITLEMENT });
     return;
   }
@@ -203,6 +219,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     binding.status = 'revoked';
     binding.revokedAt = now();
+    persistRelayState();
     writeJson(response, 200, { binding });
     return;
   }
@@ -395,6 +412,82 @@ async function readJson<T>(request: IncomingMessage): Promise<T> {
 function writeJson(response: ServerResponse, statusCode: number, payload: unknown): void {
   response.writeHead(statusCode, { 'content-type': 'application/json' });
   response.end(JSON.stringify(payload));
+}
+
+function loadRelayState(): void {
+  if (!relayStatePath || !existsSync(relayStatePath)) {
+    return;
+  }
+  const parsed = JSON.parse(readFileSync(relayStatePath, 'utf8')) as Partial<PersistedRelayState>;
+  if (parsed.version !== 1 || !Array.isArray(parsed.devices) || !Array.isArray(parsed.bindings)) {
+    throw new Error(`unsupported relay state file format: ${relayStatePath}`);
+  }
+  for (const device of parsed.devices) {
+    if (!isPersistedDevice(device)) {
+      throw new Error(`invalid relay device in ${relayStatePath}`);
+    }
+    devices.set(device.id, device);
+  }
+  for (const binding of parsed.bindings) {
+    if (!isPersistedBinding(binding)) {
+      throw new Error(`invalid relay binding in ${relayStatePath}`);
+    }
+    bindings.set(binding.id, binding);
+  }
+  chmodSync(relayStatePath, 0o600);
+}
+
+function persistRelayState(): void {
+  if (!relayStatePath) {
+    return;
+  }
+  const state: PersistedRelayState = {
+    version: 1,
+    devices: [...devices.values()],
+    bindings: [...bindings.values()],
+    updatedAt: now(),
+  };
+  mkdirSync(dirname(relayStatePath), { recursive: true });
+  const tmpPath = `${relayStatePath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, relayStatePath);
+  chmodSync(relayStatePath, 0o600);
+}
+
+function isPersistedDevice(value: unknown): value is Device {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const device = value as Partial<Device>;
+  return (
+    typeof device.id === 'string' &&
+    (device.kind === 'daemon' || device.kind === 'phone') &&
+    typeof device.publicKey === 'string' &&
+    typeof device.createdAt === 'string'
+  );
+}
+
+function isPersistedBinding(value: unknown): value is Binding {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const binding = value as Partial<Binding>;
+  return (
+    typeof binding.id === 'string' &&
+    typeof binding.code === 'string' &&
+    typeof binding.daemonDeviceId === 'string' &&
+    (binding.phoneDeviceId === undefined || typeof binding.phoneDeviceId === 'string') &&
+    (binding.status === 'pending' ||
+      binding.status === 'claimed' ||
+      binding.status === 'active' ||
+      binding.status === 'revoked') &&
+    typeof binding.createdAt === 'string' &&
+    typeof binding.expiresAt === 'string' &&
+    (binding.claimedAt === undefined || typeof binding.claimedAt === 'string') &&
+    (binding.confirmedAt === undefined || typeof binding.confirmedAt === 'string') &&
+    (binding.revokedAt === undefined || typeof binding.revokedAt === 'string')
+  );
 }
 
 server.listen(port, () => {
