@@ -403,6 +403,34 @@ struct RelayClientTests {
         )))
     }
 
+    @Test func openSessionAcceptsUnsolicitedAgentStatusUpdate() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","ok":true,"data":{"tabId":"default","agentStatus":{"kind":"codex","state":"waiting_for_input","confidence":0.81,"source":"screen"}}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "unused" }
+        )
+
+        let session = try await client.openSession(machine: activeMachine)
+        let event = try await session.receiveEvent()
+        session.close()
+
+        #expect(socket.sent.isEmpty)
+        #expect(event == .agentStatus(AgentStatusUpdate(
+            tabID: "default",
+            status: AgentStatus(kind: .codex, state: .waitingForInput, confidence: 0.81, source: "screen")
+        )))
+    }
+
     @Test func setPhoneProfileSendsRelayControlRequest() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [socketChallengeResponse()]

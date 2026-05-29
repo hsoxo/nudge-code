@@ -370,6 +370,8 @@ final class AppModel {
             applyTerminalSnapshot(snapshot, machineID: machineID)
         case .terminalOutput(let output):
             applyTerminalOutput(output, machineID: machineID)
+        case .agentStatus(let update):
+            applyAgentStatus(update, machineID: machineID)
         case .terminalInputAccepted(let tabID):
             if let tabID {
                 try await session.requestTerminalSnapshot(tabID: tabID)
@@ -427,6 +429,13 @@ final class AppModel {
         }
         tabsByMachine[machineID]?[tabIndex].pendingOutputText = output.text
         tabsByMachine[machineID]?[tabIndex].outputSequence += 1
+    }
+
+    private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
+        guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == update.tabID }) else {
+            return
+        }
+        tabsByMachine[machineID]?[tabIndex].agentStatus = update.status
     }
 
     static func preview() -> AppModel {

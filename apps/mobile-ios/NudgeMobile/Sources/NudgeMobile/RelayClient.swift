@@ -339,10 +339,16 @@ struct TerminalOutput: Equatable, Sendable {
     var text: String
 }
 
+struct AgentStatusUpdate: Equatable, Sendable {
+    var tabID: String
+    var status: AgentStatus
+}
+
 enum RelaySessionEvent: Equatable, Sendable {
     case sessionState(RemoteSessionState)
     case terminalSnapshot(TerminalSnapshot)
     case terminalOutput(TerminalOutput)
+    case agentStatus(AgentStatusUpdate)
     case terminalInputAccepted(tabID: String?)
 }
 
@@ -616,6 +622,9 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 tabID: output.tabId,
                 text: output.text
             ))
+        }
+        if let agentStatus = try data.agentStatusUpdate {
+            return .agentStatus(agentStatus)
         }
         if data.accepted == true {
             return .terminalInputAccepted(tabID: nil)
@@ -927,6 +936,7 @@ private struct RelayDaemonDataResponse: Decodable {
     var cols: Int?
     var text: String?
     var bytesBase64: String?
+    var agentStatus: RelayAgentStatusResponse?
     var accepted: Bool?
     var error: String?
 
@@ -950,6 +960,15 @@ private struct RelayDaemonDataResponse: Decodable {
             return nil
         }
         return RelayTerminalOutputResponse(tabId: tabId, text: text)
+    }
+
+    var agentStatusUpdate: AgentStatusUpdate? {
+        get throws {
+            guard let tabId, let agentStatus else {
+                return nil
+            }
+            return AgentStatusUpdate(tabID: tabId, status: try agentStatus.toAgentStatus())
+        }
     }
 }
 

@@ -304,7 +304,7 @@ Current implementation status:
 
 - `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
 - The scaffold includes machine list, tab strip, terminal preview WebView with bundled xterm.js assets, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, replayed terminal output tail, throttled ephemeral daemon-pushed live terminal byte updates, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
-- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. Richer scrollback replay, reconnect integration, and true mobile-app process integration coverage remain open.
+- iOS and daemon websocket signatures are implemented; E2E handshake/encrypted relay requests are implemented in RelayClient. The long-lived mobile relay session now accepts daemon-pushed agent status updates without forcing a terminal snapshot, so shortcut keyboards can react to Claude/Codex state changes. Richer scrollback replay and true mobile-app process integration coverage remain open.
 
 Tasks:
 
@@ -354,9 +354,10 @@ Current implementation status:
 - The daemon records the spawned PTY command name/PID and uses the command name as a process-source signal when it directly identifies Claude, Codex, Opencode, OpenClaw, or a shell.
 - On macOS/Linux, the daemon scans the PTY child process descendants through `ps -axo pid=,ppid=,stat=,comm=` and prefers foreground (`STAT` contains `+`) agent/non-shell descendants before falling back to descendant agent commands, root shell command, title, and screen heuristics.
 - The daemon has fixture-backed classifier tests for Claude approval, Codex waiting-for-input, and low-confidence unknown output.
+- The daemon broadcasts agent status changes to the bound phone over the live relay session, encrypted when E2E is available; iOS applies those updates to the matching tab without a snapshot request.
 - Current heuristic kinds: `claude`, `codex`, `opencode`, `openclaw`, `shell`, `unknown`.
 - Current heuristic states: `running`, `waiting_for_input`, `needs_approval`, `exited`.
-- Direct controlling-terminal process group queries, event emission, and broader classifier fixture expansion remain open Phase 7 work.
+- Direct controlling-terminal process group queries and broader classifier fixture expansion remain open Phase 7 work.
 
 Tasks:
 

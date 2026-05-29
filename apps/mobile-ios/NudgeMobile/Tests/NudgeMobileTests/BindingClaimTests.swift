@@ -358,6 +358,53 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
     }
 
+    @Test func appModelAppliesLiveAgentStatusWithoutSnapshotRequest() async throws {
+        let machine = activeMachine()
+        let remoteTab = TerminalTab(
+            id: "default",
+            title: "Claude",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .claude, state: .running, confidence: 0.9, source: "process"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .agentStatus(AgentStatusUpdate(
+                tabID: "default",
+                status: AgentStatus(kind: .claude, state: .needsApproval, confidence: 0.84, source: "screen")
+            ))
+        ], suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.agentStatus.state == .needsApproval
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(model.tabsByMachine[machine.id]?.first?.agentStatus == AgentStatus(
+            kind: .claude,
+            state: .needsApproval,
+            confidence: 0.84,
+            source: "screen"
+        ))
+        #expect(session.snapshotRequests.isEmpty)
+    }
+
     @Test func appModelMarksRelaySessionReconnectingAfterDrop() async throws {
         let machine = activeMachine()
         let session = RecordingRelaySession()

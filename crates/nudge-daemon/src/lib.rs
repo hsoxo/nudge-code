@@ -218,6 +218,12 @@ struct TerminalChange {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+struct AgentStatusChange {
+    tab_id: String,
+    status: AgentStatus,
+}
+
 struct RelayE2ESession {
     keys: e2e::SessionKeys,
 }
@@ -1333,6 +1339,7 @@ struct DaemonRuntime {
     connected_clients: Arc<AtomicU32>,
     relay_state: Arc<Mutex<RelayConnectionState>>,
     terminal_changes: broadcast::Sender<TerminalChange>,
+    agent_status_changes: broadcast::Sender<AgentStatusChange>,
     started_at: Instant,
     socket_path: PathBuf,
 }
@@ -1356,6 +1363,7 @@ impl DaemonRuntime {
             connected_clients: Arc::new(AtomicU32::new(0)),
             relay_state: Arc::new(Mutex::new(RelayConnectionState::default())),
             terminal_changes: broadcast::channel(512).0,
+            agent_status_changes: broadcast::channel(512).0,
             started_at: Instant::now(),
             socket_path,
         }
@@ -1575,6 +1583,23 @@ impl DaemonRuntime {
         })
     }
 
+    async fn refresh_agent_status_from_grid(&self, tab_id: &str) -> Result<AgentStatus> {
+        let agent_text = {
+            let ptys = self.ptys.lock().await;
+            let runtime_tab = ptys
+                .iter()
+                .find(|tab| tab.tab_id == tab_id)
+                .with_context(|| format!("tab {tab_id} was not found"))?;
+            runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned")
+                .snapshot()
+                .text
+        };
+        self.refresh_agent_status(tab_id, &agent_text).await
+    }
+
     async fn refresh_agent_status(&self, tab_id: &str, screen_text: &str) -> Result<AgentStatus> {
         let process_signal = self.runtime_tab_process_signal(tab_id).await;
         let mut session = self.session.lock().await;
@@ -1596,6 +1621,10 @@ impl DaemonRuntime {
             tab.last_activity_at = now_string();
             session.updated_at = now_string();
             self.state_store.save(&session)?;
+            let _ = self.agent_status_changes.send(AgentStatusChange {
+                tab_id: tab_id.to_string(),
+                status: detected.clone(),
+            });
         }
         Ok(detected)
     }
@@ -1629,8 +1658,12 @@ impl DaemonRuntime {
                 let detected =
                     detect_agent_status(&tab.title, &text, process_signal.as_ref(), &tab.status);
                 if tab.agent_status != detected {
-                    tab.agent_status = detected;
+                    tab.agent_status = detected.clone();
                     tab.last_activity_at = now_string();
+                    let _ = self.agent_status_changes.send(AgentStatusChange {
+                        tab_id: tab_id.clone(),
+                        status: detected,
+                    });
                     changed = true;
                 }
             }
@@ -1763,6 +1796,16 @@ impl DaemonRuntime {
             .collect()
     }
 
+    async fn tab_agent_status(&self, tab_id: &str) -> Option<AgentStatus> {
+        self.session
+            .lock()
+            .await
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.agent_status.clone())
+    }
+
     async fn set_relay_state(&self, state: RelayConnectionState) {
         *self.relay_state.lock().await = state;
     }
@@ -1791,6 +1834,10 @@ impl DaemonRuntime {
 
     fn subscribe_terminal_changes(&self) -> broadcast::Receiver<TerminalChange> {
         self.terminal_changes.subscribe()
+    }
+
+    fn subscribe_agent_status_changes(&self) -> broadcast::Receiver<AgentStatusChange> {
+        self.agent_status_changes.subscribe()
     }
 }
 
@@ -1900,6 +1947,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         .set_relay_state(RelayConnectionState::connected(binding))
         .await;
     let mut terminal_changes = runtime.subscribe_terminal_changes();
+    let mut agent_status_changes = runtime.subscribe_agent_status_changes();
     let mut e2e_session: Option<RelayE2ESession> = None;
     let mut pending_terminal_outputs = BTreeMap::new();
     let mut terminal_flush = interval(Duration::from_millis(100));
@@ -1928,12 +1976,44 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            change = agent_status_changes.recv() => {
+                match change {
+                    Ok(change) => {
+                        let payload = relay_live_agent_status_payload(binding, &change.tab_id, &change.status);
+                        let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_mut())? else {
+                            continue;
+                        };
+                        let message = relay_message_json(&bound_phone_id, None, payload);
+                        websocket
+                            .send(WebSocketMessage::Text(message.into()))
+                            .await
+                            .context("failed to send relay agent status update")?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        for tab_id in runtime.running_tab_ids().await {
+                            if let Some(status) = runtime.tab_agent_status(&tab_id).await {
+                                let payload = relay_live_agent_status_payload(binding, &tab_id, &status);
+                                let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_mut())? else {
+                                    continue;
+                                };
+                                let message = relay_message_json(&bound_phone_id, None, payload);
+                                websocket
+                                    .send(WebSocketMessage::Text(message.into()))
+                                    .await
+                                    .context("failed to send relay agent status update")?;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
             _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() => {
                 let outputs = std::mem::take(&mut pending_terminal_outputs);
                 for (tab_id, data) in outputs {
                     let payload = if data.is_empty() {
                         live_terminal_snapshot_payload(runtime, binding, &tab_id).await
                     } else {
+                        let _ = runtime.refresh_agent_status_from_grid(&tab_id).await;
                         Some(relay_live_terminal_output_payload(binding, &tab_id, &data))
                     };
                     if let Some(payload) = payload {
@@ -2406,6 +2486,43 @@ fn relay_live_terminal_output_json(
         "payload": relay_live_terminal_output_payload(binding, tab_id, data),
     }))
     .expect("relay live terminal output should serialize")
+}
+
+fn relay_live_agent_status_payload(
+    binding: &BindingState,
+    tab_id: &str,
+    status: &AgentStatus,
+) -> Value {
+    let status = status.to_proto();
+    json!({
+        "type": "daemon_response",
+        "bindingId": binding.binding_id,
+        "ok": true,
+        "data": {
+            "tabId": tab_id,
+            "agentStatus": {
+                "kind": status.kind,
+                "state": status.state,
+                "confidence": status.confidence,
+                "source": status.source,
+            },
+        },
+    })
+}
+
+#[cfg(test)]
+fn relay_live_agent_status_json(
+    to_device_id: &str,
+    binding: &BindingState,
+    tab_id: &str,
+    status: &AgentStatus,
+) -> String {
+    serde_json::to_string(&json!({
+        "toDeviceId": to_device_id,
+        "ephemeral": true,
+        "payload": relay_live_agent_status_payload(binding, tab_id, status),
+    }))
+    .expect("relay live agent status should serialize")
 }
 
 fn terminal_output_json(tab_id: &str, data: &[u8]) -> Value {
@@ -3449,6 +3566,40 @@ mod tests {
         assert_eq!(value["payload"]["ok"], true);
         assert_eq!(value["payload"]["data"]["tabId"], "default");
         assert_eq!(value["payload"]["data"]["bytesBase64"], "G1szMW1yZWQK");
+    }
+
+    #[test]
+    fn live_agent_status_payload_updates_one_tab() {
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active("phone_1".to_string(), None);
+        let status = AgentStatus {
+            kind: AgentKind::Claude,
+            state: AgentInteractionState::NeedsApproval,
+            confidence: 0.82,
+            source: AgentDetectionSource::Screen,
+        };
+
+        let json = relay_live_agent_status_json("phone_1", &binding, "default", &status);
+        let value: Value = serde_json::from_str(&json).expect("live status json should parse");
+
+        assert_eq!(value["toDeviceId"], "phone_1");
+        assert_eq!(value["ephemeral"], true);
+        assert_eq!(value["payload"]["type"], "daemon_response");
+        assert_eq!(value["payload"]["bindingId"], "bind_1");
+        assert_eq!(value["payload"]["ok"], true);
+        assert_eq!(value["payload"]["data"]["tabId"], "default");
+        assert_eq!(value["payload"]["data"]["agentStatus"]["kind"], "claude");
+        assert_eq!(
+            value["payload"]["data"]["agentStatus"]["state"],
+            "needs_approval"
+        );
+        assert_eq!(value["payload"]["data"]["agentStatus"]["source"], "screen");
     }
 
     #[test]
