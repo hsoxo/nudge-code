@@ -19,6 +19,7 @@ npm run smoke:http-disabled --workspace @nudge/relay
 npm run smoke:persistence --workspace @nudge/relay
 npm run smoke:rate-limit --workspace @nudge/relay
 npm run smoke:readyz --workspace @nudge/relay
+npm run smoke:ios-launch
 scripts/smoke-ios-relay-claim.sh
 npm run check:local-first
 npm run check:handoff

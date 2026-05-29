@@ -4,6 +4,7 @@ Native iOS app scaffold for the Nudge phone-first MVP.
 
 - Distribution: TestFlight-only first.
 - Orientation: portrait-only for MVP.
+- Minimum OS: iOS 17.0. iPhone 13 is compatible on iOS 17.0 or newer.
 - Protocol: generated from `proto/nudge.proto`.
 
 ## Project
@@ -19,6 +20,12 @@ The first real relay/daemon integration smoke runs the iOS simulator test proces
 
 ```sh
 ../../scripts/smoke-ios-relay-claim.sh
+```
+
+To verify the app binary itself launches on the local simulator before manual testing:
+
+```sh
+../../scripts/smoke-ios-launch.sh
 ```
 
 For manual local-first testing, run the relay on the development computer and bind with either a simulator-local URL, a same-network LAN URL, or a temporary Cloudflare Tunnel URL. See `../../docs/local-first-run.md`.

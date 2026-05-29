@@ -10,10 +10,19 @@ Run the automated local integration first:
 npm install
 npm run build
 cargo build -p nudge-cli
+npm run smoke:ios-launch
 scripts/smoke-ios-relay-claim.sh
 ```
 
 The smoke starts an isolated local relay, starts `nudge bind phone --wait --yes`, claims the pairing from the iOS simulator test process, opens the native relay session, verifies tab state/output replay, sends terminal input, and verifies live daemon output.
+
+`npm run smoke:ios-launch` builds, installs, and launches the native app on an available iPhone simulator, then treats an immediate app exit as a launch crash. Run it before hand-testing if you are validating an app crash report.
+
+## Device Compatibility
+
+The current native app targets iOS 17.0 or newer and portrait-only iPhone. An iPhone 13 is compatible when it is running iOS 17.0 or newer. iOS 16 and older are not supported by the current first-version app because the SwiftUI/Observation stack is built for the iOS 17 target.
+
+For a physical iPhone 13 local run, keep the phone and computer on the same Wi-Fi, use the computer's `10.10.10.xxx` relay URL during binding, and accept the Local Network and Camera permission prompts.
 
 ## Development Relay
 

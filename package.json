@@ -12,7 +12,8 @@
     "check:local-first": "scripts/check-local-first-readiness.sh",
     "check:relay-container": "scripts/check-relay-container.sh",
     "relay:local": "scripts/run-local-relay.sh",
-    "relay:start": "npm --workspace @nudge/relay run start"
+    "relay:start": "npm --workspace @nudge/relay run start",
+    "smoke:ios-launch": "scripts/smoke-ios-launch.sh"
   },
   "engines": {
     "node": ">=24"
