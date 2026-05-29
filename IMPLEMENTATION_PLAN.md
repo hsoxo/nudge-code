@@ -277,8 +277,8 @@ Goals:
 Current implementation status:
 
 - `apps/mobile-ios` has an XcodeGen-backed SwiftUI scaffold that builds and tests on iPhone simulator.
-- The scaffold includes machine list, tab strip, terminal preview WebView, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
-- Daemon-pushed live stream updates, xterm.js assets, signed auth, and E2E encryption remain open.
+- The scaffold includes machine list, tab strip, terminal preview WebView with bundled xterm.js assets, relay-backed phone/computer width control, pairing URL parsing, pending binding UI, camera QR scanning, SwiftProtobuf-generated protocol types, Keychain-backed phone signing identity, relay claim client with machine binding metadata storage, one-shot binding status refresh, long-lived mobile websocket sync for session state/snapshots/input responses, phone profile reporting, automatic relay session reconnect with stale-state banner, terminal snapshot fetch, terminal input over relay, and adaptive shortcut keyboard model/tests for Claude/Codex approval/waiting states.
+- Daemon-pushed live stream updates, signed auth, and E2E encryption remain open.
 
 Tasks:
 

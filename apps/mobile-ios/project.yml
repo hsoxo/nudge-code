@@ -18,6 +18,9 @@ targets:
     sources:
       - path: Generated
       - path: NudgeMobile/Sources/NudgeMobile
+      - path: NudgeMobile/Resources/TerminalWeb
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: SwiftProtobuf
     info:

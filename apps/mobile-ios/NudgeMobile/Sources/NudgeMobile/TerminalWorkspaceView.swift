@@ -115,40 +115,69 @@ struct TerminalWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero)
         webView.isOpaque = false
         webView.scrollView.bounces = false
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.loadTerminal(in: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: nil)
+        context.coordinator.update(text: text, widthMode: widthMode, in: webView)
     }
 
-    private var html: String {
-        let escapedText = text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-        let minWidth = widthMode == .computer ? "900px" : "100%"
-        return """
-        <!doctype html>
-        <html>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-        <style>
-        html, body { margin: 0; height: 100%; background: #050505; color: #E6E8EA; }
-        body { overflow: auto; }
-        pre {
-          box-sizing: border-box;
-          min-width: \(minWidth);
-          min-height: 100vh;
-          margin: 0;
-          padding: 16px;
-          font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
-          line-height: 1.45;
-          white-space: pre-wrap;
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private var isLoaded = false
+        private var pendingSnapshot: (text: String, widthMode: WidthMode)?
+        private var lastSnapshot: (text: String, widthMode: WidthMode)?
+
+        func loadTerminal(in webView: WKWebView) {
+            guard let url = TerminalWebAssets.indexURL() else {
+                webView.loadHTMLString("<pre>Unable to load terminal renderer</pre>", baseURL: nil)
+                return
+            }
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         }
-        </style>
-        <body><pre>\(escapedText)</pre></body>
-        </html>
-        """
+
+        func update(text: String, widthMode: WidthMode, in webView: WKWebView) {
+            let snapshot = (text: text, widthMode: widthMode)
+            guard isLoaded else {
+                pendingSnapshot = snapshot
+                return
+            }
+            guard lastSnapshot?.text != text || lastSnapshot?.widthMode != widthMode else {
+                return
+            }
+            apply(snapshot, in: webView)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            isLoaded = true
+            if let pendingSnapshot {
+                apply(pendingSnapshot, in: webView)
+                self.pendingSnapshot = nil
+            }
+        }
+
+        private func apply(_ snapshot: (text: String, widthMode: WidthMode), in webView: WKWebView) {
+            lastSnapshot = snapshot
+            let encodedText = Self.javascriptString(snapshot.text)
+            let encodedWidthMode = Self.javascriptString(snapshot.widthMode.rawValue)
+            webView.evaluateJavaScript(
+                "window.nudgeTerminal && window.nudgeTerminal.setSnapshot(\(encodedText), \(encodedWidthMode));"
+            )
+        }
+
+        private static func javascriptString(_ value: String) -> String {
+            guard let data = try? JSONEncoder().encode(value),
+                  let encoded = String(data: data, encoding: .utf8)
+            else {
+                return "\"\""
+            }
+            return encoded
+        }
     }
 }
 

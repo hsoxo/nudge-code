@@ -26,7 +26,7 @@ Current scaffold:
 - SwiftUI app shell.
 - SwiftProtobuf-generated protocol types from `proto/nudge.proto`.
 - machine list and tab strip.
-- terminal preview rendered through `WKWebView`, ready to replace with xterm.js assets.
+- terminal preview rendered through bundled xterm.js inside `WKWebView`.
 - phone/computer width segmented control backed by relay width-mode updates.
 - pairing URL parser and pending binding screen.
 - camera QR scanner for pairing URLs.
@@ -36,6 +36,7 @@ Current scaffold:
 - one-shot relay binding status refresh when opening a pending machine.
 - long-lived `/ws/mobile` session for state, snapshot, input-response, phone-profile, and width-mode sync.
 - automatic relay session reconnect with stale-state banner.
+- bundled xterm.js runtime assets copied from `@xterm/xterm`.
 - terminal snapshot fetch into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
@@ -45,4 +46,3 @@ Still open:
 - signed relay authentication.
 - daemon-pushed live terminal stream updates.
 - E2E encrypted terminal/control stream.
-- real xterm.js integration.

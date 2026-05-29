@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #050505;
+    }
+
+    #terminal {
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background: #050505;
+    }
+
+    #terminal.computer {
+      min-width: 900px;
+    }
+
+    .xterm {
+      padding: 14px;
+      box-sizing: border-box;
+      min-height: 100%;
+    }
+
+    .xterm-viewport {
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <script src="xterm.js"></script>
+  <script>
+    const container = document.getElementById('terminal');
+    const term = new Terminal({
+      convertEol: true,
+      cursorBlink: false,
+      disableStdin: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 13,
+      lineHeight: 1.35,
+      scrollback: 2000,
+      theme: {
+        background: '#050505',
+        foreground: '#E6E8EA',
+        cursor: '#E6E8EA',
+        selectionBackground: '#2D5B88'
+      }
+    });
+
+    term.open(container);
+
+    window.nudgeTerminal = {
+      setSnapshot(text, widthMode) {
+        container.classList.toggle('computer', widthMode === 'computer');
+        term.reset();
+        term.write(text || '');
+        requestAnimationFrame(() => {
+          container.scrollTop = container.scrollHeight;
+        });
+      }
+    };
+  </script>
+</body>
+</html>
