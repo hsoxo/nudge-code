@@ -32,7 +32,7 @@ Current scaffold:
 - camera QR scanner for pairing URLs.
 - Keychain-backed phone signing identity.
 - relay claim client using the phone public key.
-- machine binding metadata storage, including peer public identity keys for later websocket attach and E2E handshake validation.
+- persisted machine binding metadata storage, including peer public identity keys for websocket attach and E2E handshake validation.
 - one-shot relay binding status refresh when opening a pending machine.
 - long-lived `/ws/mobile` session for state, snapshot, byte-safe replayed/live terminal bytes, input-response, phone-profile, and width-mode sync.
 - automatic relay session reconnect with stale-state banner.

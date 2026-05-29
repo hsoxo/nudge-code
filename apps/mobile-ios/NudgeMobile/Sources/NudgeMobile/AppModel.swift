@@ -26,6 +26,7 @@ final class AppModel {
     var phoneProfile: TerminalProfile
     var commandComposer = ""
     private let relayClient: any RelayClient
+    private let persistence: (any AppModelPersistence)?
     private let sessionReconnectDelayNanoseconds: UInt64
     private var relaySession: (any RelaySession)?
     private var relaySessionMachineID: String?
@@ -39,6 +40,7 @@ final class AppModel {
         bindingDraft: BindingDraft? = nil,
         phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48),
         relayClient: any RelayClient = HTTPRelayClient(),
+        persistence: (any AppModelPersistence)? = nil,
         sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
     ) {
         let initialMachineID = selectedMachineID ?? machines.first?.id
@@ -51,7 +53,40 @@ final class AppModel {
         self.bindingDraft = bindingDraft
         self.phoneProfile = phoneProfile
         self.relayClient = relayClient
+        self.persistence = persistence
         self.sessionReconnectDelayNanoseconds = sessionReconnectDelayNanoseconds
+    }
+
+    static func persistent(
+        relayClient: any RelayClient = HTTPRelayClient(),
+        sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
+    ) -> AppModel {
+        restoring(
+            from: UserDefaultsAppModelPersistence(),
+            relayClient: relayClient,
+            sessionReconnectDelayNanoseconds: sessionReconnectDelayNanoseconds
+        )
+    }
+
+    static func restoring(
+        from persistence: any AppModelPersistence,
+        relayClient: any RelayClient = HTTPRelayClient(),
+        sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
+    ) -> AppModel {
+        let storedState = persistence.load()
+        let machines = storedState?.machines.map(restoredMachine) ?? []
+        let selectedMachineID = storedState?.selectedMachineID.flatMap { selectedID in
+            machines.contains(where: { $0.id == selectedID }) ? selectedID : nil
+        } ?? machines.first?.id
+        return AppModel(
+            machines: machines,
+            tabsByMachine: [:],
+            selectedMachineID: selectedMachineID,
+            phoneProfile: storedState?.phoneProfile ?? TerminalProfile(rows: 32, cols: 48),
+            relayClient: relayClient,
+            persistence: persistence,
+            sessionReconnectDelayNanoseconds: sessionReconnectDelayNanoseconds
+        )
     }
 
     var selectedMachine: Machine? {
@@ -72,6 +107,7 @@ final class AppModel {
     func selectMachine(_ machine: Machine) {
         selectedMachineID = machine.id
         selectedTabID = tabsByMachine[machine.id]?.first?.id
+        persistStableState()
     }
 
     func selectTab(_ tab: TerminalTab) {
@@ -86,6 +122,7 @@ final class AppModel {
             return
         }
         phoneProfile = profile
+        persistStableState()
         guard let machine = selectedMachine,
               machine.binding?.status == .active
         else {
@@ -322,6 +359,7 @@ final class AppModel {
             machines[index].connectionState = .offline
             machines[index].lastSeenText = "binding revoked"
         }
+        persistStableState()
     }
 
     private func attachMachineSession(at index: Int) async throws {
@@ -376,6 +414,7 @@ final class AppModel {
         }
         machines[index].connectionState = .offline
         machines[index].lastSeenText = "binding revoked"
+        persistStableState()
     }
 
     private func runRelaySession(machineID: String, machine: Machine) async throws {
@@ -539,6 +578,36 @@ final class AppModel {
         return data.base64EncodedString()
     }
 
+    private func persistStableState() {
+        guard let persistence else {
+            return
+        }
+        persistence.save(AppModelStoredState(
+            machines: machines.map(Self.restoredMachine),
+            selectedMachineID: selectedMachineID,
+            phoneProfile: phoneProfile
+        ))
+    }
+
+    private static func restoredMachine(_ machine: Machine) -> Machine {
+        var restored = machine
+        switch machine.binding?.status {
+        case .some(.pending), .some(.claimed):
+            restored.connectionState = .connecting
+            restored.lastSeenText = "Waiting for computer confirmation"
+        case .some(.active):
+            restored.connectionState = .connecting
+            restored.lastSeenText = "binding active"
+        case .some(.revoked):
+            restored.connectionState = .offline
+            restored.lastSeenText = "binding revoked"
+        case .none:
+            restored.connectionState = .offline
+            restored.lastSeenText = "not bound"
+        }
+        return restored
+    }
+
     static func preview() -> AppModel {
         let machine = Machine(
             id: "macbook",
@@ -580,5 +649,58 @@ final class AppModel {
             selectedMachineID: machine.id,
             selectedTabID: tabs.first?.id
         )
+    }
+}
+
+@MainActor
+protocol AppModelPersistence: AnyObject {
+    func load() -> AppModelStoredState?
+    func save(_ state: AppModelStoredState)
+}
+
+struct AppModelStoredState: Codable, Equatable {
+    var version: Int
+    var machines: [Machine]
+    var selectedMachineID: String?
+    var phoneProfile: TerminalProfile
+
+    init(
+        version: Int = 1,
+        machines: [Machine],
+        selectedMachineID: String?,
+        phoneProfile: TerminalProfile
+    ) {
+        self.version = version
+        self.machines = machines
+        self.selectedMachineID = selectedMachineID
+        self.phoneProfile = phoneProfile
+    }
+}
+
+@MainActor
+final class UserDefaultsAppModelPersistence: AppModelPersistence {
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        key: String = "dev.nudgecode.NudgeMobile.appModelState.v1"
+    ) {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func load() -> AppModelStoredState? {
+        guard let data = defaults.data(forKey: key) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(AppModelStoredState.self, from: data)
+    }
+
+    func save(_ state: AppModelStoredState) {
+        guard let data = try? JSONEncoder().encode(state) else {
+            return
+        }
+        defaults.set(data, forKey: key)
     }
 }

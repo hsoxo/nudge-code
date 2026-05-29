@@ -27,6 +27,36 @@ struct BindingClaimTests {
         ))
     }
 
+    @Test func appModelPersistsClaimedComputerProfileAndRestoresItForReconnect() async throws {
+        let client = RecordingRelayClient()
+        let persistence = RecordingAppModelPersistence()
+        let model = AppModel(
+            relayClient: client,
+            persistence: persistence
+        )
+
+        #expect(model.parsePairingURL("https://nudgecode.dev/pair?code=abc123"))
+        await model.claimDraftBinding()
+
+        let saved = try #require(persistence.savedStates.last)
+        #expect(saved.selectedMachineID == "machine-abc123")
+        #expect(saved.phoneProfile == TerminalProfile(rows: 32, cols: 48))
+        #expect(saved.machines.count == 1)
+        #expect(saved.machines.first?.binding?.status == .claimed)
+
+        let restored = AppModel.restoring(
+            from: RecordingAppModelPersistence(storedState: saved),
+            relayClient: client
+        )
+
+        #expect(restored.selectedMachineID == "machine-abc123")
+        #expect(restored.phoneProfile == TerminalProfile(rows: 32, cols: 48))
+        #expect(restored.machines.first?.binding?.status == .claimed)
+        #expect(restored.machines.first?.connectionState == .connecting)
+        #expect(restored.machines.first?.lastSeenText == "Waiting for computer confirmation")
+        #expect(restored.tabsByMachine.isEmpty)
+    }
+
     @Test func appModelKeepsDraftWhenRelayClaimFails() async throws {
         let client = RecordingRelayClient(error: RelayClientError.badStatus)
         let model = AppModel(relayClient: client)
@@ -79,6 +109,54 @@ struct BindingClaimTests {
         #expect(model.machines.first?.binding?.phonePublicKey == "phone-public-key")
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "binding active")
+    }
+
+    @Test func appModelPersistsActiveBindingAfterRefresh() async throws {
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://nudgecode.dev")!,
+            connectionState: .connecting,
+            lastSeenText: "Waiting for computer confirmation",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .claimed,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+        let client = RecordingRelayClient(statusClaim: BindingClaim(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
+            status: .active,
+            expiresAt: "2026-05-29T00:00:00Z"
+        ))
+        let persistence = RecordingAppModelPersistence()
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            persistence: persistence
+        )
+
+        await model.refreshSelectedMachineBinding()
+
+        let saved = try #require(persistence.savedStates.last)
+        #expect(saved.machines.first?.binding?.status == .active)
+        #expect(saved.machines.first?.binding?.daemonPublicKey == "daemon-public-key")
+        #expect(saved.machines.first?.binding?.phonePublicKey == "phone-public-key")
+
+        let restored = AppModel.restoring(
+            from: RecordingAppModelPersistence(storedState: saved),
+            relayClient: client
+        )
+        #expect(restored.machines.first?.binding?.status == .active)
+        #expect(restored.machines.first?.connectionState == .connecting)
+        #expect(restored.machines.first?.lastSeenText == "binding active")
     }
 
     @Test func appModelSkipsRefreshForActiveBinding() async throws {
@@ -548,11 +626,13 @@ struct BindingClaimTests {
         let machine = activeMachine()
         let session = RecordingRelaySession(errorWhenReceiving: RelayClientError.bindingRevoked)
         let client = RecordingRelayClient(session: session)
+        let persistence = RecordingAppModelPersistence()
         let model = AppModel(
             machines: [machine],
             tabsByMachine: [machine.id: []],
             selectedMachineID: machine.id,
             relayClient: client,
+            persistence: persistence,
             sessionReconnectDelayNanoseconds: 1_000_000
         )
 
@@ -563,6 +643,7 @@ struct BindingClaimTests {
         #expect(model.machines.first?.binding?.status == .revoked)
         #expect(model.machines.first?.connectionState == .offline)
         #expect(model.machines.first?.lastSeenText == "binding revoked")
+        #expect(persistence.savedStates.last?.machines.first?.binding?.status == .revoked)
     }
 
     @Test func appModelUpdatesWidthThroughOpenRelaySession() async throws {
@@ -1015,5 +1096,24 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
 
     func close() {
         closed = true
+    }
+}
+
+@MainActor
+private final class RecordingAppModelPersistence: AppModelPersistence {
+    private var storedState: AppModelStoredState?
+    var savedStates: [AppModelStoredState] = []
+
+    init(storedState: AppModelStoredState? = nil) {
+        self.storedState = storedState
+    }
+
+    func load() -> AppModelStoredState? {
+        storedState
+    }
+
+    func save(_ state: AppModelStoredState) {
+        storedState = state
+        savedStates.append(state)
     }
 }
