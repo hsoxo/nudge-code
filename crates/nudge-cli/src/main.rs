@@ -22,6 +22,7 @@ use qrcode::{QrCode, render::unicode};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use unicode_width::UnicodeWidthStr;
+use vt100::Parser as TerminalParser;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -607,7 +608,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
     if !selected_tab_needs_restart(&state, &selected_tab_id) {
         resize_selected_tab(&selected_tab_id).await?;
     }
-    let mut last_frame = Vec::new();
+    let mut render_cache = RenderCache::default();
     let mut prefix_active = false;
 
     loop {
@@ -621,23 +622,29 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
         }
         let render = render_tab(&selected_tab_id, &state).await?;
         let fingerprint = render.fingerprint();
-        if fingerprint != last_frame {
-            draw_frame(&mut terminal, &state, &selected_tab_id, &render).await?;
-            last_frame = fingerprint;
+        if render_cache.should_draw(&fingerprint) {
+            draw_frame(
+                &mut terminal,
+                &state,
+                &selected_tab_id,
+                &render,
+                &mut render_cache,
+            )
+            .await?;
         }
 
         if event::poll(Duration::from_millis(60)).context("failed to poll terminal input")? {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) if is_prefix_key(key) => {
                     prefix_active = true;
-                    last_frame.clear();
+                    render_cache.invalidate();
                 }
                 Event::Key(key) if prefix_active => {
                     if handle_prefix_key(key, &mut selected_tab_id).await? {
                         break;
                     }
                     prefix_active = false;
-                    last_frame.clear();
+                    render_cache.invalidate();
                 }
                 Event::Key(key) if should_detach(key) => break,
                 Event::Key(key) => {
@@ -651,7 +658,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
                     if !selected_tab_needs_restart(&state, &selected_tab_id) {
                         resize_tab(&selected_tab_id, rows, cols).await?;
                     }
-                    last_frame.clear();
+                    render_cache.invalidate();
                 }
                 Event::Mouse(mouse) => {
                     if let Some(tab_id) = clicked_tab_id(&state, &selected_tab_id, mouse) {
@@ -659,7 +666,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
                         if !selected_tab_needs_restart(&state, &selected_tab_id) {
                             resize_selected_tab(&selected_tab_id).await?;
                         }
-                        last_frame.clear();
+                        render_cache.invalidate();
                     }
                 }
                 _ => {}
@@ -1174,17 +1181,63 @@ impl ClientFrame {
     }
 }
 
+#[derive(Default)]
+struct RenderCache {
+    parser: Option<TerminalParser>,
+    last_fingerprint: Vec<u8>,
+}
+
+struct RenderUpdate {
+    frame: Vec<u8>,
+    full_redraw: bool,
+}
+
+impl RenderCache {
+    fn should_draw(&self, fingerprint: &[u8]) -> bool {
+        self.last_fingerprint != fingerprint
+    }
+
+    fn invalidate(&mut self) {
+        self.parser = None;
+        self.last_fingerprint.clear();
+    }
+
+    fn terminal_frame(&mut self, render: &ClientFrame) -> RenderUpdate {
+        let rows = render.rows.max(1).min(u32::from(u16::MAX)) as u16;
+        let cols = render.cols.max(1).min(u32::from(u16::MAX)) as u16;
+        let rows = rows.saturating_add(TERMINAL_CONTENT_ROW_OFFSET);
+        let mut next_parser = TerminalParser::new(rows, cols, 0);
+        next_parser.process(&render.frame);
+        let (frame, full_redraw) = match self.parser.as_ref() {
+            Some(previous) if previous.screen().size() == next_parser.screen().size() => {
+                (next_parser.screen().contents_diff(previous.screen()), false)
+            }
+            _ => (render.frame.clone(), true),
+        };
+        self.parser = Some(next_parser);
+        self.last_fingerprint = render.fingerprint();
+        RenderUpdate { frame, full_redraw }
+    }
+}
+
+const TERMINAL_CONTENT_ROW_OFFSET: u16 = 1;
+
 async fn draw_frame(
     _terminal: &mut TerminalGuard,
     state: &v1::SessionState,
     selected_tab_id: &str,
     render: &ClientFrame,
+    render_cache: &mut RenderCache,
 ) -> Result<()> {
     let mut output = stdout();
     let (terminal_cols, terminal_rows) = size().unwrap_or((80, 24));
-    execute!(output, MoveTo(0, 0), Clear(ClearType::All)).context("failed to clear terminal")?;
+    let terminal_frame = render_cache.terminal_frame(render);
+    if terminal_frame.full_redraw {
+        execute!(output, MoveTo(0, 0), Clear(ClearType::All))
+            .context("failed to clear terminal")?;
+    }
     output
-        .write_all(&render.frame)
+        .write_all(&terminal_frame.frame)
         .context("failed to write terminal render frame")?;
     execute!(output, SavePosition)?;
     execute!(output, MoveTo(0, 0), Clear(ClearType::CurrentLine))?;
@@ -2228,6 +2281,16 @@ mod tests {
         }
     }
 
+    fn client_frame(frame: &[u8], rows: u32, cols: u32) -> ClientFrame {
+        ClientFrame {
+            rows,
+            cols,
+            frame: frame.to_vec(),
+            width_mode: "computer".to_string(),
+            tab_status: "running".to_string(),
+        }
+    }
+
     #[test]
     fn tab_bar_layout_exposes_clickable_hit_boxes() {
         let layout = tab_bar_layout(&test_state(), "tab-2");
@@ -2273,5 +2336,59 @@ mod tests {
 
         assert!(line.contains("r rename"));
         assert!(line.contains("R restart"));
+    }
+
+    #[test]
+    fn render_cache_emits_full_first_frame_then_incremental_diff() {
+        let mut cache = RenderCache::default();
+        let first = client_frame(b"\x1b[2;1Hhello\x1b[2;6H", 3, 20);
+        let second = client_frame(b"\x1b[2;1Hhello!\x1b[2;7H", 3, 20);
+
+        let first_output = cache.terminal_frame(&first);
+        let second_output = cache.terminal_frame(&second);
+
+        assert_eq!(first_output.frame, first.frame);
+        assert!(first_output.full_redraw);
+        assert!(second_output.frame.len() < second.frame.len());
+        assert!(!second_output.full_redraw);
+        assert!(
+            !second_output
+                .frame
+                .windows(b"\x1b[2K".len())
+                .any(|window| window == b"\x1b[2K")
+        );
+        assert!(
+            second_output
+                .frame
+                .windows(b"!".len())
+                .any(|window| window == b"!")
+        );
+    }
+
+    #[test]
+    fn render_cache_invalidate_forces_full_frame() {
+        let mut cache = RenderCache::default();
+        let first = client_frame(b"\x1b[2;1Hhello\x1b[2;6H", 3, 20);
+        let second = client_frame(b"\x1b[2;1Hhello!\x1b[2;7H", 3, 20);
+
+        let _ = cache.terminal_frame(&first);
+        cache.invalidate();
+        let output = cache.terminal_frame(&second);
+
+        assert_eq!(output.frame, second.frame);
+        assert!(output.full_redraw);
+    }
+
+    #[test]
+    fn render_cache_size_change_forces_full_frame() {
+        let mut cache = RenderCache::default();
+        let first = client_frame(b"\x1b[2;1Hhello\x1b[2;6H", 3, 20);
+        let resized = client_frame(b"\x1b[2;1Hhello\x1b[2;6H", 4, 20);
+
+        let _ = cache.terminal_frame(&first);
+        let output = cache.terminal_frame(&resized);
+
+        assert_eq!(output.frame, resized.frame);
+        assert!(output.full_redraw);
     }
 }

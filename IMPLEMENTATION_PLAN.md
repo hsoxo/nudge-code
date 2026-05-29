@@ -141,7 +141,7 @@ Current implementation status:
 - The first client renders a Nudge tab/status chrome plus daemon-produced terminal render frames, forwards basic key input, handles resize, and detaches with `Ctrl-d`.
 - `Ctrl-g` opens a Zellij-like prefix layer: `c` new tab, `x` close tab, `n`/`p` switch tabs, `r` rename, `R` restart, `w` toggle phone/computer width, `d` detach.
 - Free entitlement currently rejects `Ctrl-g c` until paid/multi-tab entitlement exists.
-- Mouse tab selection, rename inside the TUI, and daemon-produced embedded ANSI render frames are implemented. Incremental render diffing remains open Phase 3 work.
+- Mouse tab selection, rename inside the TUI, daemon-produced embedded ANSI render frames, and CLI-side incremental render diffing are implemented.
 
 Tasks:
 
