@@ -15,6 +15,7 @@ final class AppModel {
     private let relayClient: any RelayClient
     private var relaySession: (any RelaySession)?
     private var relaySessionMachineID: String?
+    private var computerProfilesByTabKey: [String: TerminalProfile] = [:]
 
     init(
         machines: [Machine] = [],
@@ -61,14 +62,44 @@ final class AppModel {
         selectedTabID = tab.id
     }
 
-    func updateSelectedTabWidth(_ widthMode: WidthMode) {
+    func updateSelectedTabWidth(_ widthMode: WidthMode) async {
         guard let machineID = selectedMachineID,
+              let machine = selectedMachine,
               let tabID = selectedTab?.id,
+              let tab = selectedTab,
               let index = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID })
         else {
             return
         }
+        let profileKey = tabProfileKey(machineID: machineID, tabID: tabID)
+        if tab.widthMode == .computer {
+            computerProfilesByTabKey[profileKey] = tab.profile
+        }
+        let previousTab = tab
         tabsByMachine[machineID]?[index].widthMode = widthMode
+        let computerProfile = computerProfilesByTabKey[profileKey] ?? tab.profile
+        do {
+            if let relaySession, relaySessionMachineID == machineID {
+                try await relaySession.setWidthMode(
+                    tabID: tabID,
+                    widthMode: widthMode,
+                    computerProfile: computerProfile
+                )
+            } else {
+                let state = try await relayClient.setWidthMode(
+                    machine: machine,
+                    tabID: tabID,
+                    widthMode: widthMode,
+                    computerProfile: computerProfile
+                )
+                applyRemoteSessionState(state, machineID: machineID)
+            }
+        } catch {
+            tabsByMachine[machineID]?[index] = previousTab
+            if let machineIndex = machines.firstIndex(where: { $0.id == machineID }) {
+                machines[machineIndex].lastSeenText = "Unable to update width"
+            }
+        }
     }
 
     func refreshSelectedMachineBinding() async {
@@ -121,6 +152,7 @@ final class AppModel {
             relaySessionMachineID = machineID
             machines[machineIndex].connectionState = .online
             machines[machineIndex].lastSeenText = "relay session connected"
+            try await session.setPhoneProfile(phoneProfile)
             try await session.requestSessionState()
             while !Task.isCancelled {
                 let event = try await session.receiveEvent()
@@ -289,6 +321,13 @@ final class AppModel {
         } else {
             selectedTabID = state.tabs.first?.id
         }
+        for tab in state.tabs where tab.widthMode == .computer {
+            computerProfilesByTabKey[tabProfileKey(machineID: machineID, tabID: tab.id)] = tab.profile
+        }
+    }
+
+    private func tabProfileKey(machineID: String, tabID: String) -> String {
+        "\(machineID):\(tabID)"
     }
 
     private func refreshTabSnapshot(machineID: String, tabID: String) async {

@@ -158,7 +158,11 @@ struct WidthModePicker: View {
         @Bindable var model = model
         Picker("Width", selection: Binding(
             get: { tab.widthMode },
-            set: { model.updateSelectedTabWidth($0) }
+            set: { widthMode in
+                Task {
+                    await model.updateSelectedTabWidth(widthMode)
+                }
+            }
         )) {
             Text("Phone").tag(WidthMode.phone)
             Text("Computer").tag(WidthMode.computer)

@@ -27,14 +27,14 @@ Current scaffold:
 - SwiftProtobuf-generated protocol types from `proto/nudge.proto`.
 - machine list and tab strip.
 - terminal preview rendered through `WKWebView`, ready to replace with xterm.js assets.
-- phone/computer width segmented control.
+- phone/computer width segmented control backed by relay width-mode updates.
 - pairing URL parser and pending binding screen.
 - camera QR scanner for pairing URLs.
 - Keychain-backed phone signing identity.
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
 - one-shot relay binding status refresh when opening a pending machine.
-- long-lived `/ws/mobile` session for state, snapshot, and input-response sync.
+- long-lived `/ws/mobile` session for state, snapshot, input-response, phone-profile, and width-mode sync.
 - terminal snapshot fetch into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.

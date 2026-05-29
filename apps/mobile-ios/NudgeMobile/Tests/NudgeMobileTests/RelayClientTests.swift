@@ -204,6 +204,63 @@ struct RelayClientTests {
         #expect(inputEvent == .terminalInputAccepted(tabID: "default"))
     }
 
+    @Test func setPhoneProfileSendsRelayControlRequest() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"profile-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"phone","rows":34,"cols":52}]}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "profile-1" }
+        )
+
+        let state = try await client.setPhoneProfile(
+            machine: activeMachine,
+            profile: TerminalProfile(rows: 34, cols: 52)
+        )
+
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""type":"set_phone_profile""#))
+        #expect(socket.sent[0].contains(#""rows":34"#))
+        #expect(socket.sent[0].contains(#""cols":52"#))
+        #expect(state.tabs.first?.profile == TerminalProfile(rows: 34, cols: 52))
+        #expect(socket.closed)
+    }
+
+    @Test func setWidthModeSendsRelayControlRequest() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"width-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"computer","rows":24,"cols":100}]}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "width-1" }
+        )
+
+        let state = try await client.setWidthMode(
+            machine: activeMachine,
+            tabID: "default",
+            widthMode: .computer,
+            computerProfile: TerminalProfile(rows: 24, cols: 100)
+        )
+
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""type":"set_width_mode""#))
+        #expect(socket.sent[0].contains(#""tabId":"default""#))
+        #expect(socket.sent[0].contains(#""mode":"computer""#))
+        #expect(socket.sent[0].contains(#""computerRows":24"#))
+        #expect(socket.sent[0].contains(#""computerCols":100"#))
+        #expect(state.tabs.first?.widthMode == .computer)
+        #expect(state.tabs.first?.profile == TerminalProfile(rows: 24, cols: 100))
+        #expect(socket.closed)
+    }
+
     private var activeMachine: Machine {
         Machine(
             id: "mac",

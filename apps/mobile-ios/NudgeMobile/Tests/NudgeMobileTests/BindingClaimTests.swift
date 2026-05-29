@@ -286,6 +286,7 @@ struct BindingClaimTests {
 
         #expect(client.openSessionRequests == [machine])
         #expect(session.sessionStateRequestCount == 1)
+        #expect(session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)])
         #expect(session.snapshotRequests == ["default"])
         #expect(session.closed)
         #expect(model.machines.first?.connectionState == .offline)
@@ -293,6 +294,104 @@ struct BindingClaimTests {
         #expect(model.selectedTabID == "default")
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "Claude asks for approval")
         #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 24, cols: 80))
+    }
+
+    @Test func appModelUpdatesWidthThroughOpenRelaySession() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .computer,
+            profile: TerminalProfile(rows: 24, cols: 100),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let session = RecordingRelaySession(suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        for _ in 0..<100 {
+            if client.openSessionRequests == [machine],
+               session.sessionStateRequestCount == 1,
+               session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)] {
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        guard client.openSessionRequests == [machine],
+              session.sessionStateRequestCount == 1,
+              session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)]
+        else {
+            Issue.record("Expected relay session to be open before width update")
+            return
+        }
+
+        await model.updateSelectedTabWidth(.phone)
+
+        #expect(client.openSessionRequests == [machine])
+        #expect(session.widthModeRequests == [WidthModeRequest(
+            tabID: tab.id,
+            widthMode: .phone,
+            computerProfile: TerminalProfile(rows: 24, cols: 100)
+        )])
+        #expect(model.tabsByMachine[machine.id]?.first?.widthMode == .phone)
+
+        syncTask.cancel()
+        await syncTask.value
+    }
+
+    @Test func appModelUpdatesWidthThroughOneShotRelayWhenSessionIsClosed() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .computer,
+            profile: TerminalProfile(rows: 24, cols: 100),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let returnedTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: tab.agentStatus,
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let client = RecordingRelayClient(widthModeState: RemoteSessionState(tabs: [returnedTab]))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.updateSelectedTabWidth(.phone)
+
+        #expect(client.widthModeRequests == [WidthModeClientRequest(
+            machine: machine,
+            tabID: tab.id,
+            widthMode: .phone,
+            computerProfile: TerminalProfile(rows: 24, cols: 100)
+        )])
+        #expect(model.tabsByMachine[machine.id]?.first?.widthMode == .phone)
+        #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 32, cols: 48))
     }
 }
 
@@ -318,6 +417,41 @@ private struct TerminalSnapshotRequest: Equatable {
     var tabID: String
 }
 
+private struct PhoneProfileClientRequest: Equatable {
+    var machine: Machine
+    var profile: TerminalProfile
+}
+
+private struct WidthModeClientRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+    var widthMode: WidthMode
+    var computerProfile: TerminalProfile
+}
+
+private struct WidthModeRequest: Equatable {
+    var tabID: String
+    var widthMode: WidthMode
+    var computerProfile: TerminalProfile
+}
+
+private func activeMachine() -> Machine {
+    Machine(
+        id: "mac",
+        name: "Mac",
+        relayURL: URL(string: "https://nudgecode.dev")!,
+        connectionState: .online,
+        lastSeenText: "binding active",
+        binding: MachineBinding(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            status: .active,
+            expiresAt: "2026-05-29T00:00:00Z"
+        )
+    )
+}
+
 private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var claims: [RelayClaim] = []
     var statusRequests: [BindingStatusRequest] = []
@@ -325,9 +459,13 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var openSessionRequests: [Machine] = []
     var inputRequests: [TerminalInputRequest] = []
     var snapshotRequests: [TerminalSnapshotRequest] = []
+    var phoneProfileRequests: [PhoneProfileClientRequest] = []
+    var widthModeRequests: [WidthModeClientRequest] = []
     var statusClaim: BindingClaim
     var sessionState: RemoteSessionState
     var snapshots: [String: TerminalSnapshot]
+    var phoneProfileState: RemoteSessionState
+    var widthModeState: RemoteSessionState
     var session: RecordingRelaySession
     var error: Error?
 
@@ -341,12 +479,16 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         ),
         sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
         snapshots: [String: TerminalSnapshot] = [:],
+        phoneProfileState: RemoteSessionState = RemoteSessionState(tabs: []),
+        widthModeState: RemoteSessionState = RemoteSessionState(tabs: []),
         session: RecordingRelaySession = RecordingRelaySession(),
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
         self.sessionState = sessionState
         self.snapshots = snapshots
+        self.phoneProfileState = phoneProfileState
+        self.widthModeState = widthModeState
         self.session = session
         self.error = error
     }
@@ -400,6 +542,32 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         inputRequests.append(TerminalInputRequest(machine: machine, tabID: tabID, text: text, enter: enter))
     }
 
+    func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        phoneProfileRequests.append(PhoneProfileClientRequest(machine: machine, profile: profile))
+        return phoneProfileState
+    }
+
+    func setWidthMode(
+        machine: Machine,
+        tabID: String,
+        widthMode: WidthMode,
+        computerProfile: TerminalProfile
+    ) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        widthModeRequests.append(WidthModeClientRequest(
+            machine: machine,
+            tabID: tabID,
+            widthMode: widthMode,
+            computerProfile: computerProfile
+        ))
+        return widthModeState
+    }
+
     func openSession(machine: Machine) async throws -> any RelaySession {
         if let error {
             throw error
@@ -418,10 +586,15 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     var sessionStateRequestCount = 0
     var snapshotRequests: [String] = []
     var inputRequests: [TerminalInputRequest] = []
+    var phoneProfiles: [TerminalProfile] = []
+    var widthModeRequests: [WidthModeRequest] = []
     var closed = false
 
-    init(events: [RelaySessionEvent] = []) {
+    var suspendWhenEmpty: Bool
+
+    init(events: [RelaySessionEvent] = [], suspendWhenEmpty: Bool = false) {
         self.events = events
+        self.suspendWhenEmpty = suspendWhenEmpty
     }
 
     func requestSessionState() async throws {
@@ -448,8 +621,25 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
         ))
     }
 
+    func setPhoneProfile(_ profile: TerminalProfile) async throws {
+        phoneProfiles.append(profile)
+    }
+
+    func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws {
+        widthModeRequests.append(WidthModeRequest(
+            tabID: tabID,
+            widthMode: widthMode,
+            computerProfile: computerProfile
+        ))
+    }
+
     func receiveEvent() async throws -> RelaySessionEvent {
         if events.isEmpty {
+            if suspendWhenEmpty {
+                while true {
+                    try await Task.sleep(nanoseconds: 1_000_000)
+                }
+            }
             throw RelayClientError.invalidWebSocketMessage
         }
         return events.removeFirst()

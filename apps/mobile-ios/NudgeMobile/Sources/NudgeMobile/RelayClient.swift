@@ -6,6 +6,13 @@ protocol RelayClient: Sendable {
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
+    func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState
+    func setWidthMode(
+        machine: Machine,
+        tabID: String,
+        widthMode: WidthMode,
+        computerProfile: TerminalProfile
+    ) async throws -> RemoteSessionState
     func openSession(machine: Machine) async throws -> any RelaySession
     func connect(machine: Machine) async throws
 }
@@ -106,6 +113,43 @@ struct HTTPRelayClient: RelayClient {
             ),
             requestID: requestID
         )
+    }
+
+    func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelaySetPhoneProfilePayload(requestId: requestID, rows: profile.rows, cols: profile.cols),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
+    }
+
+    func setWidthMode(
+        machine: Machine,
+        tabID: String,
+        widthMode: WidthMode,
+        computerProfile: TerminalProfile
+    ) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelaySetWidthModePayload(
+                requestId: requestID,
+                tabId: tabID,
+                mode: widthMode.rawValue,
+                computerRows: computerProfile.rows,
+                computerCols: computerProfile.cols
+            ),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
     }
 
     private func registerPhone(relayURL: URL, phonePublicKey: String) async throws -> DeviceResponse.Device {
@@ -261,6 +305,8 @@ protocol RelaySession: Sendable {
     func requestSessionState() async throws
     func requestTerminalSnapshot(tabID: String) async throws
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
+    func setPhoneProfile(_ profile: TerminalProfile) async throws
+    func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
     func receiveEvent() async throws -> RelaySessionEvent
     func close()
 }
@@ -363,6 +409,30 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 tabId: tabID,
                 text: text,
                 enter: enter
+            )
+        )
+    }
+
+    func setPhoneProfile(_ profile: TerminalProfile) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelaySetPhoneProfilePayload(requestId: requestID, rows: profile.rows, cols: profile.cols)
+        )
+    }
+
+    func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelaySetWidthModePayload(
+                requestId: requestID,
+                tabId: tabID,
+                mode: widthMode.rawValue,
+                computerRows: computerProfile.rows,
+                computerCols: computerProfile.cols
             )
         )
     }
@@ -521,6 +591,22 @@ private struct RelayTerminalInputPayload: Encodable {
     var tabId: String
     var text: String
     var enter: Bool
+}
+
+private struct RelaySetPhoneProfilePayload: Encodable {
+    let type = "set_phone_profile"
+    var requestId: String
+    var rows: Int
+    var cols: Int
+}
+
+private struct RelaySetWidthModePayload: Encodable {
+    let type = "set_width_mode"
+    var requestId: String
+    var tabId: String
+    var mode: String
+    var computerRows: Int
+    var computerCols: Int
 }
 
 private struct RelaySocketIncoming: Decodable {
