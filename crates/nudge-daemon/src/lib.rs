@@ -29,6 +29,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use url::Url;
 
+#[allow(dead_code)]
+mod e2e;
+
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub placeholder: bool,

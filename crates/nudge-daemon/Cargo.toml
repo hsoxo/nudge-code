@@ -9,10 +9,12 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+chacha20poly1305.workspace = true
 dirs.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+hkdf.workspace = true
 nudge-protocol = { path = "../nudge-protocol" }
 nudge-pty = { path = "../nudge-pty" }
 nudge-terminal = { path = "../nudge-terminal" }
@@ -20,7 +22,9 @@ prost.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true
+x25519-dalek.workspace = true
