@@ -30,6 +30,17 @@ struct MachineListView: View {
                         .onTapGesture {
                             model.selectMachine(machine)
                         }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if machine.binding?.status != .revoked {
+                                Button(role: .destructive) {
+                                    Task {
+                                        await model.revokeMachineBinding(machineID: machine.id)
+                                    }
+                                } label: {
+                                    Label("Revoke", systemImage: "link.badge.minus")
+                                }
+                            }
+                        }
                 }
             }
         }

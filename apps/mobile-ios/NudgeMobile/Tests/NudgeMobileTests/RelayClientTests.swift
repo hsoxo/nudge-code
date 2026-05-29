@@ -135,6 +135,31 @@ struct RelayClientTests {
         #expect(URLProtocolStub.requests.first?.url?.query == "bindingId=bind_1&deviceId=phone_1")
     }
 
+    @Test func revokeBindingUsesPhoneDeviceAsParticipant() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [
+            StubResponse(
+                path: "/api/bind/revoke",
+                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","daemonPublicKey":"daemon-public-key","phonePublicKey":"phone-public-key","status":"revoked","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
+            )
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key")
+        )
+
+        let claim = try await client.revokeBinding(machine: activeMachine)
+
+        #expect(claim.status == .revoked)
+        #expect(claim.bindingID == "bind_1")
+        #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/bind/revoke"])
+        let requestBody = try #require(URLProtocolStub.requests.first?.jsonBody)
+        #expect(requestBody["bindingId"] as? String == "bind_1")
+        #expect(requestBody["deviceId"] as? String == "phone_1")
+    }
+
     @Test func rotatePhoneKeySignsCurrentIdentityThenCommitsNewIdentity() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [

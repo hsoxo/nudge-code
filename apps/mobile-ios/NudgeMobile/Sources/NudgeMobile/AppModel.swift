@@ -243,6 +243,33 @@ final class AppModel {
         }
     }
 
+    func revokeSelectedMachineBinding() async {
+        guard let selectedMachineID else {
+            return
+        }
+        await revokeMachineBinding(machineID: selectedMachineID)
+    }
+
+    func revokeMachineBinding(machineID: String) async {
+        guard let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              machines[machineIndex].binding != nil
+        else {
+            return
+        }
+        do {
+            let claim = try await relayClient.revokeBinding(machine: machines[machineIndex])
+            if let currentIndex = machines.firstIndex(where: { $0.id == machineID }) {
+                applyBindingClaim(claim, toMachineAt: currentIndex)
+                machines[currentIndex].connectionState = .offline
+                machines[currentIndex].lastSeenText = "binding revoked"
+            }
+        } catch {
+            if let currentIndex = machines.firstIndex(where: { $0.id == machineID }) {
+                machines[currentIndex].lastSeenText = "Unable to revoke binding"
+            }
+        }
+    }
+
     func syncSelectedMachineSession() async {
         guard let machineID = selectedMachineID
         else {

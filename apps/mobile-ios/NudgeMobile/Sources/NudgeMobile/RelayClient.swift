@@ -3,6 +3,7 @@ import Foundation
 protocol RelayClient: Sendable {
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
     func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim
+    func revokeBinding(machine: Machine) async throws -> BindingClaim
     func rotatePhoneKey(machine: Machine) async throws -> PhoneIdentity
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
@@ -46,6 +47,22 @@ struct HTTPRelayClient: RelayClient {
             throw RelayClientError.badURL
         }
         let (data, response) = try await urlSession.data(from: url)
+        try validate(response: response)
+        return try decodeBindingClaim(from: data)
+    }
+
+    func revokeBinding(machine: Machine) async throws -> BindingClaim {
+        guard let binding = machine.binding else {
+            throw RelayClientError.missingBinding
+        }
+        var request = URLRequest(url: machine.relayURL.appending(path: "/api/bind/revoke"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(RevokeBindingRequest(
+            bindingId: binding.bindingID,
+            deviceId: binding.phoneDeviceID
+        ))
+        let (data, response) = try await urlSession.data(for: request)
         try validate(response: response)
         return try decodeBindingClaim(from: data)
     }
@@ -699,6 +716,11 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
 private struct DeviceRequest: Encodable {
     var kind: String
     var publicKey: String
+}
+
+private struct RevokeBindingRequest: Encodable {
+    var bindingId: String
+    var deviceId: String
 }
 
 private struct DeviceKeyRotationRequest: Encodable {

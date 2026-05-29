@@ -219,6 +219,51 @@ struct BindingClaimTests {
         #expect(model.machines.first?.lastSeenText == "Unable to rotate phone key")
     }
 
+    @Test func appModelRevokesSelectedMachineBindingAndPersistsState() async throws {
+        let machine = activeMachine()
+        let client = RecordingRelayClient(revokedClaim: BindingClaim(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
+            status: .revoked,
+            expiresAt: "2026-05-29T00:00:00Z"
+        ))
+        let persistence = RecordingAppModelPersistence()
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            persistence: persistence
+        )
+
+        await model.revokeSelectedMachineBinding()
+
+        #expect(client.revokeRequests == [machine])
+        #expect(model.machines.first?.binding?.status == .revoked)
+        #expect(model.machines.first?.connectionState == .offline)
+        #expect(model.machines.first?.lastSeenText == "binding revoked")
+        let saved = try #require(persistence.savedStates.last)
+        #expect(saved.machines.first?.binding?.status == .revoked)
+    }
+
+    @Test func appModelKeepsBindingWhenRevokeFails() async throws {
+        let machine = activeMachine()
+        let client = RecordingRelayClient(error: RelayClientError.badStatus)
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+
+        await model.revokeSelectedMachineBinding()
+
+        #expect(client.revokeRequests.isEmpty)
+        #expect(model.machines.first?.binding == machine.binding)
+        #expect(model.machines.first?.lastSeenText == "Unable to revoke binding")
+    }
+
     @Test func appModelAttachesActiveMachineSession() async throws {
         let machine = Machine(
             id: "mac",
@@ -932,7 +977,9 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var phoneProfileRequests: [PhoneProfileClientRequest] = []
     var widthModeRequests: [WidthModeClientRequest] = []
     var phoneKeyRotationRequests: [Machine] = []
+    var revokeRequests: [Machine] = []
     var statusClaim: BindingClaim
+    var revokedClaim: BindingClaim
     var rotatedPhoneIdentity: PhoneIdentity
     var sessionState: RemoteSessionState
     var snapshots: [String: TerminalSnapshot]
@@ -949,6 +996,15 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         ),
+        revokedClaim: BindingClaim = BindingClaim(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            daemonPublicKey: "daemon-public-key",
+            phonePublicKey: "phone-public-key",
+            status: .revoked,
+            expiresAt: "2026-05-29T00:00:00Z"
+        ),
         rotatedPhoneIdentity: PhoneIdentity = PhoneIdentity(publicKey: "rotated-phone-public-key"),
         sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
         snapshots: [String: TerminalSnapshot] = [:],
@@ -959,6 +1015,7 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
+        self.revokedClaim = revokedClaim
         self.rotatedPhoneIdentity = rotatedPhoneIdentity
         self.sessionState = sessionState
         self.snapshots = snapshots
@@ -990,6 +1047,14 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         statusRequests.append(BindingStatusRequest(binding: binding, relayURL: relayURL))
         return statusClaim
+    }
+
+    func revokeBinding(machine: Machine) async throws -> BindingClaim {
+        if let error {
+            throw error
+        }
+        revokeRequests.append(machine)
+        return revokedClaim
     }
 
     func rotatePhoneKey(machine: Machine) async throws -> PhoneIdentity {
