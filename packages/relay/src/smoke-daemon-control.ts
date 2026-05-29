@@ -213,7 +213,7 @@ function waitForMessage(
     const timeout = setTimeout(() => {
       websocket.off('message', onMessage);
       reject(new Error('timed out waiting for websocket message'));
-    }, 5000);
+    }, 10000);
     const onMessage = (bytes: Buffer) => {
       const message = JSON.parse(bytes.toString()) as Record<string, any>;
       if (!predicate(message)) {

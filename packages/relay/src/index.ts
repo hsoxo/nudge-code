@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { FREE_ENTITLEMENT } from '@nudge/protocol-ts';
-import { verifySocketSignature } from './auth.js';
+import { MemorySocketNonceStore, verifySocketSignature } from './auth.js';
 
 type DeviceKind = 'daemon' | 'phone';
 type BindingStatus = 'pending' | 'claimed' | 'active' | 'revoked';
@@ -53,6 +53,7 @@ const devices = new Map<string, Device>();
 const bindings = new Map<string, Binding>();
 const messages = new Map<string, RelayMessage[]>();
 const sockets = new Map<string, WebSocket>();
+const nonceStore = new MemorySocketNonceStore();
 
 loadRelayState();
 
@@ -348,6 +349,7 @@ function authorizeSocketSignature(
     bindingId,
     params,
     requireSignature: requireWebSocketSignature,
+    nonceStore,
   });
 }
 

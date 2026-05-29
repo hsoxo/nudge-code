@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { socketSignatureMessage, verifySocketSignature } from './auth.js';
+import { MemorySocketNonceStore, socketSignatureMessage, verifySocketSignature } from './auth.js';
 
 const nowMs = Date.parse('2026-05-29T00:00:00.000Z');
 const deviceId = 'phone_1';
@@ -33,6 +33,46 @@ expectOk(verifySocketSignature({
   params: validParams,
   requireSignature: true,
   nowMs,
+}));
+
+const nonceStore = new MemorySocketNonceStore();
+expectOk(verifySocketSignature({
+  device: { id: deviceId, publicKey: publicKeyBase64 },
+  bindingId,
+  params: validParams,
+  requireSignature: true,
+  nowMs,
+  nonceStore,
+}));
+
+expectError(
+  verifySocketSignature({
+    device: { id: deviceId, publicKey: publicKeyBase64 },
+    bindingId,
+    params: validParams,
+    requireSignature: true,
+    nowMs,
+    nonceStore,
+  }),
+  'replayed_socket_signature_nonce',
+);
+
+expectOk(verifySocketSignature({
+  device: { id: deviceId, publicKey: publicKeyBase64 },
+  bindingId,
+  params: signedParams('nonce-after-prune-1', timestamp),
+  requireSignature: true,
+  nowMs,
+  nonceStore,
+}));
+
+expectOk(verifySocketSignature({
+  device: { id: deviceId, publicKey: publicKeyBase64 },
+  bindingId,
+  params: signedParams('nonce-after-prune-1', String(nowMs + 5 * 60 * 1000 + 1)),
+  requireSignature: true,
+  nowMs: nowMs + 5 * 60 * 1000 + 1,
+  nonceStore,
 }));
 
 expectError(
@@ -81,6 +121,20 @@ expectOk(verifySocketSignature({
 }));
 
 console.log('relay auth smoke passed');
+
+function signedParams(authNonce: string, authTimestamp: string): URLSearchParams {
+  const signedMessage = socketSignatureMessage({
+    deviceId,
+    bindingId,
+    timestamp: authTimestamp,
+    nonce: authNonce,
+  });
+  return new URLSearchParams({
+    authTimestamp,
+    authNonce,
+    authSignature: sign(null, Buffer.from(signedMessage), privateKey).toString('base64'),
+  });
+}
 
 function expectOk(result: ReturnType<typeof verifySocketSignature>): void {
   if (!result.ok) {
