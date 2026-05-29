@@ -9,6 +9,7 @@ struct PhoneIdentity: Equatable, Sendable {
 protocol PhoneIdentityStore: Sendable {
     func loadOrCreate() throws -> PhoneIdentity
     func sign(_ message: Data) throws -> Data
+    func signingPrivateKeyRaw() throws -> Data
     func reset() throws
 }
 
@@ -36,11 +37,15 @@ final class KeychainPhoneIdentityStore: PhoneIdentityStore, @unchecked Sendable 
     }
 
     func sign(_ message: Data) throws -> Data {
+        let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: signingPrivateKeyRaw())
+        return try privateKey.signature(for: message)
+    }
+
+    func signingPrivateKeyRaw() throws -> Data {
         guard let data = try readPrivateKeyData() else {
             throw PhoneIdentityError.missingIdentity
         }
-        let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: data)
-        return try privateKey.signature(for: message)
+        return data
     }
 
     func reset() throws {

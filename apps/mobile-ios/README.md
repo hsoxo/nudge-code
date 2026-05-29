@@ -44,7 +44,8 @@ Current scaffold:
 - relay revocation handling that marks the machine binding revoked and stops reconnecting.
 - SwiftProtobuf-generated E2E handshake and encrypted envelope protocol types.
 - CryptoKit E2E handshake/envelope helpers for transcript signatures, X25519/HKDF/ChaCha20-Poly1305 encryption, and replay checks.
+- E2E relay handshake exchange and encrypted request/response handling in `RelayClient`.
 
 Still open:
 
-- E2E encrypted terminal/control stream handshake exchange and live relay wiring.
+- Full spawned-process relay/daemon/mobile integration coverage for encrypted terminal input, live output, and reconnect behavior.

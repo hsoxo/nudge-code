@@ -19,13 +19,18 @@ pub(crate) struct KeyPair {
 }
 
 impl KeyPair {
+    pub(crate) fn generate() -> Result<Self> {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).context("failed to generate e2e ephemeral key")?;
+        Ok(Self::from_secret_bytes(secret))
+    }
+
     pub(crate) fn from_secret_bytes(secret: [u8; 32]) -> Self {
         let secret = StaticSecret::from(secret);
         let public = PublicKey::from(&secret);
         Self { secret, public }
     }
 
-    #[cfg(test)]
     pub(crate) fn public_bytes(&self) -> [u8; 32] {
         self.public.to_bytes()
     }
@@ -162,6 +167,7 @@ impl SessionKeys {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum SessionRole {
     Phone,
     Daemon,
@@ -202,6 +208,7 @@ pub(crate) fn envelope_from_relay_payload(payload: &Value) -> Result<v1::E2eEncr
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn handshake_start_to_relay_payload(start: &v1::E2eHandshakeStart) -> Value {
     json!({
         "type": "e2e_handshake_start",
@@ -246,6 +253,7 @@ pub(crate) fn handshake_start_from_relay_payload(payload: &Value) -> Result<v1::
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn handshake_finish_from_relay_payload(
     payload: &Value,
 ) -> Result<v1::E2eHandshakeFinish> {
@@ -266,6 +274,7 @@ pub(crate) fn handshake_finish_from_relay_payload(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn sign_handshake_start(
     signing_key: &[u8; 32],
     mut start: v1::E2eHandshakeStart,
@@ -312,6 +321,7 @@ pub(crate) fn sign_handshake_finish(
     finish
 }
 
+#[allow(dead_code)]
 pub(crate) fn verify_handshake_finish(
     start: &v1::E2eHandshakeStart,
     finish: &v1::E2eHandshakeFinish,

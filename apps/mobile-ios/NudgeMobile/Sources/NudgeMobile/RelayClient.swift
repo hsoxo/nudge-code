@@ -67,6 +67,8 @@ struct HTTPRelayClient: RelayClient {
         }
         return HTTPRelaySession(
             socket: socket,
+            binding: binding,
+            identityStore: identityStore,
             daemonDeviceID: binding.daemonDeviceID,
             requestIDGenerator: requestIDGenerator
         )
@@ -253,15 +255,21 @@ struct HTTPRelayClient: RelayClient {
             payload: payload
         )
         try await waitForConnected(socket: socket, binding: binding)
-        let data = try JSONEncoder().encode(request)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw RelayClientError.invalidWebSocketMessage
-        }
+        var e2eSession = try await openE2ESessionIfPossible(
+            socket: socket,
+            binding: binding,
+            identityStore: identityStore
+        )
+        let text = try encodeSocketRequest(request, e2eSession: &e2eSession)
         try await socket.sendString(text)
-        return try await waitForDaemonResponse(socket: socket, requestID: requestID)
+        return try await waitForDaemonResponse(socket: socket, requestID: requestID, e2eSession: &e2eSession)
     }
 
-    private func waitForDaemonResponse(socket: any RelayWebSocketTransport, requestID: String) async throws -> RelayDaemonPayload {
+    private func waitForDaemonResponse(
+        socket: any RelayWebSocketTransport,
+        requestID: String,
+        e2eSession: inout E2ESession?
+    ) async throws -> RelayDaemonPayload {
         while true {
             let text = try await socket.receiveString()
             let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
@@ -272,7 +280,8 @@ struct HTTPRelayClient: RelayClient {
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
             }
             guard message.type == "message",
-                  let payload = message.message?.payload,
+                  let rawPayload = message.message?.payload,
+                  let payload = try decodeDaemonPayload(rawPayload, e2eSession: &e2eSession),
                   payload.type == "daemon_response",
                   payload.requestId == requestID
             else {
@@ -404,17 +413,24 @@ private enum RelaySessionRequestKind: Sendable {
 
 private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
     private let socket: any RelayWebSocketTransport
+    private let binding: MachineBinding
+    private let identityStore: any PhoneIdentityStore
     private let daemonDeviceID: String
     private let requestIDGenerator: @Sendable () -> String
     private let lock = NSLock()
     private var requestKinds: [String: RelaySessionRequestKind] = [:]
+    private var e2eSession: E2ESession?
 
     init(
         socket: any RelayWebSocketTransport,
+        binding: MachineBinding,
+        identityStore: any PhoneIdentityStore,
         daemonDeviceID: String,
         requestIDGenerator: @escaping @Sendable () -> String
     ) {
         self.socket = socket
+        self.binding = binding
+        self.identityStore = identityStore
         self.daemonDeviceID = daemonDeviceID
         self.requestIDGenerator = requestIDGenerator
     }
@@ -495,7 +511,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
             }
             guard message.type == "message",
-                  let payload = message.message?.payload,
+                  let rawPayload = message.message?.payload,
+                  let payload = try decodeDaemonPayload(rawPayload, e2eSession: &e2eSession),
                   payload.type == "daemon_response"
             else {
                 continue
@@ -517,6 +534,13 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
         requestID: String,
         payload: Payload
     ) async throws {
+        if e2eSession == nil {
+            e2eSession = try await openE2ESessionIfPossible(
+                socket: socket,
+                binding: binding,
+                identityStore: identityStore
+            )
+        }
         lock.withLock {
             requestKinds[requestID] = kind
         }
@@ -524,10 +548,7 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             toDeviceId: daemonDeviceID,
             payload: payload
         )
-        let data = try JSONEncoder().encode(request)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw RelayClientError.invalidWebSocketMessage
-        }
+        let text = try encodeSocketRequest(request, e2eSession: &e2eSession)
         do {
             try await socket.sendString(text)
         } catch {
@@ -654,6 +675,117 @@ private struct RelaySocketRequest<Payload: Encodable>: Encodable {
     var payload: Payload
 }
 
+private func encodeSocketRequest<Payload: Encodable>(_ request: RelaySocketRequest<Payload>) throws -> String {
+    let data = try JSONEncoder().encode(request)
+    guard let text = String(data: data, encoding: .utf8) else {
+        throw RelayClientError.invalidWebSocketMessage
+    }
+    return text
+}
+
+private func encodeSocketRequest<Payload: Encodable>(
+    _ request: RelaySocketRequest<Payload>,
+    e2eSession: inout E2ESession?
+) throws -> String {
+    guard var session = e2eSession else {
+        return try encodeSocketRequest(request)
+    }
+    let payloadData = try JSONEncoder().encode(request.payload)
+    let payloadType = try relayPayloadType(from: payloadData)
+    let encrypted = try session.encrypt(messageType: payloadType, plaintext: payloadData)
+    e2eSession = session
+    return try encodeSocketRequest(RelaySocketRequest(
+        toDeviceId: request.toDeviceId,
+        payload: E2ERelayPayload(envelope: encrypted)
+    ))
+}
+
+private func decodeDaemonPayload(
+    _ rawPayload: RelayDaemonPayload,
+    e2eSession: inout E2ESession?
+) throws -> RelayDaemonPayload? {
+    if rawPayload.type != "e2e_envelope" {
+        return rawPayload
+    }
+    guard var session = e2eSession else {
+        throw RelayClientError.invalidWebSocketMessage
+    }
+    let envelope = try rawPayload.e2eEnvelope()
+    let plaintext = try session.decrypt(envelope)
+    e2eSession = session
+    return try JSONDecoder().decode(RelayDaemonPayload.self, from: plaintext)
+}
+
+private func openE2ESessionIfPossible(
+    socket: any RelayWebSocketTransport,
+    binding: MachineBinding,
+    identityStore: any PhoneIdentityStore
+) async throws -> E2ESession? {
+    let phoneIdentity = try identityStore.loadOrCreate()
+    guard let daemonPublicKeyBase64 = binding.daemonPublicKey,
+          let daemonIdentityPublicKey = Data(base64Encoded: daemonPublicKeyBase64),
+          daemonIdentityPublicKey.count == 32,
+          let phoneIdentityPublicKey = Data(base64Encoded: phoneIdentity.publicKey),
+          phoneIdentityPublicKey.count == 32
+    else {
+        return nil
+    }
+    let sessionID = "e2e_\(UUID().uuidString)"
+    let phoneEphemeral = E2EKeyPair.generate()
+    var start = Nudge_V1_E2EHandshakeStart()
+    start.sessionID = sessionID
+    start.senderDeviceID = binding.phoneDeviceID
+    start.recipientDeviceID = binding.daemonDeviceID
+    start.senderIdentityPublicKey = phoneIdentityPublicKey
+    start.senderEphemeralPublicKey = phoneEphemeral.publicKey
+    start.createdAt = ISO8601DateFormatter().string(from: Date())
+    start = try signE2EHandshakeStart(signingPrivateKeyRaw: identityStore.signingPrivateKeyRaw(), start: start)
+    try await socket.sendString(try encodeSocketRequest(RelaySocketRequest(
+        toDeviceId: binding.daemonDeviceID,
+        payload: E2EHandshakeStartRelayPayload(start: start)
+    )))
+    while true {
+        let text = try await socket.receiveString()
+        let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
+        if message.type == "error" {
+            if message.error == "binding_revoked" {
+                throw RelayClientError.bindingRevoked
+            }
+            throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
+        }
+        guard message.type == "message",
+              let rawPayload = message.message?.payload,
+              rawPayload.type == "e2e_handshake_finish",
+              let finish = try rawPayload.handshakeFinish()
+        else {
+            continue
+        }
+        try verifyE2EHandshakeFinish(
+            start: start,
+            finish: finish,
+            expectedIdentityPublicKey: daemonIdentityPublicKey
+        )
+        return try E2ESession(
+            sessionID: sessionID,
+            localDeviceID: binding.phoneDeviceID,
+            remoteDeviceID: binding.daemonDeviceID,
+            localKeyPair: phoneEphemeral,
+            remotePublicKey: finish.senderEphemeralPublicKey,
+            role: .phone
+        )
+    }
+}
+
+private func relayPayloadType(from data: Data) throws -> String {
+    let object = try JSONSerialization.jsonObject(with: data)
+    guard let dictionary = object as? [String: Any],
+          let type = dictionary["type"] as? String
+    else {
+        throw RelayClientError.invalidWebSocketMessage
+    }
+    return type
+}
+
 private struct RelayGetStatePayload: Encodable {
     let type = "get_state"
     var requestId: String
@@ -713,6 +845,79 @@ private struct RelayDaemonPayload: Decodable {
     var requestId: String?
     var ok: Bool
     var data: RelayDaemonDataResponse?
+    var sessionID: String?
+    var senderDeviceID: String?
+    var recipientDeviceID: String?
+    var messageType: String?
+    var sequence: String?
+    var nonceBase64: String?
+    var ciphertextBase64: String?
+    var senderEphemeralPublicKeyBase64: String?
+    var transcriptSignatureBase64: String?
+    var acceptedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case requestId
+        case ok
+        case data
+        case sessionID = "sessionId"
+        case senderDeviceID = "senderDeviceId"
+        case recipientDeviceID = "recipientDeviceId"
+        case messageType
+        case sequence
+        case nonceBase64
+        case ciphertextBase64
+        case senderEphemeralPublicKeyBase64
+        case transcriptSignatureBase64
+        case acceptedAt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        requestId = try container.decodeIfPresent(String.self, forKey: .requestId)
+        ok = try container.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        data = try container.decodeIfPresent(RelayDaemonDataResponse.self, forKey: .data)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+        senderDeviceID = try container.decodeIfPresent(String.self, forKey: .senderDeviceID)
+        recipientDeviceID = try container.decodeIfPresent(String.self, forKey: .recipientDeviceID)
+        messageType = try container.decodeIfPresent(String.self, forKey: .messageType)
+        sequence = try container.decodeIfPresent(String.self, forKey: .sequence)
+        nonceBase64 = try container.decodeIfPresent(String.self, forKey: .nonceBase64)
+        ciphertextBase64 = try container.decodeIfPresent(String.self, forKey: .ciphertextBase64)
+        senderEphemeralPublicKeyBase64 = try container.decodeIfPresent(String.self, forKey: .senderEphemeralPublicKeyBase64)
+        transcriptSignatureBase64 = try container.decodeIfPresent(String.self, forKey: .transcriptSignatureBase64)
+        acceptedAt = try container.decodeIfPresent(String.self, forKey: .acceptedAt)
+    }
+
+    func e2eEnvelope() throws -> Nudge_V1_E2EEncryptedEnvelope {
+        try E2ERelayPayload(
+            type: type,
+            sessionID: sessionID ?? "",
+            senderDeviceID: senderDeviceID ?? "",
+            recipientDeviceID: recipientDeviceID ?? "",
+            messageType: messageType ?? "",
+            sequence: sequence ?? "",
+            nonceBase64: nonceBase64 ?? "",
+            ciphertextBase64: ciphertextBase64 ?? ""
+        ).envelope()
+    }
+
+    func handshakeFinish() throws -> Nudge_V1_E2EHandshakeFinish? {
+        guard type == "e2e_handshake_finish" else {
+            return nil
+        }
+        return try E2EHandshakeFinishRelayPayload(
+            type: type,
+            sessionID: sessionID ?? "",
+            senderDeviceID: senderDeviceID ?? "",
+            recipientDeviceID: recipientDeviceID ?? "",
+            senderEphemeralPublicKeyBase64: senderEphemeralPublicKeyBase64 ?? "",
+            transcriptSignatureBase64: transcriptSignatureBase64 ?? "",
+            acceptedAt: acceptedAt ?? ""
+        ).finish()
+    }
 }
 
 private struct RelayDaemonDataResponse: Decodable {

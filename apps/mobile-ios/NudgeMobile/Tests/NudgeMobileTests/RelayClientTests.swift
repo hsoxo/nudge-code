@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import NudgeMobile
@@ -142,6 +143,102 @@ struct RelayClientTests {
         #expect(socket.sent[0].contains(#""text":"echo hi""#))
         #expect(socket.sent[0].contains(#""enter":true"#))
         #expect(socket.closed)
+    }
+
+    @Test func sendTerminalInputUsesE2EEnvelopeWhenBindingHasDaemonPublicKey() async throws {
+        let phoneSigningPrivateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
+        let daemonSigningPrivateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 4, count: 32))
+        let identityStore = MemoryPhoneIdentityStore(
+            publicKey: phoneSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            signingKey: phoneSigningPrivateKey.rawRepresentation
+        )
+        let binding = MachineBinding(
+            bindingID: "bind_1",
+            daemonDeviceID: "daemon_1",
+            phoneDeviceID: "phone_1",
+            daemonPublicKey: daemonSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            phonePublicKey: phoneSigningPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            status: .active,
+            expiresAt: "2026-05-29T00:00:00Z"
+        )
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://relay.test")!,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: binding
+        )
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#
+        ])
+        socket.onSend = { sent in
+            guard socket.messages.isEmpty,
+                  let payload = relayPayload(from: sent),
+                  payload["type"] as? String == "e2e_handshake_start"
+            else {
+                return
+            }
+            do {
+                let start = try JSONDecoder().decode(E2EHandshakeStartRelayPayload.self, from: JSONSerialization.data(withJSONObject: payload)).start()
+                var finish = Nudge_V1_E2EHandshakeFinish()
+                finish.sessionID = start.sessionID
+                finish.senderDeviceID = "daemon_1"
+                finish.recipientDeviceID = "phone_1"
+                let daemonEphemeral = try E2EKeyPair(rawRepresentation: Data(repeating: 9, count: 32))
+                finish.senderEphemeralPublicKey = daemonEphemeral.publicKey
+                finish.acceptedAt = "2026-05-29T00:00:01.000Z"
+                finish = try signE2EHandshakeFinish(
+                    signingPrivateKeyRaw: daemonSigningPrivateKey.rawRepresentation,
+                    start: start,
+                    finish: finish
+                )
+                let finishPayload = try jsonObjectString(E2EHandshakeFinishRelayPayload(finish: finish))
+                socket.messages.append(#"{"type":"message","message":{"payload":\#(finishPayload)}}"#)
+                var daemonSession = try E2ESession(
+                    sessionID: start.sessionID,
+                    localDeviceID: "daemon_1",
+                    remoteDeviceID: "phone_1",
+                    localKeyPair: daemonEphemeral,
+                    remotePublicKey: start.senderEphemeralPublicKey,
+                    role: .daemon
+                )
+                let response = RelayDaemonPayloadFixture(
+                    type: "daemon_response",
+                    requestId: "ios-e2e-input",
+                    ok: true,
+                    data: ["accepted": true]
+                )
+                let responseData = try JSONEncoder().encode(response)
+                let encrypted = try daemonSession.encrypt(messageType: "terminal_input_response", plaintext: responseData)
+                let encryptedPayload = try jsonObjectString(E2ERelayPayload(envelope: encrypted))
+                socket.messages.append(#"{"type":"message","message":{"payload":\#(encryptedPayload)}}"#)
+            } catch {
+                Issue.record("Failed to prepare E2E daemon response: \(error)")
+            }
+        }
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: identityStore,
+            webSocketFactory: RecordingWebSocketFactory(socket: socket),
+            requestIDGenerator: { "ios-e2e-input" }
+        )
+
+        try await client.sendTerminalInput(machine: machine, tabID: "default", text: "echo hi", enter: true)
+
+        #expect(socket.sent.count == 2)
+        #expect(socket.sent[0].contains(#""type":"e2e_handshake_start""#))
+        let encryptedPayload = try #require(relayPayload(from: socket.sent[1]))
+        #expect(encryptedPayload["type"] as? String == "e2e_envelope")
+        #expect(encryptedPayload["messageType"] as? String == "terminal_input")
+        #expect(encryptedPayload["ciphertextBase64"] as? String != nil)
+        #expect(!socket.sent[1].contains(#""requestId":"ios-e2e-input""#))
+        #expect(!socket.sent[1].contains(#""tabId":"default""#))
+        #expect(!socket.sent[1].contains("echo hi"))
     }
 
     @Test func relayErrorBindingRevokedStopsOneShotRequest() async throws {
@@ -418,6 +515,7 @@ struct RelayClientTests {
 
 private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
     var publicKey: String
+    var signingKey: Data = Data(repeating: 3, count: 32)
 
     func loadOrCreate() throws -> PhoneIdentity {
         PhoneIdentity(publicKey: publicKey)
@@ -425,6 +523,10 @@ private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
 
     func sign(_ message: Data) throws -> Data {
         Data("signed:\(String(data: message, encoding: .utf8) ?? "")".utf8)
+    }
+
+    func signingPrivateKeyRaw() throws -> Data {
+        signingKey
     }
 
     func reset() throws {}
@@ -469,6 +571,7 @@ private final class RecordingWebSocket: RelayWebSocketTransport, @unchecked Send
     var messages: [String]
     var sent: [String] = []
     var closed = false
+    var onSend: ((String) -> Void)?
 
     init(messages: [String]) {
         self.messages = messages
@@ -476,6 +579,7 @@ private final class RecordingWebSocket: RelayWebSocketTransport, @unchecked Send
 
     func sendString(_ value: String) async throws {
         sent.append(value)
+        onSend?(value)
     }
 
     func receiveString() async throws -> String {
@@ -488,6 +592,30 @@ private final class RecordingWebSocket: RelayWebSocketTransport, @unchecked Send
     func close() {
         closed = true
     }
+}
+
+private struct RelayDaemonPayloadFixture: Encodable {
+    var type: String
+    var requestId: String
+    var ok: Bool
+    var data: [String: Bool]
+}
+
+private func relayPayload(from socketMessage: String) -> [String: Any]? {
+    guard let data = socketMessage.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return nil
+    }
+    return object["payload"] as? [String: Any]
+}
+
+private func jsonObjectString<T: Encodable>(_ value: T) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    guard let text = String(data: data, encoding: .utf8) else {
+        throw RelayClientError.invalidWebSocketMessage
+    }
+    return text
 }
 
 private final class URLProtocolStub: URLProtocol, @unchecked Sendable {

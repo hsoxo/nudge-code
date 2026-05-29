@@ -29,7 +29,6 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use url::Url;
 
-#[allow(dead_code)]
 mod e2e;
 
 #[derive(Debug, Clone)]
@@ -210,13 +209,17 @@ struct RelaySocketMessage {
 struct RelayRoutedMessage {
     id: String,
     from_device_id: String,
-    payload: RelayControlRequest,
+    payload: Value,
 }
 
 #[derive(Debug, Clone)]
 struct TerminalChange {
     tab_id: String,
     data: Vec<u8>,
+}
+
+struct RelayE2ESession {
+    keys: e2e::SessionKeys,
 }
 
 #[derive(Debug, Deserialize)]
@@ -780,10 +783,12 @@ impl DeviceIdentity {
     }
 
     pub fn sign(&self, message: &[u8]) -> Result<String> {
-        let secret_key = decode_fixed_base64::<32>(&self.signing_key)
-            .context("stored daemon signing key is invalid")?;
-        let signing_key = SigningKey::from_bytes(&secret_key);
+        let signing_key = SigningKey::from_bytes(&self.secret_key_bytes()?);
         Ok(BASE64_STANDARD.encode(signing_key.sign(message).to_bytes()))
+    }
+
+    pub(crate) fn secret_key_bytes(&self) -> Result<[u8; 32]> {
+        decode_fixed_base64::<32>(&self.signing_key).context("stored daemon signing key is invalid")
     }
 
     fn from_signing_key(signing_key: &SigningKey) -> Self {
@@ -1862,6 +1867,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
         .set_relay_state(RelayConnectionState::connected(binding))
         .await;
     let mut terminal_changes = runtime.subscribe_terminal_changes();
+    let mut e2e_session: Option<RelayE2ESession> = None;
     let mut pending_terminal_outputs = BTreeMap::new();
     let mut terminal_flush = interval(Duration::from_millis(100));
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1892,12 +1898,16 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
             _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() => {
                 let outputs = std::mem::take(&mut pending_terminal_outputs);
                 for (tab_id, data) in outputs {
-                    let message = if data.is_empty() {
-                        live_terminal_snapshot_json(runtime, binding, &bound_phone_id, &tab_id).await
+                    let payload = if data.is_empty() {
+                        live_terminal_snapshot_payload(runtime, binding, &tab_id).await
                     } else {
-                        Some(relay_live_terminal_output_json(&bound_phone_id, binding, &tab_id, &data))
+                        Some(relay_live_terminal_output_payload(binding, &tab_id, &data))
                     };
-                    if let Some(message) = message {
+                    if let Some(payload) = payload {
+                        let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_mut())? else {
+                            continue;
+                        };
+                        let message = relay_message_json(&bound_phone_id, None, payload);
                         websocket
                             .send(WebSocketMessage::Text(message.into()))
                             .await
@@ -1909,7 +1919,16 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                 match message {
                     Some(Ok(message)) => {
                         runtime.mark_relay_message().await;
-                        if let Some(response) = handle_relay_message(runtime, binding, message).await? {
+                        if let Some(response) = handle_relay_message(
+                            runtime,
+                            binding,
+                            &bound_phone_id,
+                            &identity,
+                            &mut e2e_session,
+                            message,
+                        )
+                        .await?
+                        {
                             websocket
                                 .send(WebSocketMessage::Text(response.into()))
                                 .await
@@ -1948,6 +1967,9 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
 async fn handle_relay_message(
     runtime: &DaemonRuntime,
     binding: &BindingState,
+    bound_phone_id: &str,
+    identity: &DeviceIdentity,
+    e2e_session: &mut Option<RelayE2ESession>,
     message: WebSocketMessage,
 ) -> Result<Option<String>> {
     let text = match message {
@@ -1974,15 +1996,139 @@ async fn handle_relay_message(
     let Some(routed) = relay_message.message else {
         return Ok(None);
     };
-    let response = handle_relay_control_request(runtime, routed.payload).await;
-    Ok(Some(relay_response_json(
-        &routed.from_device_id,
-        &routed.id,
+    let Some(response_payload) = handle_relay_payload(
+        runtime,
         binding,
-        &response.request_id,
-        response.ok,
-        response.payload,
+        bound_phone_id,
+        identity,
+        e2e_session,
+        &routed.from_device_id,
+        routed.payload,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(relay_message_json(
+        &routed.from_device_id,
+        Some(&routed.id),
+        response_payload,
     )))
+}
+
+async fn handle_relay_payload(
+    runtime: &DaemonRuntime,
+    binding: &BindingState,
+    bound_phone_id: &str,
+    identity: &DeviceIdentity,
+    e2e_session: &mut Option<RelayE2ESession>,
+    from_device_id: &str,
+    payload: Value,
+) -> Result<Option<Value>> {
+    match payload_type(&payload).as_deref() {
+        Some("e2e_handshake_start") => {
+            let finish = accept_e2e_handshake_start(
+                binding,
+                bound_phone_id,
+                identity,
+                e2e_session,
+                from_device_id,
+                payload,
+            )?;
+            Ok(Some(e2e::handshake_finish_to_relay_payload(&finish)))
+        }
+        Some("e2e_envelope") => {
+            let session = e2e_session
+                .as_mut()
+                .context("relay sent encrypted payload before e2e handshake")?;
+            let envelope = e2e::envelope_from_relay_payload(&payload)?;
+            let message_type = envelope.message_type.clone();
+            let plaintext = session.keys.decrypt(&envelope)?;
+            let request: RelayControlRequest = serde_json::from_slice(&plaintext)
+                .context("failed to decode decrypted relay control request")?;
+            let response = handle_relay_control_request(runtime, request).await;
+            let response_payload = relay_control_response_payload(
+                binding,
+                None,
+                &response.request_id,
+                response.ok,
+                response.payload,
+            );
+            let encrypted = session.keys.encrypt(
+                format!("{message_type}_response"),
+                response_payload.to_string().as_bytes(),
+            )?;
+            Ok(Some(e2e::envelope_to_relay_payload(&encrypted)))
+        }
+        _ => {
+            let request: RelayControlRequest = serde_json::from_value(payload)
+                .context("failed to decode relay control request")?;
+            let response = handle_relay_control_request(runtime, request).await;
+            Ok(Some(relay_control_response_payload(
+                binding,
+                None,
+                &response.request_id,
+                response.ok,
+                response.payload,
+            )))
+        }
+    }
+}
+
+fn accept_e2e_handshake_start(
+    binding: &BindingState,
+    bound_phone_id: &str,
+    identity: &DeviceIdentity,
+    e2e_session: &mut Option<RelayE2ESession>,
+    from_device_id: &str,
+    payload: Value,
+) -> Result<v1::E2eHandshakeFinish> {
+    if from_device_id != bound_phone_id {
+        anyhow::bail!("e2e handshake start from unbound phone");
+    }
+    let expected_phone_key = binding
+        .phone_public_key
+        .as_deref()
+        .context("binding is missing phone public key")?;
+    let expected_phone_key = decode_fixed_base64::<32>(expected_phone_key)
+        .context("binding phone public key is invalid")?;
+    let start = e2e::handshake_start_from_relay_payload(&payload)?;
+    if start.recipient_device_id != binding.daemon_device_id
+        || start.sender_device_id != bound_phone_id
+    {
+        anyhow::bail!("e2e handshake start route mismatch");
+    }
+    e2e::verify_handshake_start(&start, &expected_phone_key)?;
+
+    let daemon_secret = identity.secret_key_bytes()?;
+    let daemon_ephemeral = e2e::KeyPair::generate()?;
+    let phone_ephemeral: [u8; 32] = start
+        .sender_ephemeral_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("phone e2e ephemeral key must be 32 bytes"))?;
+    let keys = e2e::SessionKeys::from_x25519(
+        start.session_id.clone(),
+        binding.daemon_device_id.clone(),
+        bound_phone_id.to_string(),
+        &daemon_ephemeral,
+        phone_ephemeral,
+        e2e::SessionRole::Daemon,
+    )?;
+    let finish = e2e::sign_handshake_finish(
+        &daemon_secret,
+        &start,
+        v1::E2eHandshakeFinish {
+            session_id: start.session_id.clone(),
+            sender_device_id: binding.daemon_device_id.clone(),
+            recipient_device_id: bound_phone_id.to_string(),
+            sender_ephemeral_public_key: daemon_ephemeral.public_bytes().to_vec(),
+            transcript_signature: Vec::new(),
+            accepted_at: now_string(),
+        },
+    );
+    *e2e_session = Some(RelayE2ESession { keys });
+    Ok(finish)
 }
 
 struct RelayControlResponse {
@@ -2117,42 +2263,81 @@ impl RelayControlResponse {
     }
 }
 
-fn relay_response_json(
-    to_device_id: &str,
-    relay_message_id: &str,
+fn relay_control_response_payload(
     binding: &BindingState,
+    relay_message_id: Option<&str>,
     request_id: &str,
     ok: bool,
     payload: Value,
-) -> String {
-    serde_json::to_string(&json!({
-        "toDeviceId": to_device_id,
-        "payload": {
-            "type": "daemon_response",
-            "requestId": request_id,
-            "relayMessageId": relay_message_id,
-            "bindingId": binding.binding_id,
-            "ok": ok,
-            "data": payload,
-        }
-    }))
-    .expect("relay response json should serialize")
+) -> Value {
+    let mut response = json!({
+        "type": "daemon_response",
+        "requestId": request_id,
+        "bindingId": binding.binding_id,
+        "ok": ok,
+        "data": payload,
+    });
+    if let Some(relay_message_id) = relay_message_id {
+        response["relayMessageId"] = Value::String(relay_message_id.to_string());
+    }
+    response
 }
 
-async fn live_terminal_snapshot_json(
+fn relay_message_json(
+    to_device_id: &str,
+    relay_message_id: Option<&str>,
+    payload: Value,
+) -> String {
+    let mut message = json!({
+        "toDeviceId": to_device_id,
+        "payload": payload,
+    });
+    if relay_message_id.is_none() {
+        message["ephemeral"] = Value::Bool(true);
+    }
+    serde_json::to_string(&message).expect("relay response json should serialize")
+}
+
+async fn live_terminal_snapshot_payload(
     runtime: &DaemonRuntime,
     binding: &BindingState,
-    to_device_id: &str,
     tab_id: &str,
-) -> Option<String> {
+) -> Option<Value> {
     let snapshot = runtime.terminal_snapshot(tab_id).await.ok()?;
-    Some(relay_live_terminal_snapshot_json(
-        to_device_id,
-        binding,
-        &snapshot,
-    ))
+    Some(relay_live_terminal_snapshot_payload(binding, &snapshot))
 }
 
+fn relay_live_payload(
+    binding: &BindingState,
+    payload: Value,
+    e2e_session: Option<&mut RelayE2ESession>,
+) -> Result<Option<Value>> {
+    let Some(session) = e2e_session else {
+        return Ok(if binding.phone_public_key.is_some() {
+            None
+        } else {
+            Some(payload)
+        });
+    };
+    let encrypted = session
+        .keys
+        .encrypt("daemon_live_terminal", payload.to_string().as_bytes())?;
+    Ok(Some(e2e::envelope_to_relay_payload(&encrypted)))
+}
+
+fn relay_live_terminal_snapshot_payload(
+    binding: &BindingState,
+    snapshot: &v1::TerminalSnapshot,
+) -> Value {
+    json!({
+        "type": "daemon_response",
+        "bindingId": binding.binding_id,
+        "ok": true,
+        "data": terminal_snapshot_json(snapshot),
+    })
+}
+
+#[cfg(test)]
 fn relay_live_terminal_snapshot_json(
     to_device_id: &str,
     binding: &BindingState,
@@ -2161,16 +2346,21 @@ fn relay_live_terminal_snapshot_json(
     serde_json::to_string(&json!({
         "toDeviceId": to_device_id,
         "ephemeral": true,
-        "payload": {
-            "type": "daemon_response",
-            "bindingId": binding.binding_id,
-            "ok": true,
-            "data": terminal_snapshot_json(snapshot),
-        }
+        "payload": relay_live_terminal_snapshot_payload(binding, snapshot),
     }))
     .expect("relay live terminal snapshot should serialize")
 }
 
+fn relay_live_terminal_output_payload(binding: &BindingState, tab_id: &str, data: &[u8]) -> Value {
+    json!({
+        "type": "daemon_response",
+        "bindingId": binding.binding_id,
+        "ok": true,
+        "data": terminal_output_json(tab_id, data),
+    })
+}
+
+#[cfg(test)]
 fn relay_live_terminal_output_json(
     to_device_id: &str,
     binding: &BindingState,
@@ -2180,12 +2370,7 @@ fn relay_live_terminal_output_json(
     serde_json::to_string(&json!({
         "toDeviceId": to_device_id,
         "ephemeral": true,
-        "payload": {
-            "type": "daemon_response",
-            "bindingId": binding.binding_id,
-            "ok": true,
-            "data": terminal_output_json(tab_id, data),
-        }
+        "payload": relay_live_terminal_output_payload(binding, tab_id, data),
     }))
     .expect("relay live terminal output should serialize")
 }
@@ -2195,6 +2380,14 @@ fn terminal_output_json(tab_id: &str, data: &[u8]) -> Value {
         "tabId": tab_id,
         "bytesBase64": base64_encode(data),
     })
+}
+
+fn payload_type(payload: &Value) -> Option<String> {
+    payload
+        .as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn replay_max_bytes(requested: u32) -> usize {
@@ -2955,10 +3148,15 @@ mod tests {
         .active("phone_1".to_string(), None);
         session.set_binding(binding.clone());
         let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        let identity = DeviceIdentity::from_secret_key([7; 32]);
+        let mut e2e_session = None;
 
         let error = handle_relay_message(
             &runtime,
             &binding,
+            "phone_1",
+            &identity,
+            &mut e2e_session,
             WebSocketMessage::Text(r#"{"type":"error","error":"binding_revoked"}"#.into()),
         )
         .await
@@ -2971,6 +3169,148 @@ mod tests {
             session.binding.as_ref().map(|binding| binding.status),
             Some(BindingStatus::Revoked)
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn relay_handler_accepts_e2e_handshake_and_encrypted_control_request() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-e2e-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let daemon_identity = DeviceIdentity::from_secret_key([4; 32]);
+        let phone_identity = DeviceIdentity::from_secret_key([3; 32]);
+        let daemon_device_id = "daemon_1";
+        let phone_device_id = "phone_1";
+        let binding = BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            daemon_device_id.to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        )
+        .active(
+            phone_device_id.to_string(),
+            Some(phone_identity.public_key.clone()),
+        );
+        let binding = BindingState {
+            daemon_public_key: Some(daemon_identity.public_key.clone()),
+            ..binding
+        };
+        let mut session = MachineSession::new_default();
+        session.set_binding(binding.clone());
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        let mut e2e_session = None;
+        let phone_ephemeral = e2e::KeyPair::from_secret_bytes([9; 32]);
+        let start = e2e::sign_handshake_start(
+            &phone_identity
+                .secret_key_bytes()
+                .expect("phone secret should decode"),
+            v1::E2eHandshakeStart {
+                session_id: "e2e_test".to_string(),
+                sender_device_id: phone_device_id.to_string(),
+                recipient_device_id: daemon_device_id.to_string(),
+                sender_identity_public_key: decode_fixed_base64::<32>(&phone_identity.public_key)
+                    .expect("phone public key should decode")
+                    .to_vec(),
+                sender_ephemeral_public_key: phone_ephemeral.public_bytes().to_vec(),
+                transcript_signature: Vec::new(),
+                created_at: "2026-05-29T00:00:01.000Z".to_string(),
+            },
+        );
+        let handshake_message = json!({
+            "type": "message",
+            "message": {
+                "id": "relay_handshake",
+                "fromDeviceId": phone_device_id,
+                "payload": e2e::handshake_start_to_relay_payload(&start),
+            }
+        });
+
+        let finish_response = handle_relay_message(
+            &runtime,
+            &binding,
+            phone_device_id,
+            &daemon_identity,
+            &mut e2e_session,
+            WebSocketMessage::Text(handshake_message.to_string().into()),
+        )
+        .await
+        .expect("handshake should be accepted")
+        .expect("handshake should produce finish");
+        let finish_response: Value =
+            serde_json::from_str(&finish_response).expect("finish response should parse");
+        let finish_payload = finish_response["payload"].clone();
+        assert_eq!(finish_payload["type"], "e2e_handshake_finish");
+        let finish = e2e::handshake_finish_from_relay_payload(&finish_payload)
+            .expect("finish payload should decode");
+        e2e::verify_handshake_finish(
+            &start,
+            &finish,
+            &decode_fixed_base64::<32>(&daemon_identity.public_key)
+                .expect("daemon public key should decode"),
+        )
+        .expect("finish signature should verify");
+        let daemon_ephemeral: [u8; 32] = finish
+            .sender_ephemeral_public_key
+            .as_slice()
+            .try_into()
+            .expect("daemon e2e ephemeral key should be 32 bytes");
+        let mut phone_session = e2e::SessionKeys::from_x25519(
+            start.session_id.clone(),
+            phone_device_id.to_string(),
+            daemon_device_id.to_string(),
+            &phone_ephemeral,
+            daemon_ephemeral,
+            e2e::SessionRole::Phone,
+        )
+        .expect("phone e2e session should derive");
+        let request_payload = json!({
+            "type": "get_state",
+            "requestId": "request_1",
+        });
+        let encrypted_request = phone_session
+            .encrypt("get_state", request_payload.to_string().as_bytes())
+            .expect("request should encrypt");
+        let encrypted_message = json!({
+            "type": "message",
+            "message": {
+                "id": "relay_request",
+                "fromDeviceId": phone_device_id,
+                "payload": e2e::envelope_to_relay_payload(&encrypted_request),
+            }
+        });
+
+        let encrypted_response = handle_relay_message(
+            &runtime,
+            &binding,
+            phone_device_id,
+            &daemon_identity,
+            &mut e2e_session,
+            WebSocketMessage::Text(encrypted_message.to_string().into()),
+        )
+        .await
+        .expect("encrypted request should be accepted")
+        .expect("encrypted request should produce response");
+        assert!(!encrypted_response.contains("request_1"));
+        let encrypted_response: Value =
+            serde_json::from_str(&encrypted_response).expect("encrypted response should parse");
+        let encrypted_payload = encrypted_response["payload"].clone();
+        assert_eq!(encrypted_payload["type"], "e2e_envelope");
+        let response_envelope = e2e::envelope_from_relay_payload(&encrypted_payload)
+            .expect("response envelope should decode");
+        let plaintext = phone_session
+            .decrypt(&response_envelope)
+            .expect("response should decrypt");
+        let response: Value =
+            serde_json::from_slice(&plaintext).expect("decrypted response should parse");
+        assert_eq!(response["type"], "daemon_response");
+        assert_eq!(response["requestId"], "request_1");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["tabs"][0]["id"], "default");
         let _ = fs::remove_dir_all(&root);
     }
 

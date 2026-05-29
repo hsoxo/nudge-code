@@ -19,6 +19,14 @@ enum E2ESessionRole {
 struct E2EKeyPair {
     let privateKey: Curve25519.KeyAgreement.PrivateKey
 
+    static func generate() -> E2EKeyPair {
+        E2EKeyPair(privateKey: Curve25519.KeyAgreement.PrivateKey())
+    }
+
+    private init(privateKey: Curve25519.KeyAgreement.PrivateKey) {
+        self.privateKey = privateKey
+    }
+
     init(rawRepresentation: Data) throws {
         privateKey = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: rawRepresentation)
     }
@@ -177,6 +185,26 @@ struct E2ERelayPayload: Codable, Equatable {
         case ciphertextBase64
     }
 
+    init(
+        type: String,
+        sessionID: String,
+        senderDeviceID: String,
+        recipientDeviceID: String,
+        messageType: String,
+        sequence: String,
+        nonceBase64: String,
+        ciphertextBase64: String
+    ) {
+        self.type = type
+        self.sessionID = sessionID
+        self.senderDeviceID = senderDeviceID
+        self.recipientDeviceID = recipientDeviceID
+        self.messageType = messageType
+        self.sequence = sequence
+        self.nonceBase64 = nonceBase64
+        self.ciphertextBase64 = ciphertextBase64
+    }
+
     init(envelope: Nudge_V1_E2EEncryptedEnvelope) {
         type = "e2e_envelope"
         sessionID = envelope.sessionID
@@ -277,6 +305,24 @@ struct E2EHandshakeFinishRelayPayload: Codable, Equatable {
         case senderEphemeralPublicKeyBase64
         case transcriptSignatureBase64
         case acceptedAt
+    }
+
+    init(
+        type: String,
+        sessionID: String,
+        senderDeviceID: String,
+        recipientDeviceID: String,
+        senderEphemeralPublicKeyBase64: String,
+        transcriptSignatureBase64: String,
+        acceptedAt: String
+    ) {
+        self.type = type
+        self.sessionID = sessionID
+        self.senderDeviceID = senderDeviceID
+        self.recipientDeviceID = recipientDeviceID
+        self.senderEphemeralPublicKeyBase64 = senderEphemeralPublicKeyBase64
+        self.transcriptSignatureBase64 = transcriptSignatureBase64
+        self.acceptedAt = acceptedAt
     }
 
     init(finish: Nudge_V1_E2EHandshakeFinish) {
