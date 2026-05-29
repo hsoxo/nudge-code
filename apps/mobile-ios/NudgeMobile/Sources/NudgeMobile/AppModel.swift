@@ -9,9 +9,9 @@ final class AppModel {
     var machines: [Machine]
     @ObservationIgnored private var tabsByMachineStorage: [String: [TerminalTab]]
     private var tabsByMachineRevision = 0
+    @ObservationIgnored
     var tabsByMachine: [String: [TerminalTab]] {
         get {
-            _ = tabsByMachineRevision
             return tabsByMachineStorage
         }
         set {
@@ -94,19 +94,21 @@ final class AppModel {
     }
 
     var selectedTabs: [TerminalTab] {
+        _ = tabsByMachineRevision
         guard let selectedMachineID else {
             return []
         }
-        return tabsByMachine[selectedMachineID] ?? []
+        return tabsByMachineStorage[selectedMachineID] ?? []
     }
 
     var selectedTab: TerminalTab? {
-        selectedTabs.first { $0.id == selectedTabID } ?? selectedTabs.first
+        let tabs = selectedTabs
+        return tabs.first { $0.id == selectedTabID } ?? tabs.first
     }
 
     func selectMachine(_ machine: Machine) {
         selectedMachineID = machine.id
-        selectedTabID = tabsByMachine[machine.id]?.first?.id
+        selectedTabID = tabsByMachineStorage[machine.id]?.first?.id
         persistStableState()
     }
 
@@ -479,7 +481,7 @@ final class AppModel {
 
     private func refreshTabSnapshot(machineID: String, tabID: String) async {
         guard let machine = machines.first(where: { $0.id == machineID }),
-              tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID }) != nil
+              tabsByMachineStorage[machineID]?.firstIndex(where: { $0.id == tabID }) != nil
         else {
             return
         }
