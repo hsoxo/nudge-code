@@ -59,7 +59,8 @@ type AuditEventType =
   | 'message_routed'
   | 'message_queued'
   | 'message_poll'
-  | 'message_rejected';
+  | 'message_rejected'
+  | 'http_message_endpoint_rejected';
 
 type RateLimitResult =
   | { ok: true }
@@ -111,6 +112,7 @@ const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
 const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
 const requireWebSocketChallenge = process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
 const requireE2EPayload = process.env.NUDGE_RELAY_REQUIRE_E2E_PAYLOAD === '1';
+const disableHttpMessageEndpoints = process.env.NUDGE_RELAY_DISABLE_HTTP_MESSAGES === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
 const relayAuditPath = process.env.NUDGE_RELAY_AUDIT_PATH;
 const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
@@ -402,6 +404,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
 
   if (method === 'POST' && url.pathname === '/api/messages/send') {
+    if (disableHttpMessageEndpoints) {
+      audit('http_message_endpoint_rejected', { endpoint: 'send' });
+      writeJson(response, 404, { error: 'not_found' });
+      return;
+    }
     const body = await readJson<{
       bindingId?: string;
       fromDeviceId?: string;
@@ -470,6 +477,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
 
   if (method === 'GET' && url.pathname === '/api/messages/poll') {
+    if (disableHttpMessageEndpoints) {
+      audit('http_message_endpoint_rejected', { endpoint: 'poll' });
+      writeJson(response, 404, { error: 'not_found' });
+      return;
+    }
     const deviceId = url.searchParams.get('deviceId') ?? undefined;
     if (!deviceId || !devices.has(deviceId)) {
       writeJson(response, 404, { error: 'device_not_registered' });
