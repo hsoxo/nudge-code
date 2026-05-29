@@ -15,9 +15,16 @@ xcodegen generate --spec project.yml
 xcodebuild -project NudgeMobile.xcodeproj -scheme NudgeMobile -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
+Shared protocol types are generated from the repo protobuf schema:
+
+```sh
+../../scripts/generate-swift-proto.sh
+```
+
 Current scaffold:
 
 - SwiftUI app shell.
+- SwiftProtobuf-generated protocol types from `proto/nudge.proto`.
 - machine list and tab strip.
 - terminal preview rendered through `WKWebView`, ready to replace with xterm.js assets.
 - phone/computer width segmented control.

@@ -9,11 +9,13 @@
 /* Begin PBXBuildFile section */
 		0F7C0B5D76DD96DFAEB8D7C7 /* BindingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CABE48C4A03FA5502C2F6BA /* BindingView.swift */; };
 		3298BA15E16197662BBB6001 /* RelayClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89B5F92116FB1677274807C0 /* RelayClientTests.swift */; };
+		426D7DA0EE272E7339055A1E /* GeneratedProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */; };
 		431C277655C016FB209A197B /* ShortcutKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7527BD8E3C859A4111FD7906 /* ShortcutKeyboardView.swift */; };
 		47EF55C59B330A80EA627F65 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07C32F7596AC4204FE7DB41B /* AppModel.swift */; };
 		4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8105D658D50E1B394E3AB00A /* RootView.swift */; };
 		4EB286295CD8654DB306ED98 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70813C9517C8F1A1F13E1C14 /* Models.swift */; };
 		54FF5080CE2C76FF5C623369 /* QRCodeScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */; };
+		5DBB4D10326790A9A5FF0855 /* nudge.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5021D590E9A47BEB56AD3F59 /* nudge.pb.swift */; };
 		612BE89E5B908A40931AA2B8 /* PhoneIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC367395E42690D0611FD4F /* PhoneIdentity.swift */; };
 		67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */; };
 		6FD47E14D5279F536578AE24 /* TerminalWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */; };
@@ -21,6 +23,7 @@
 		9E24FCC57E5E2A9AA8445119 /* PhoneIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */; };
 		A61EC7D01A6A54CD5C25BD4D /* KeyboardProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 477437F016264FB106BE4DD6 /* KeyboardProfile.swift */; };
 		C4B0DFA4033C2778AA93F38E /* NudgeMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */; };
+		D4A97771F116110C00BD24ED /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 790C864167909B16544404A0 /* SwiftProtobuf */; };
 		D6067C999B0ABAA0140521C7 /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */; };
 		DE490C12270A810549FF7DD5 /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6981535CC9741519F80F820 /* QRCodeScannerView.swift */; };
 		EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5176396EFFD6E84B7038953C /* BindingDraftTests.swift */; };
@@ -43,6 +46,8 @@
 		28E67E144FAD016DC3DC7F64 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingClaimTests.swift; sourceTree = "<group>"; };
 		477437F016264FB106BE4DD6 /* KeyboardProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardProfile.swift; sourceTree = "<group>"; };
+		4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedProtocolTests.swift; sourceTree = "<group>"; };
+		5021D590E9A47BEB56AD3F59 /* nudge.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = nudge.pb.swift; sourceTree = "<group>"; };
 		5176396EFFD6E84B7038953C /* BindingDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingDraftTests.swift; sourceTree = "<group>"; };
 		70813C9517C8F1A1F13E1C14 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardProfileTests.swift; sourceTree = "<group>"; };
@@ -59,6 +64,17 @@
 		E0F0A0C19FD6FA6D396A5323 /* NudgeMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = NudgeMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFrameworksBuildPhase section */
+		125C7D13402F2AAC071A571B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D4A97771F116110C00BD24ED /* SwiftProtobuf in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
 /* Begin PBXGroup section */
 		0742BF06248724B417970588 /* Products */ = {
 			isa = PBXGroup;
@@ -74,6 +90,7 @@
 			children = (
 				2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */,
 				5176396EFFD6E84B7038953C /* BindingDraftTests.swift */,
+				4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */,
 				70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */,
 				72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */,
 				B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */,
@@ -83,9 +100,18 @@
 			path = NudgeMobile/Tests/NudgeMobileTests;
 			sourceTree = "<group>";
 		};
+		2ACA06989E26E0DAECD25AB2 /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				5021D590E9A47BEB56AD3F59 /* nudge.pb.swift */,
+			);
+			path = Generated;
+			sourceTree = "<group>";
+		};
 		934BD89E0F450409E12C989B = {
 			isa = PBXGroup;
 			children = (
+				2ACA06989E26E0DAECD25AB2 /* Generated */,
 				AE2C3D0940BD0BB597A41FC9 /* NudgeMobile */,
 				0CE73D6E33CB4D348D7D09CB /* NudgeMobileTests */,
 				0742BF06248724B417970588 /* Products */,
@@ -138,6 +164,7 @@
 			buildConfigurationList = 5BEDDB4ACAB4E0801507C84F /* Build configuration list for PBXNativeTarget "NudgeMobile" */;
 			buildPhases = (
 				EF22A09C5DBB60F4BA3A2691 /* Sources */,
+				125C7D13402F2AAC071A571B /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -145,6 +172,7 @@
 			);
 			name = NudgeMobile;
 			packageProductDependencies = (
+				790C864167909B16544404A0 /* SwiftProtobuf */,
 			);
 			productName = NudgeMobile;
 			productReference = E0F0A0C19FD6FA6D396A5323 /* NudgeMobile.app */;
@@ -170,6 +198,9 @@
 			);
 			mainGroup = 934BD89E0F450409E12C989B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A2B6333EAEDD5A420EB035C9 /* XCRemoteSwiftPackageReference "swift-protobuf" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0742BF06248724B417970588 /* Products */;
 			projectDirPath = "";
@@ -188,6 +219,7 @@
 			files = (
 				820FDE26D6F3F8D74FF189EE /* BindingClaimTests.swift in Sources */,
 				EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */,
+				426D7DA0EE272E7339055A1E /* GeneratedProtocolTests.swift in Sources */,
 				67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */,
 				9E24FCC57E5E2A9AA8445119 /* PhoneIdentityTests.swift in Sources */,
 				54FF5080CE2C76FF5C623369 /* QRCodeScannerTests.swift in Sources */,
@@ -210,6 +242,7 @@
 				4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */,
 				431C277655C016FB209A197B /* ShortcutKeyboardView.swift in Sources */,
 				6FD47E14D5279F536578AE24 /* TerminalWorkspaceView.swift in Sources */,
+				5DBB4D10326790A9A5FF0855 /* nudge.pb.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -444,6 +477,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A2B6333EAEDD5A420EB035C9 /* XCRemoteSwiftPackageReference "swift-protobuf" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-protobuf.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.38.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		790C864167909B16544404A0 /* SwiftProtobuf */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A2B6333EAEDD5A420EB035C9 /* XCRemoteSwiftPackageReference "swift-protobuf" */;
+			productName = SwiftProtobuf;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 72F48C90F7E1500D9EA943AB /* Project object */;
 }
