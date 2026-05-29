@@ -9,6 +9,10 @@ struct TerminalWorkspaceView: View {
         VStack(spacing: 0) {
             TabStripView()
             Divider()
+            if model.selectedMachine?.lastSeenText == "relay session reconnecting" {
+                RelayReconnectBanner()
+                Divider()
+            }
             if let tab = model.selectedTab {
                 TerminalView(tab: tab)
                 Divider()
@@ -37,6 +41,21 @@ struct TerminalWorkspaceView: View {
             await model.refreshSelectedMachineBinding()
             await model.syncSelectedMachineSession()
         }
+    }
+}
+
+struct RelayReconnectBanner: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+            Text("Reconnecting to relay")
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
     }
 }
 

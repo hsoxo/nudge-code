@@ -13,6 +13,7 @@ final class AppModel {
     var phoneProfile: TerminalProfile
     var commandComposer = ""
     private let relayClient: any RelayClient
+    private let sessionReconnectDelayNanoseconds: UInt64
     private var relaySession: (any RelaySession)?
     private var relaySessionMachineID: String?
     private var computerProfilesByTabKey: [String: TerminalProfile] = [:]
@@ -24,7 +25,8 @@ final class AppModel {
         selectedTabID: String? = nil,
         bindingDraft: BindingDraft? = nil,
         phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48),
-        relayClient: any RelayClient = HTTPRelayClient()
+        relayClient: any RelayClient = HTTPRelayClient(),
+        sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
     ) {
         let initialMachineID = selectedMachineID ?? machines.first?.id
         let initialTabID = selectedTabID ?? tabsByMachine[initialMachineID ?? ""]?.first?.id
@@ -36,6 +38,7 @@ final class AppModel {
         self.bindingDraft = bindingDraft
         self.phoneProfile = phoneProfile
         self.relayClient = relayClient
+        self.sessionReconnectDelayNanoseconds = sessionReconnectDelayNanoseconds
     }
 
     var selectedMachine: Machine? {
@@ -138,35 +141,40 @@ final class AppModel {
     }
 
     func syncSelectedMachineSession() async {
-        guard let machineID = selectedMachineID,
-              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
-              machines[machineIndex].binding?.status == .active
+        guard let machineID = selectedMachineID
         else {
             closeRelaySession()
             return
         }
         closeRelaySession()
-        do {
-            let session = try await relayClient.openSession(machine: machines[machineIndex])
-            relaySession = session
-            relaySessionMachineID = machineID
-            machines[machineIndex].connectionState = .online
-            machines[machineIndex].lastSeenText = "relay session connected"
-            try await session.setPhoneProfile(phoneProfile)
-            try await session.requestSessionState()
-            while !Task.isCancelled {
-                let event = try await session.receiveEvent()
-                try await applyRelaySessionEvent(event, machineID: machineID, session: session)
+        while !Task.isCancelled {
+            guard let machineIndex = activeSelectedMachineIndex(machineID: machineID) else {
+                closeRelaySession()
+                return
             }
-        } catch is CancellationError {
-            closeRelaySession()
-        } catch {
-            closeRelaySession()
-            if let index = machines.firstIndex(where: { $0.id == machineID }) {
-                machines[index].connectionState = .offline
-                machines[index].lastSeenText = "relay session disconnected"
+            do {
+                try await runRelaySession(machineID: machineID, machine: machines[machineIndex])
+            } catch is CancellationError {
+                closeRelaySession()
+                return
+            } catch {
+                closeRelaySession()
+                guard activeSelectedMachineIndex(machineID: machineID) != nil else {
+                    return
+                }
+                markMachine(machineID: machineID, state: .connecting, text: "relay session reconnecting")
+                do {
+                    try await Task.sleep(nanoseconds: sessionReconnectDelayNanoseconds)
+                } catch is CancellationError {
+                    closeRelaySession()
+                    return
+                } catch {
+                    closeRelaySession()
+                    return
+                }
             }
         }
+        closeRelaySession()
     }
 
     func sendSelectedTabInput(_ text: String, enter: Bool) async {
@@ -286,6 +294,38 @@ final class AppModel {
         relaySession?.close()
         relaySession = nil
         relaySessionMachineID = nil
+    }
+
+    private func activeSelectedMachineIndex(machineID: String) -> Int? {
+        guard selectedMachineID == machineID,
+              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              machines[machineIndex].binding?.status == .active
+        else {
+            return nil
+        }
+        return machineIndex
+    }
+
+    private func markMachine(machineID: String, state: ConnectionState, text: String) {
+        guard let index = machines.firstIndex(where: { $0.id == machineID }) else {
+            return
+        }
+        machines[index].connectionState = state
+        machines[index].lastSeenText = text
+    }
+
+    private func runRelaySession(machineID: String, machine: Machine) async throws {
+        let session = try await relayClient.openSession(machine: machine)
+        relaySession = session
+        relaySessionMachineID = machineID
+        markMachine(machineID: machineID, state: .online, text: "relay session connected")
+        try await session.setPhoneProfile(phoneProfile)
+        try await session.requestSessionState()
+        while !Task.isCancelled {
+            let event = try await session.receiveEvent()
+            try await applyRelaySessionEvent(event, machineID: machineID, session: session)
+        }
+        throw CancellationError()
     }
 
     private func applyRelaySessionEvent(
