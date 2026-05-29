@@ -113,11 +113,21 @@ final class AppModel {
         }
         do {
             try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
+            await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
         } catch {
             if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
                 machines[machineIndex].lastSeenText = "Unable to send input"
             }
         }
+    }
+
+    func refreshSelectedTabSnapshot() async {
+        guard let machine = selectedMachine,
+              let tab = selectedTab
+        else {
+            return
+        }
+        await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
     }
 
     func parsePairingURL(_ value: String) -> Bool {
@@ -186,10 +196,29 @@ final class AppModel {
 
     private func attachMachineSession(at index: Int) async throws {
         let state = try await relayClient.fetchSessionState(machine: machines[index])
-        tabsByMachine[machines[index].id] = state.tabs
+        let machineID = machines[index].id
+        tabsByMachine[machineID] = state.tabs
         selectedTabID = state.tabs.first?.id
         machines[index].connectionState = .online
         machines[index].lastSeenText = "relay session attached"
+        if let tabID = state.tabs.first?.id {
+            await refreshTabSnapshot(machineID: machineID, tabID: tabID)
+        }
+    }
+
+    private func refreshTabSnapshot(machineID: String, tabID: String) async {
+        guard let machine = machines.first(where: { $0.id == machineID }),
+              let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID })
+        else {
+            return
+        }
+        do {
+            let snapshot = try await relayClient.fetchTerminalSnapshot(machine: machine, tabID: tabID)
+            tabsByMachine[machineID]?[tabIndex].profile = snapshot.profile
+            tabsByMachine[machineID]?[tabIndex].previewText = snapshot.text
+        } catch {
+            tabsByMachine[machineID]?[tabIndex].previewText = "Unable to refresh terminal snapshot"
+        }
     }
 
     static func preview() -> AppModel {

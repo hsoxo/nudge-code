@@ -123,7 +123,14 @@ struct BindingClaimTests {
             agentStatus: AgentStatus(kind: .codex, state: .waitingForInput, confidence: 0.72, source: "screen"),
             previewText: "Relay session attached\nWaiting for terminal snapshot..."
         )
-        let client = RecordingRelayClient(sessionState: RemoteSessionState(tabs: [remoteTab]))
+        let client = RecordingRelayClient(
+            sessionState: RemoteSessionState(tabs: [remoteTab]),
+            snapshots: ["default": TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 26, cols: 92),
+                text: "Codex is ready"
+            )]
+        )
         let model = AppModel(
             machines: [machine],
             tabsByMachine: [machine.id: []],
@@ -134,8 +141,11 @@ struct BindingClaimTests {
         await model.attachSelectedMachineSession()
 
         #expect(client.sessionRequests == [machine])
+        #expect(client.snapshotRequests.map(\.machine.id) == [machine.id])
+        #expect(client.snapshotRequests.map(\.tabID) == ["default"])
         #expect(model.selectedTabID == "default")
-        #expect(model.tabsByMachine[machine.id] == [remoteTab])
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "Codex is ready")
+        #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 26, cols: 92))
         #expect(model.machines.first?.lastSeenText == "relay session attached")
     }
 
@@ -163,7 +173,11 @@ struct BindingClaimTests {
             agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
             previewText: "$ "
         )
-        let client = RecordingRelayClient()
+        let client = RecordingRelayClient(snapshots: ["default": TerminalSnapshot(
+            tabID: "default",
+            profile: TerminalProfile(rows: 32, cols: 48),
+            text: "$ echo hi\nhi"
+        )])
         let model = AppModel(
             machines: [machine],
             tabsByMachine: [machine.id: [tab]],
@@ -180,6 +194,52 @@ struct BindingClaimTests {
             text: "echo hi",
             enter: true
         )])
+        #expect(client.snapshotRequests == [TerminalSnapshotRequest(machine: machine, tabID: tab.id)])
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ echo hi\nhi")
+    }
+
+    @Test func appModelRefreshesSelectedTabSnapshot() async throws {
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://nudgecode.dev")!,
+            connectionState: .online,
+            lastSeenText: "relay session attached",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .active,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let client = RecordingRelayClient(snapshots: ["default": TerminalSnapshot(
+            tabID: "default",
+            profile: TerminalProfile(rows: 24, cols: 80),
+            text: "$ date"
+        )])
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.refreshSelectedTabSnapshot()
+
+        #expect(client.snapshotRequests == [TerminalSnapshotRequest(machine: machine, tabID: tab.id)])
+        #expect(model.tabsByMachine[machine.id]?.first?.profile == TerminalProfile(rows: 24, cols: 80))
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ date")
     }
 }
 
@@ -200,13 +260,20 @@ private struct TerminalInputRequest: Equatable {
     var enter: Bool
 }
 
+private struct TerminalSnapshotRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+}
+
 private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var claims: [RelayClaim] = []
     var statusRequests: [BindingStatusRequest] = []
     var sessionRequests: [Machine] = []
     var inputRequests: [TerminalInputRequest] = []
+    var snapshotRequests: [TerminalSnapshotRequest] = []
     var statusClaim: BindingClaim
     var sessionState: RemoteSessionState
+    var snapshots: [String: TerminalSnapshot]
     var error: Error?
 
     init(
@@ -218,10 +285,12 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
             expiresAt: "2026-05-29T00:00:00Z"
         ),
         sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
+        snapshots: [String: TerminalSnapshot] = [:],
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
         self.sessionState = sessionState
+        self.snapshots = snapshots
         self.error = error
     }
 
@@ -253,6 +322,18 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         sessionRequests.append(machine)
         return sessionState
+    }
+
+    func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot {
+        if let error {
+            throw error
+        }
+        snapshotRequests.append(TerminalSnapshotRequest(machine: machine, tabID: tabID))
+        return snapshots[tabID] ?? TerminalSnapshot(
+            tabID: tabID,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            text: "snapshot unavailable"
+        )
     }
 
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws {

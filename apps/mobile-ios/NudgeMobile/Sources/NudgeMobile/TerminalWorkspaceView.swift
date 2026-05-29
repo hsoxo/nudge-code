@@ -21,6 +21,18 @@ struct TerminalWorkspaceView: View {
         }
         .navigationTitle(model.selectedMachine?.name ?? "Nudge")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task {
+                        await model.refreshSelectedTabSnapshot()
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .accessibilityLabel("Refresh terminal")
+            }
+        }
         .task(id: model.selectedMachineID) {
             await model.refreshSelectedMachineBinding()
             await model.attachSelectedMachineSession()

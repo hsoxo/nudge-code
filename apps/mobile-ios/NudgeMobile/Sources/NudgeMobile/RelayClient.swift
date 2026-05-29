@@ -4,6 +4,7 @@ protocol RelayClient: Sendable {
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
     func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim
     func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
+    func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
     func connect(machine: Machine) async throws
 }
@@ -55,6 +56,23 @@ struct HTTPRelayClient: RelayClient {
             throw RelayClientError.invalidWebSocketMessage
         }
         return try data.toRemoteSessionState()
+    }
+
+    func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelayTerminalSnapshotPayload(requestId: requestID, tabId: tabID),
+            requestID: requestID
+        )
+        guard let snapshot = payload.data?.snapshot else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return TerminalSnapshot(
+            tabID: snapshot.tabId,
+            profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
+            text: snapshot.text
+        )
     }
 
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws {
@@ -208,6 +226,12 @@ struct RemoteSessionState: Equatable, Sendable {
     var tabs: [TerminalTab]
 }
 
+struct TerminalSnapshot: Equatable, Sendable {
+    var tabID: String
+    var profile: TerminalProfile
+    var text: String
+}
+
 protocol RelayWebSocketTransport: Sendable {
     func sendString(_ value: String) async throws
     func receiveString() async throws -> String
@@ -295,6 +319,12 @@ private struct RelayGetStatePayload: Encodable {
     var requestId: String
 }
 
+private struct RelayTerminalSnapshotPayload: Encodable {
+    let type = "terminal_snapshot"
+    var requestId: String
+    var tabId: String
+}
+
 private struct RelayTerminalInputPayload: Encodable {
     let type = "terminal_input"
     var requestId: String
@@ -319,17 +349,35 @@ private struct RelayDaemonPayload: Decodable {
     var type: String
     var requestId: String?
     var ok: Bool
-    var data: RelaySessionStateResponse?
+    var data: RelayDaemonDataResponse?
 }
 
-private struct RelaySessionStateResponse: Decodable {
+private struct RelayDaemonDataResponse: Decodable {
     var tabs: [RelayTabResponse]?
+    var tabId: String?
+    var rows: Int?
+    var cols: Int?
+    var text: String?
     var error: String?
 
     func toRemoteSessionState() throws -> RemoteSessionState {
         let tabs = try (tabs ?? []).map { try $0.toTerminalTab() }
         return RemoteSessionState(tabs: tabs)
     }
+
+    var snapshot: RelayTerminalSnapshotResponse? {
+        guard let tabId, let rows, let cols, let text else {
+            return nil
+        }
+        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text)
+    }
+}
+
+private struct RelayTerminalSnapshotResponse: Decodable {
+    var tabId: String
+    var rows: Int
+    var cols: Int
+    var text: String
 }
 
 private struct RelayTabResponse: Decodable {

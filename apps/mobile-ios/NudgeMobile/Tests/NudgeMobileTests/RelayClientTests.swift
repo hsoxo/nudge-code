@@ -132,6 +132,34 @@ struct RelayClientTests {
         #expect(socket.closed)
     }
 
+    @Test func fetchTerminalSnapshotRequestsSelectedTabSnapshot() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-snapshot","ok":true,"data":{"tabId":"default","rows":24,"cols":80,"text":"$ echo hi\nhi"}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "ios-snapshot" }
+        )
+
+        let snapshot = try await client.fetchTerminalSnapshot(machine: activeMachine, tabID: "default")
+
+        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""type":"terminal_snapshot""#))
+        #expect(socket.sent[0].contains(#""requestId":"ios-snapshot""#))
+        #expect(socket.sent[0].contains(#""tabId":"default""#))
+        #expect(snapshot == TerminalSnapshot(
+            tabID: "default",
+            profile: TerminalProfile(rows: 24, cols: 80),
+            text: "$ echo hi\nhi"
+        ))
+        #expect(socket.closed)
+    }
+
     private var activeMachine: Machine {
         Machine(
             id: "mac",
