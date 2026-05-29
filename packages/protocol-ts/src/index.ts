@@ -10,11 +10,15 @@ export interface Tab {
   id: string;
   title: string;
   status: 'running' | 'exited' | 'needs_attention' | 'needs_restart';
+  widthMode: 'computer' | 'phone';
+  rows: number;
+  cols: number;
 }
 
 export interface SessionState {
   tabs: Tab[];
   entitlement: Entitlement;
+  phoneProfile?: PhoneProfile;
 }
 
 export interface DaemonStatus {
@@ -60,6 +64,23 @@ export interface TerminalSnapshot {
   cols: number;
   text: string;
   formatted: Uint8Array;
+}
+
+export interface PhoneProfile {
+  rows: number;
+  cols: number;
+}
+
+export interface SetPhoneProfile {
+  rows: number;
+  cols: number;
+}
+
+export interface SetWidthMode {
+  tabId: string;
+  mode: 'computer' | 'phone';
+  computerRows: number;
+  computerCols: number;
 }
 
 export interface CreateTab {

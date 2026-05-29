@@ -32,6 +32,8 @@ pub struct MachineSession {
     pub id: String,
     pub tabs: Vec<TerminalTab>,
     pub entitlement: Entitlement,
+    #[serde(default)]
+    pub phone_profile: Option<PhoneProfile>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -41,6 +43,12 @@ pub struct TerminalTab {
     pub id: String,
     pub title: String,
     pub status: TabStatus,
+    #[serde(default)]
+    pub width_mode: WidthMode,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
     pub created_at: String,
     pub last_activity_at: String,
 }
@@ -52,6 +60,26 @@ pub enum TabStatus {
     Exited,
     NeedsAttention,
     NeedsRestart,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WidthMode {
+    Computer,
+    Phone,
+}
+
+impl Default for WidthMode {
+    fn default() -> Self {
+        Self::Computer
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneProfile {
+    pub rows: u16,
+    pub cols: u16,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +98,10 @@ pub enum SessionError {
     TabNotFound { tab_id: String },
     #[error("cannot close the last tab in the session")]
     CannotCloseLastTab,
+    #[error("phone profile is required before switching a tab to phone width")]
+    MissingPhoneProfile,
+    #[error("unsupported width mode {mode}")]
+    UnsupportedWidthMode { mode: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +182,7 @@ impl MachineSession {
             id: "default".to_string(),
             tabs: vec![TerminalTab::new("default".to_string(), "shell".to_string())],
             entitlement: Entitlement::free(),
+            phone_profile: None,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -227,10 +260,54 @@ impl MachineSession {
         Ok(())
     }
 
+    pub fn set_phone_profile(&mut self, rows: u16, cols: u16) {
+        self.phone_profile = Some(PhoneProfile {
+            rows,
+            cols,
+            updated_at: now_string(),
+        });
+        self.updated_at = now_string();
+    }
+
+    pub fn set_width_mode(
+        &mut self,
+        tab_id: &str,
+        mode: WidthMode,
+        computer_size: TerminalSize,
+    ) -> std::result::Result<TerminalSize, SessionError> {
+        let target_size = match mode {
+            WidthMode::Computer => computer_size,
+            WidthMode::Phone => {
+                let phone_profile = self
+                    .phone_profile
+                    .as_ref()
+                    .ok_or(SessionError::MissingPhoneProfile)?;
+                TerminalSize {
+                    rows: phone_profile.rows,
+                    cols: phone_profile.cols,
+                }
+            }
+        };
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| SessionError::TabNotFound {
+                tab_id: tab_id.to_string(),
+            })?;
+        tab.width_mode = mode;
+        tab.rows = target_size.rows;
+        tab.cols = target_size.cols;
+        tab.last_activity_at = now_string();
+        self.updated_at = now_string();
+        Ok(target_size)
+    }
+
     pub fn to_proto(&self) -> v1::SessionState {
         v1::SessionState {
             tabs: self.tabs.iter().map(TerminalTab::to_proto).collect(),
             entitlement: Some(self.entitlement.to_proto()),
+            phone_profile: self.phone_profile.as_ref().map(PhoneProfile::to_proto),
         }
     }
 }
@@ -242,6 +319,9 @@ impl TerminalTab {
             id,
             title,
             status: TabStatus::Running,
+            width_mode: WidthMode::Computer,
+            rows: 24,
+            cols: 80,
             created_at: now.clone(),
             last_activity_at: now,
         }
@@ -252,6 +332,9 @@ impl TerminalTab {
             id: self.id.clone(),
             title: self.title.clone(),
             status: self.status.as_str().to_string(),
+            width_mode: self.width_mode.as_str().to_string(),
+            rows: self.rows as u32,
+            cols: self.cols as u32,
         }
     }
 }
@@ -263,6 +346,38 @@ impl TabStatus {
             Self::Exited => "exited",
             Self::NeedsAttention => "needs_attention",
             Self::NeedsRestart => "needs_restart",
+        }
+    }
+}
+
+impl WidthMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Computer => "computer",
+            Self::Phone => "phone",
+        }
+    }
+}
+
+impl std::str::FromStr for WidthMode {
+    type Err = SessionError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "computer" => Ok(Self::Computer),
+            "phone" => Ok(Self::Phone),
+            other => Err(SessionError::UnsupportedWidthMode {
+                mode: other.to_string(),
+            }),
+        }
+    }
+}
+
+impl PhoneProfile {
+    pub fn to_proto(&self) -> v1::PhoneProfile {
+        v1::PhoneProfile {
+            rows: self.rows as u32,
+            cols: self.cols as u32,
         }
     }
 }
@@ -530,6 +645,31 @@ impl DaemonRuntime {
         })
     }
 
+    async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.set_phone_profile(rows, cols);
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
+    async fn set_width_mode(
+        &self,
+        tab_id: &str,
+        mode: WidthMode,
+        computer_size: TerminalSize,
+    ) -> Result<v1::SessionState> {
+        let target_size = {
+            let mut session = self.session.lock().await;
+            let target_size = session.set_width_mode(tab_id, mode, computer_size)?;
+            self.state_store.save(&session)?;
+            target_size
+        };
+        self.resize_tab(tab_id, target_size).await?;
+        Ok(self.session_state().await)
+    }
+
     async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
         let ptys = self.ptys.lock().await;
         let pty = ptys
@@ -733,6 +873,32 @@ async fn handle_payload(
                 runtime.terminal_snapshot(&request.tab_id).await?,
             ))
         }
+        Some(v1::envelope::Payload::SetPhoneProfile(request)) => {
+            let rows = u16::try_from(request.rows).context("rows do not fit in u16")?;
+            let cols = u16::try_from(request.cols).context("cols do not fit in u16")?;
+            Some(v1::envelope::Payload::SessionState(
+                runtime.set_phone_profile(rows, cols).await?,
+            ))
+        }
+        Some(v1::envelope::Payload::SetWidthMode(request)) => {
+            let computer_rows =
+                u16::try_from(request.computer_rows).context("computer_rows do not fit in u16")?;
+            let computer_cols =
+                u16::try_from(request.computer_cols).context("computer_cols do not fit in u16")?;
+            let mode = request.mode.parse::<WidthMode>()?;
+            Some(v1::envelope::Payload::SessionState(
+                runtime
+                    .set_width_mode(
+                        &request.tab_id,
+                        mode,
+                        TerminalSize {
+                            rows: computer_rows,
+                            cols: computer_cols,
+                        },
+                    )
+                    .await?,
+            ))
+        }
         Some(v1::envelope::Payload::CreateTab(request)) => Some(
             v1::envelope::Payload::SessionState(runtime.create_tab(request.title).await?),
         ),
@@ -848,6 +1014,14 @@ fn now_string() -> String {
         .to_string()
 }
 
+fn default_rows() -> u16 {
+    24
+}
+
+fn default_cols() -> u16 {
+    80
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,5 +1077,52 @@ mod tests {
             .mark_tab_running("default")
             .expect("default tab should exist");
         assert!(matches!(session.tabs[0].status, TabStatus::Running));
+    }
+
+    #[test]
+    fn phone_width_requires_profile() {
+        let mut session = MachineSession::new_default();
+        let error = session
+            .set_width_mode(
+                "default",
+                WidthMode::Phone,
+                TerminalSize { rows: 24, cols: 80 },
+            )
+            .expect_err("phone profile should be required");
+        assert!(matches!(error, SessionError::MissingPhoneProfile));
+    }
+
+    #[test]
+    fn width_mode_updates_tab_size() {
+        let mut session = MachineSession::new_default();
+        session.set_phone_profile(30, 90);
+        let size = session
+            .set_width_mode(
+                "default",
+                WidthMode::Phone,
+                TerminalSize { rows: 24, cols: 80 },
+            )
+            .expect("phone profile exists");
+        assert_eq!(size.rows, 30);
+        assert_eq!(size.cols, 90);
+        assert_eq!(session.tabs[0].width_mode, WidthMode::Phone);
+        assert_eq!(session.tabs[0].rows, 30);
+        assert_eq!(session.tabs[0].cols, 90);
+
+        let size = session
+            .set_width_mode(
+                "default",
+                WidthMode::Computer,
+                TerminalSize {
+                    rows: 40,
+                    cols: 120,
+                },
+            )
+            .expect("computer width should always be valid");
+        assert_eq!(size.rows, 40);
+        assert_eq!(size.cols, 120);
+        assert_eq!(session.tabs[0].width_mode, WidthMode::Computer);
+        assert_eq!(session.tabs[0].rows, 40);
+        assert_eq!(session.tabs[0].cols, 120);
     }
 }

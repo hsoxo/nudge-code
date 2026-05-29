@@ -24,6 +24,8 @@ message Envelope {
     RestartTab restart_tab = 26;
     TerminalSnapshotRequest terminal_snapshot_request = 27;
     TerminalSnapshot terminal_snapshot = 28;
+    SetPhoneProfile set_phone_profile = 29;
+    SetWidthMode set_width_mode = 30;
   }
 }
 
@@ -104,21 +106,42 @@ message TerminalSnapshot {
   bytes formatted = 5;
 }
 
+message SetPhoneProfile {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message SetWidthMode {
+  string tab_id = 1;
+  string mode = 2;
+  uint32 computer_rows = 3;
+  uint32 computer_cols = 4;
+}
+
 message SessionState {
   repeated Tab tabs = 1;
   Entitlement entitlement = 2;
+  PhoneProfile phone_profile = 3;
 }
 
 message Tab {
   string id = 1;
   string title = 2;
   string status = 3;
+  string width_mode = 4;
+  uint32 rows = 5;
+  uint32 cols = 6;
 }
 
 message Entitlement {
   string plan = 1;
   uint32 max_bound_computers = 2;
   uint32 max_tabs_per_computer = 3;
+}
+
+message PhoneProfile {
+  uint32 rows = 1;
+  uint32 cols = 2;
 }
 
 message Error {

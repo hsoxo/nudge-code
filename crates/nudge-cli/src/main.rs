@@ -86,6 +86,31 @@ enum Command {
         #[arg(long, default_value = "default")]
         tab_id: String,
     },
+    /// Save phone terminal profile in daemon state.
+    #[command(hide = true)]
+    SetPhoneProfile {
+        /// Terminal rows.
+        #[arg(long)]
+        rows: u32,
+        /// Terminal columns.
+        #[arg(long)]
+        cols: u32,
+    },
+    /// Switch tab width mode.
+    #[command(hide = true)]
+    SetWidthMode {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+        /// Width mode: phone or computer.
+        mode: String,
+        /// Current computer rows.
+        #[arg(long, default_value_t = 24)]
+        computer_rows: u32,
+        /// Current computer columns.
+        #[arg(long, default_value_t = 80)]
+        computer_cols: u32,
+    },
     /// Resize a tab pty.
     #[command(hide = true)]
     ResizeTab {
@@ -263,6 +288,32 @@ async fn main() -> Result<()> {
                 _ => anyhow::bail!("daemon returned an unexpected snapshot response"),
             }
         }
+        Some(Command::SetPhoneProfile { rows, cols }) => {
+            ensure_daemon().await?;
+            let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetPhoneProfile(
+                v1::SetPhoneProfile { rows, cols },
+            )))
+            .await?;
+            print_session_response(response, "phone profile saved")?;
+        }
+        Some(Command::SetWidthMode {
+            tab_id,
+            mode,
+            computer_rows,
+            computer_cols,
+        }) => {
+            ensure_daemon().await?;
+            let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetWidthMode(
+                v1::SetWidthMode {
+                    tab_id,
+                    mode,
+                    computer_rows,
+                    computer_cols,
+                },
+            )))
+            .await?;
+            print_session_response(response, "width mode updated")?;
+        }
         Some(Command::ResizeTab { tab_id, rows, cols }) => {
             ensure_daemon().await?;
             let response =
@@ -394,8 +445,8 @@ fn print_session_state(state: &v1::SessionState) {
     println!("session tabs={} plan={}", state.tabs.len(), plan);
     for tab in &state.tabs {
         println!(
-            "tab id={} title={} status={}",
-            tab.id, tab.title, tab.status
+            "tab id={} title={} status={} width_mode={} size={}x{}",
+            tab.id, tab.title, tab.status, tab.width_mode, tab.rows, tab.cols
         );
     }
 }
