@@ -308,7 +308,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 404, { error: 'phone_not_registered' });
       return;
     }
-    if (activeBindingsForPhone(phone.id).length >= FREE_ENTITLEMENT.maxBoundComputers) {
+    if (nonRevokedBindingsForPhone(phone.id).length >= FREE_ENTITLEMENT.maxBoundComputers) {
       audit('pairing_claim_rejected', {
         deviceId: phone.id,
         error: 'free_entitlement_computer_limit',
@@ -372,6 +372,12 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     }
     if (!binding.phoneDeviceId) {
       writeJson(response, 409, { error: 'binding_has_no_phone' });
+      return;
+    }
+    const phoneBindingCount = nonRevokedBindingsForPhone(binding.phoneDeviceId)
+      .filter((candidate) => candidate.id !== binding.id).length;
+    if (phoneBindingCount >= FREE_ENTITLEMENT.maxBoundComputers) {
+      writeJson(response, 409, { error: 'free_entitlement_computer_limit' });
       return;
     }
     binding.status = 'active';
@@ -508,9 +514,9 @@ function activeBindingForDaemon(daemonDeviceId: string): Binding | undefined {
   );
 }
 
-function activeBindingsForPhone(phoneDeviceId: string): Binding[] {
+function nonRevokedBindingsForPhone(phoneDeviceId: string): Binding[] {
   return [...bindings.values()].filter(
-    (binding) => binding.phoneDeviceId === phoneDeviceId && binding.status === 'active',
+    (binding) => binding.phoneDeviceId === phoneDeviceId && binding.status !== 'revoked',
   );
 }
 
