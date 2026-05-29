@@ -34,7 +34,7 @@ Current scaffold:
 - machine list and tab strip.
 - terminal preview rendered through bundled xterm.js inside `WKWebView`.
 - phone/computer width segmented control backed by relay width-mode updates.
-- pairing URL parser and pending binding screen.
+- pairing URL parser, `nudge://pair` deep links, and pending binding screen.
 - camera QR scanner for pairing URLs.
 - Keychain-backed phone signing identity.
 - relay claim client using the phone public key.

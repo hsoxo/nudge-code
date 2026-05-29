@@ -396,6 +396,14 @@ final class AppModel {
         return true
     }
 
+    func openPairingURL(_ url: URL) -> Bool {
+        let parsed = parsePairingURL(url.absoluteString)
+        if parsed {
+            selectedMachineID = nil
+        }
+        return parsed
+    }
+
     func claimDraftBinding() async {
         guard let draft = bindingDraft else {
             return

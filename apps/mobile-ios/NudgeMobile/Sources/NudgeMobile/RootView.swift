@@ -27,6 +27,9 @@ struct RootView: View {
                 break
             }
         }
+        .onOpenURL { url in
+            _ = model.openPairingURL(url)
+        }
     }
 }
 

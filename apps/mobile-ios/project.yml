@@ -27,6 +27,10 @@ targets:
       path: NudgeMobile/Sources/NudgeMobile/Info.plist
       properties:
         CFBundleDisplayName: Nudge
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.nudgecode.NudgeMobile
+            CFBundleURLSchemes:
+              - nudge
         UILaunchScreen:
           UIColorName: ""
         NSCameraUsageDescription: Nudge scans the computer pairing QR code to bind this phone.

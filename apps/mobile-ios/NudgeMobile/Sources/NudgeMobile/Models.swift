@@ -126,16 +126,45 @@ struct BindingDraft: Equatable, Sendable {
     var code: String
     var relayURL: URL
 
+    init(code: String, relayURL: URL) {
+        self.code = code
+        self.relayURL = relayURL
+    }
+
     init?(pairingURL: URL) {
-        guard pairingURL.path == "/pair",
-              let components = URLComponents(url: pairingURL, resolvingAgainstBaseURL: false),
-              let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
+        guard let components = URLComponents(url: pairingURL, resolvingAgainstBaseURL: false),
+              let code = components.queryItems?.first(where: { $0.name == "code" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !code.isEmpty
         else {
             return nil
         }
+        if pairingURL.scheme == "nudge", pairingURL.host == "pair" {
+            guard let relay = components.queryItems?.first(where: { $0.name == "relay" })?.value,
+                  let relayURL = URL(string: relay),
+                  relayURL.scheme == "https" || relayURL.scheme == "http",
+                  relayURL.host != nil
+            else {
+                return nil
+            }
+            self.code = code
+            self.relayURL = relayURL.normalizedRelayURL
+            return
+        }
+        guard pairingURL.path == "/pair" else {
+            return nil
+        }
         self.code = code
-        self.relayURL = URL(string: "\(pairingURL.scheme ?? "https")://\(pairingURL.host ?? "nudgecode.dev")") ?? pairingURL
+        self.relayURL = pairingURL.normalizedRelayURL
+    }
+}
+
+private extension URL {
+    var normalizedRelayURL: URL {
+        var components = URLComponents()
+        components.scheme = scheme ?? "https"
+        components.host = host ?? "nudgecode.dev"
+        components.port = port
+        return components.url ?? self
     }
 }
 

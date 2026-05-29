@@ -72,6 +72,24 @@ struct BindingClaimTests {
         #expect(model.machines.isEmpty)
     }
 
+    @Test func appModelOpensPairingDeepLinkIntoBindingFlow() throws {
+        let machine = activeMachine()
+        let model = AppModel(
+            machines: [machine],
+            selectedMachineID: machine.id
+        )
+        let url = try #require(URL(string: "nudge://pair?relay=https%3A%2F%2Fnudgecode.dev&code=abc123"))
+
+        #expect(model.openPairingURL(url))
+
+        #expect(model.selectedMachineID == nil)
+        #expect(model.bindingDraft == BindingDraft(
+            code: "abc123",
+            relayURL: URL(string: "https://nudgecode.dev")!
+        ))
+        #expect(model.bindingClaimState == .idle)
+    }
+
     @Test func appModelRefreshesClaimedBindingToActive() async throws {
         let machine = Machine(
             id: "mac",

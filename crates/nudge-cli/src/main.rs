@@ -759,7 +759,9 @@ async fn bind_phone(relay_url: &str, wait: bool, yes: bool, timeout_seconds: u64
     println!("binding_id={}", binding.binding_id);
     println!("pairing_code={}", binding.code);
     let pairing_url = format!("{}/pair?code={}", binding.relay_url, binding.code);
+    let app_pairing_url = app_pairing_url(&binding.relay_url, &binding.code);
     println!("pairing_url={pairing_url}");
+    println!("app_pairing_url={app_pairing_url}");
     println!("expires_at={}", binding.expires_at);
     print_qr_code(&pairing_url)?;
     if wait {
@@ -1129,6 +1131,26 @@ fn current_binding() -> Result<BindingState> {
 
 fn normalize_relay_url(relay_url: &str) -> String {
     relay_url.trim_end_matches('/').to_string()
+}
+
+fn app_pairing_url(relay_url: &str, code: &str) -> String {
+    format!(
+        "nudge://pair?relay={}&code={}",
+        percent_encode_query_value(relay_url),
+        percent_encode_query_value(code)
+    )
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn daemon_public_key() -> Result<String> {
@@ -2460,6 +2482,16 @@ mod tests {
         assert_eq!(
             update_shell_command("/tmp/nudge install.sh"),
             "sh '/tmp/nudge install.sh'"
+        );
+    }
+
+    #[test]
+    fn app_pairing_url_carries_relay_and_code_for_ios_deep_link() {
+        let url = app_pairing_url("https://nudgecode.dev/relay path", "ABC 123");
+
+        assert_eq!(
+            url,
+            "nudge://pair?relay=https%3A%2F%2Fnudgecode.dev%2Frelay%20path&code=ABC%20123"
         );
     }
 }
