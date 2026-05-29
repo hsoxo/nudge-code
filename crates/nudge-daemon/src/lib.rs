@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -953,10 +954,25 @@ fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessSignal {
+    command: String,
+    pid: Option<u32>,
+}
+
+impl ProcessSignal {
+    fn new(command: impl Into<String>, pid: Option<u32>) -> Self {
+        Self {
+            command: command.into(),
+            pid,
+        }
+    }
+}
+
 fn detect_agent_status(
     title: &str,
     screen_text: &str,
-    process_name: Option<&str>,
+    process_signal: Option<&ProcessSignal>,
     tab_status: &TabStatus,
 ) -> AgentStatus {
     if matches!(tab_status, TabStatus::Exited | TabStatus::NeedsRestart) {
@@ -968,7 +984,7 @@ fn detect_agent_status(
         };
     }
 
-    let process = process_name.map(|name| name.to_lowercase());
+    let process = process_signal.map(|signal| signal.command.to_lowercase());
     let title_lower = title.to_lowercase();
     let text_lower = screen_text.to_lowercase();
     let combined = format!("{title_lower}\n{text_lower}");
@@ -1086,6 +1102,107 @@ fn is_shell_command_name(command_name: &str) -> bool {
 
 fn looks_like_shell_prompt(text: &str) -> bool {
     text.contains("$ ") || text.contains("% ") || text.contains("# ")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessEntry {
+    pid: u32,
+    parent_pid: u32,
+    command: String,
+}
+
+fn foreground_process_signal(
+    child_pid: Option<u32>,
+    fallback_command: Option<&str>,
+) -> Option<ProcessSignal> {
+    let fallback = fallback_command.map(|command| ProcessSignal::new(command, child_pid));
+    let child_pid = child_pid?;
+    let entries = process_entries().ok()?;
+    process_signal_from_entries(child_pid, &entries).or(fallback)
+}
+
+fn process_signal_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Option<ProcessSignal> {
+    let descendants = process_descendants(root_pid, entries);
+    descendants
+        .iter()
+        .rev()
+        .find(|entry| is_agent_command_name(&entry.command))
+        .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        .or_else(|| {
+            descendants
+                .iter()
+                .rev()
+                .find(|entry| !is_shell_command_name(&entry.command))
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        })
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.pid == root_pid)
+                .map(|entry| ProcessSignal::new(entry.command.clone(), Some(entry.pid)))
+        })
+}
+
+fn process_descendants(root_pid: u32, entries: &[ProcessEntry]) -> Vec<ProcessEntry> {
+    let mut result = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(parent_pid) = stack.pop() {
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.parent_pid == parent_pid)
+        {
+            result.push(entry.clone());
+            stack.push(entry.pid);
+        }
+    }
+    result
+}
+
+fn process_entries() -> Result<Vec<ProcessEntry>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output()
+        .context("failed to run ps for process detection")?;
+    if !output.status.success() {
+        anyhow::bail!("ps exited with {}", output.status);
+    }
+    parse_process_entries(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_process_entries(output: &str) -> Result<Vec<ProcessEntry>> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_process_entry)
+        .collect()
+}
+
+fn parse_process_entry(line: &str) -> Result<ProcessEntry> {
+    let trimmed = line.trim_start();
+    let Some((pid, rest)) = trimmed.split_once(char::is_whitespace) else {
+        anyhow::bail!("missing process pid in ps row: {line}");
+    };
+    let rest = rest.trim_start();
+    let Some((parent_pid, command)) = rest.split_once(char::is_whitespace) else {
+        anyhow::bail!("missing process parent pid in ps row: {line}");
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        anyhow::bail!("missing process command in ps row: {line}");
+    }
+    Ok(ProcessEntry {
+        pid: pid
+            .parse()
+            .with_context(|| format!("invalid process pid in ps row: {line}"))?,
+        parent_pid: parent_pid
+            .parse()
+            .with_context(|| format!("invalid process parent pid in ps row: {line}"))?,
+        command: command.to_string(),
+    })
+}
+
+fn is_agent_command_name(command_name: &str) -> bool {
+    is_command_name(command_name, &["claude", "codex", "opencode", "openclaw"])
 }
 
 #[derive(Debug, Clone)]
@@ -1387,7 +1504,7 @@ impl DaemonRuntime {
     }
 
     async fn refresh_agent_status(&self, tab_id: &str, screen_text: &str) -> Result<AgentStatus> {
-        let process_name = self.runtime_tab_process_name(tab_id).await;
+        let process_signal = self.runtime_tab_process_signal(tab_id).await;
         let mut session = self.session.lock().await;
         let tab = session
             .tabs
@@ -1399,7 +1516,7 @@ impl DaemonRuntime {
         let detected = detect_agent_status(
             &tab.title,
             screen_text,
-            process_name.as_deref(),
+            process_signal.as_ref(),
             &tab.status,
         );
         if tab.agent_status != detected {
@@ -1425,10 +1542,9 @@ impl DaemonRuntime {
                     (
                         runtime_tab.tab_id.clone(),
                         text,
-                        runtime_tab
-                            .pty
-                            .as_ref()
-                            .map(|pty| pty.command_name().to_string()),
+                        runtime_tab.pty.as_ref().and_then(|pty| {
+                            foreground_process_signal(pty.child_pid(), Some(pty.command_name()))
+                        }),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1436,10 +1552,10 @@ impl DaemonRuntime {
 
         let mut session = self.session.lock().await;
         let mut changed = false;
-        for (tab_id, text, process_name) in snapshots {
+        for (tab_id, text, process_signal) in snapshots {
             if let Some(tab) = session.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 let detected =
-                    detect_agent_status(&tab.title, &text, process_name.as_deref(), &tab.status);
+                    detect_agent_status(&tab.title, &text, process_signal.as_ref(), &tab.status);
                 if tab.agent_status != detected {
                     tab.agent_status = detected;
                     tab.last_activity_at = now_string();
@@ -1454,15 +1570,14 @@ impl DaemonRuntime {
         Ok(())
     }
 
-    async fn runtime_tab_process_name(&self, tab_id: &str) -> Option<String> {
+    async fn runtime_tab_process_signal(&self, tab_id: &str) -> Option<ProcessSignal> {
         let ptys = self.ptys.lock().await;
         ptys.iter()
             .find(|runtime_tab| runtime_tab.tab_id == tab_id)
             .and_then(|runtime_tab| {
-                runtime_tab
-                    .pty
-                    .as_ref()
-                    .map(|pty| pty.command_name().to_string())
+                runtime_tab.pty.as_ref().and_then(|pty| {
+                    foreground_process_signal(pty.child_pid(), Some(pty.command_name()))
+                })
             })
     }
 
@@ -2752,7 +2867,7 @@ mod tests {
         let status = detect_agent_status(
             "shell",
             "$ ",
-            Some("/Users/me/.local/bin/codex"),
+            Some(&ProcessSignal::new("/Users/me/.local/bin/codex", Some(42))),
             &TabStatus::Running,
         );
 
@@ -2763,11 +2878,68 @@ mod tests {
 
     #[test]
     fn process_name_does_not_override_exited_tabs() {
-        let status = detect_agent_status("shell", "$ ", Some("claude"), &TabStatus::NeedsRestart);
+        let status = detect_agent_status(
+            "shell",
+            "$ ",
+            Some(&ProcessSignal::new("claude", Some(42))),
+            &TabStatus::NeedsRestart,
+        );
 
         assert_eq!(status.kind, AgentKind::Unknown);
         assert_eq!(status.state, AgentInteractionState::Exited);
         assert_ne!(status.source, AgentDetectionSource::Process);
+    }
+
+    #[test]
+    fn process_entries_parse_ps_rows() {
+        let entries =
+            parse_process_entries("  100     1 /bin/zsh\n  101   100 /Users/me/.local/bin/codex\n")
+                .expect("process rows should parse");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].pid, 101);
+        assert_eq!(entries[1].parent_pid, 100);
+        assert_eq!(entries[1].command, "/Users/me/.local/bin/codex");
+    }
+
+    #[test]
+    fn process_signal_prefers_agent_descendant() {
+        let entries = vec![
+            ProcessEntry {
+                pid: 100,
+                parent_pid: 1,
+                command: "zsh".to_string(),
+            },
+            ProcessEntry {
+                pid: 101,
+                parent_pid: 100,
+                command: "python".to_string(),
+            },
+            ProcessEntry {
+                pid: 102,
+                parent_pid: 101,
+                command: "/opt/homebrew/bin/claude".to_string(),
+            },
+        ];
+
+        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+
+        assert_eq!(signal.command, "/opt/homebrew/bin/claude");
+        assert_eq!(signal.pid, Some(102));
+    }
+
+    #[test]
+    fn process_signal_falls_back_to_root_process() {
+        let entries = vec![ProcessEntry {
+            pid: 100,
+            parent_pid: 1,
+            command: "zsh".to_string(),
+        }];
+
+        let signal = process_signal_from_entries(100, &entries).expect("signal should exist");
+
+        assert_eq!(signal.command, "zsh");
+        assert_eq!(signal.pid, Some(100));
     }
 
     #[test]
