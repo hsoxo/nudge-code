@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct NudgeMobileApp: App {
-    @State private var model = AppModel.preview()
+    @State private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {

@@ -98,6 +98,46 @@ struct BindingClaimTests {
         #expect(client.statusRequests.isEmpty)
         #expect(model.machines.first == machine)
     }
+
+    @Test func appModelAttachesActiveMachineSession() async throws {
+        let machine = Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://nudgecode.dev")!,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .active,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+        let remoteTab = TerminalTab(
+            id: "default",
+            title: "Codex",
+            state: .running,
+            widthMode: .computer,
+            profile: TerminalProfile(rows: 24, cols: 100),
+            agentStatus: AgentStatus(kind: .codex, state: .waitingForInput, confidence: 0.72, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let client = RecordingRelayClient(sessionState: RemoteSessionState(tabs: [remoteTab]))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client
+        )
+
+        await model.attachSelectedMachineSession()
+
+        #expect(client.sessionRequests == [machine])
+        #expect(model.selectedTabID == "default")
+        #expect(model.tabsByMachine[machine.id] == [remoteTab])
+        #expect(model.machines.first?.lastSeenText == "relay session attached")
+    }
 }
 
 private struct RelayClaim: Equatable {
@@ -113,7 +153,9 @@ private struct BindingStatusRequest: Equatable {
 private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var claims: [RelayClaim] = []
     var statusRequests: [BindingStatusRequest] = []
+    var sessionRequests: [Machine] = []
     var statusClaim: BindingClaim
+    var sessionState: RemoteSessionState
     var error: Error?
 
     init(
@@ -124,9 +166,11 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
             status: .claimed,
             expiresAt: "2026-05-29T00:00:00Z"
         ),
+        sessionState: RemoteSessionState = RemoteSessionState(tabs: []),
         error: Error? = nil
     ) {
         self.statusClaim = statusClaim
+        self.sessionState = sessionState
         self.error = error
     }
 
@@ -150,6 +194,14 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         statusRequests.append(BindingStatusRequest(binding: binding, relayURL: relayURL))
         return statusClaim
+    }
+
+    func fetchSessionState(machine: Machine) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        sessionRequests.append(machine)
+        return sessionState
     }
 
     func connect(machine: Machine) async throws {

@@ -89,6 +89,21 @@ final class AppModel {
         }
     }
 
+    func attachSelectedMachineSession() async {
+        guard let machineID = selectedMachineID,
+              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              machines[machineIndex].binding?.status == .active
+        else {
+            return
+        }
+        do {
+            try await attachMachineSession(at: machineIndex)
+        } catch {
+            machines[machineIndex].connectionState = .offline
+            machines[machineIndex].lastSeenText = "Unable to attach relay session"
+        }
+    }
+
     func parsePairingURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
               let draft = BindingDraft(pairingURL: url)
@@ -151,6 +166,14 @@ final class AppModel {
             machines[index].connectionState = .offline
             machines[index].lastSeenText = "binding revoked"
         }
+    }
+
+    private func attachMachineSession(at index: Int) async throws {
+        let state = try await relayClient.fetchSessionState(machine: machines[index])
+        tabsByMachine[machines[index].id] = state.tabs
+        selectedTabID = state.tabs.first?.id
+        machines[index].connectionState = .online
+        machines[index].lastSeenText = "relay session attached"
     }
 
     static func preview() -> AppModel {

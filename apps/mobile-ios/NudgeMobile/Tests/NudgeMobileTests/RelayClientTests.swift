@@ -71,6 +71,57 @@ struct RelayClientTests {
         #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/bind/status"])
         #expect(URLProtocolStub.requests.first?.url?.query == "bindingId=bind_1&deviceId=phone_1")
     }
+
+    @Test func fetchSessionStateConnectsMobileSocketAndRequestsState() async throws {
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-fixed","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48,"agentStatus":{"kind":"claude","state":"needs_approval","confidence":0.82,"source":"screen"}}]}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: .ephemeral),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "ios-fixed" }
+        )
+
+        let state = try await client.fetchSessionState(machine: activeMachine)
+
+        #expect(factory.urls.map(\.absoluteString) == ["wss://relay.test/ws/mobile?deviceId=phone_1&bindingId=bind_1"])
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""toDeviceId":"daemon_1""#))
+        #expect(socket.sent[0].contains(#""type":"get_state""#))
+        #expect(socket.sent[0].contains(#""requestId":"ios-fixed""#))
+        #expect(socket.closed)
+        #expect(state.tabs == [
+            TerminalTab(
+                id: "default",
+                title: "Claude",
+                state: .running,
+                widthMode: .phone,
+                profile: TerminalProfile(rows: 32, cols: 48),
+                agentStatus: AgentStatus(kind: .claude, state: .needsApproval, confidence: 0.82, source: "screen"),
+                previewText: "Relay session attached\nWaiting for terminal snapshot..."
+            )
+        ])
+    }
+
+    private var activeMachine: Machine {
+        Machine(
+            id: "mac",
+            name: "Mac",
+            relayURL: URL(string: "https://relay.test")!,
+            connectionState: .online,
+            lastSeenText: "binding active",
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .active,
+                expiresAt: "2026-05-29T00:00:00Z"
+            )
+        )
+    }
 }
 
 private struct MemoryPhoneIdentityStore: PhoneIdentityStore {
@@ -92,6 +143,45 @@ private struct StubResponse {
     var path: String
     var statusCode: Int = 200
     var data: Data
+}
+
+private final class RecordingWebSocketFactory: RelayWebSocketFactory, @unchecked Sendable {
+    var urls: [URL] = []
+    let socket: RecordingWebSocket
+
+    init(socket: RecordingWebSocket) {
+        self.socket = socket
+    }
+
+    func webSocket(for url: URL) throws -> any RelayWebSocketTransport {
+        urls.append(url)
+        return socket
+    }
+}
+
+private final class RecordingWebSocket: RelayWebSocketTransport, @unchecked Sendable {
+    var messages: [String]
+    var sent: [String] = []
+    var closed = false
+
+    init(messages: [String]) {
+        self.messages = messages
+    }
+
+    func sendString(_ value: String) async throws {
+        sent.append(value)
+    }
+
+    func receiveString() async throws -> String {
+        if messages.isEmpty {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return messages.removeFirst()
+    }
+
+    func close() {
+        closed = true
+    }
 }
 
 private final class URLProtocolStub: URLProtocol, @unchecked Sendable {

@@ -26,12 +26,13 @@ Current scaffold:
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
 - one-shot relay binding status refresh when opening a pending machine.
+- first `/ws/mobile` attach path that requests daemon session state.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 
 Still open:
 
 - camera QR scanner.
 - signed relay authentication.
-- websocket session sync.
+- continuous websocket session sync.
 - E2E encrypted terminal/control stream.
 - real xterm.js integration.

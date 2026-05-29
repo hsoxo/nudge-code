@@ -23,6 +23,7 @@ struct TerminalWorkspaceView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: model.selectedMachineID) {
             await model.refreshSelectedMachineBinding()
+            await model.attachSelectedMachineSession()
         }
     }
 }

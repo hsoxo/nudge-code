@@ -3,12 +3,15 @@ import Foundation
 protocol RelayClient: Sendable {
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
     func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim
+    func fetchSessionState(machine: Machine) async throws -> RemoteSessionState
     func connect(machine: Machine) async throws
 }
 
 struct HTTPRelayClient: RelayClient {
     var urlSession: URLSession = .shared
     var identityStore: any PhoneIdentityStore = KeychainPhoneIdentityStore()
+    var webSocketFactory: any RelayWebSocketFactory = URLSessionRelayWebSocketFactory(urlSession: .shared)
+    var requestIDGenerator: @Sendable () -> String = { "ios-\(UUID().uuidString)" }
 
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim {
         let identity = try identityStore.loadOrCreate()
@@ -40,6 +43,28 @@ struct HTTPRelayClient: RelayClient {
         _ = machine
     }
 
+    func fetchSessionState(machine: Machine) async throws -> RemoteSessionState {
+        guard let binding = machine.binding else {
+            throw RelayClientError.missingBinding
+        }
+        let socket = try webSocketFactory.webSocket(for: relayWebSocketURL(relayURL: machine.relayURL, binding: binding))
+        defer {
+            socket.close()
+        }
+        let requestID = requestIDGenerator()
+        let request = RelaySocketRequest(
+            toDeviceId: binding.daemonDeviceID,
+            payload: RelayGetStatePayload(requestId: requestID)
+        )
+        try await waitForConnected(socket: socket, binding: binding)
+        let data = try JSONEncoder().encode(request)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        try await socket.sendString(text)
+        return try await waitForSessionState(socket: socket, requestID: requestID)
+    }
+
     private func registerPhone(relayURL: URL, phonePublicKey: String) async throws -> DeviceResponse.Device {
         var request = URLRequest(url: relayURL.appending(path: "/api/devices/register"))
         request.httpMethod = "POST"
@@ -64,6 +89,66 @@ struct HTTPRelayClient: RelayClient {
         )
     }
 
+    private func relayWebSocketURL(relayURL: URL, binding: MachineBinding) throws -> URL {
+        var components = URLComponents(url: relayURL, resolvingAgainstBaseURL: false)
+        switch components?.scheme {
+        case "https":
+            components?.scheme = "wss"
+        case "http":
+            components?.scheme = "ws"
+        default:
+            throw RelayClientError.badURL
+        }
+        components?.path = "/ws/mobile"
+        components?.queryItems = [
+            URLQueryItem(name: "deviceId", value: binding.phoneDeviceID),
+            URLQueryItem(name: "bindingId", value: binding.bindingID)
+        ]
+        guard let url = components?.url else {
+            throw RelayClientError.badURL
+        }
+        return url
+    }
+
+    private func waitForConnected(socket: any RelayWebSocketTransport, binding: MachineBinding) async throws {
+        while true {
+            let text = try await socket.receiveString()
+            let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
+            if message.type == "connected",
+               message.deviceId == binding.phoneDeviceID,
+               message.bindingId == binding.bindingID {
+                return
+            }
+            if message.type == "error" {
+                throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
+            }
+        }
+    }
+
+    private func waitForSessionState(socket: any RelayWebSocketTransport, requestID: String) async throws -> RemoteSessionState {
+        while true {
+            let text = try await socket.receiveString()
+            let message = try JSONDecoder().decode(RelaySocketIncoming.self, from: Data(text.utf8))
+            if message.type == "error" {
+                throw RelayClientError.daemonRejected(message.error ?? "relay websocket error")
+            }
+            guard message.type == "message",
+                  let payload = message.message?.payload,
+                  payload.type == "daemon_response",
+                  payload.requestId == requestID
+            else {
+                continue
+            }
+            guard payload.ok else {
+                throw RelayClientError.daemonRejected(payload.data?.error ?? "daemon rejected request")
+            }
+            guard let data = payload.data else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            return try data.toRemoteSessionState()
+        }
+    }
+
     private func validate(response: URLResponse) throws {
         guard let http = response as? HTTPURLResponse,
               200 ..< 300 ~= http.statusCode
@@ -76,7 +161,11 @@ struct HTTPRelayClient: RelayClient {
 enum RelayClientError: Error {
     case badURL
     case badStatus
+    case daemonRejected(String)
+    case invalidWebSocketMessage
+    case missingBinding
     case missingPhoneDeviceID
+    case unsupportedRelayValue(String)
 }
 
 struct BindingClaim: Equatable, Sendable {
@@ -85,6 +174,57 @@ struct BindingClaim: Equatable, Sendable {
     var phoneDeviceID: String
     var status: BindingStatus
     var expiresAt: String
+}
+
+struct RemoteSessionState: Equatable, Sendable {
+    var tabs: [TerminalTab]
+}
+
+protocol RelayWebSocketTransport: Sendable {
+    func sendString(_ value: String) async throws
+    func receiveString() async throws -> String
+    func close()
+}
+
+protocol RelayWebSocketFactory: Sendable {
+    func webSocket(for url: URL) throws -> any RelayWebSocketTransport
+}
+
+struct URLSessionRelayWebSocketFactory: RelayWebSocketFactory, @unchecked Sendable {
+    var urlSession: URLSession
+
+    func webSocket(for url: URL) throws -> any RelayWebSocketTransport {
+        let task = urlSession.webSocketTask(with: url)
+        task.resume()
+        return URLSessionRelayWebSocketTransport(task: task)
+    }
+}
+
+struct URLSessionRelayWebSocketTransport: RelayWebSocketTransport, @unchecked Sendable {
+    var task: URLSessionWebSocketTask
+
+    func sendString(_ value: String) async throws {
+        try await task.send(.string(value))
+    }
+
+    func receiveString() async throws -> String {
+        let message = try await task.receive()
+        switch message {
+        case .string(let value):
+            return value
+        case .data(let data):
+            guard let value = String(data: data, encoding: .utf8) else {
+                throw RelayClientError.invalidWebSocketMessage
+            }
+            return value
+        @unknown default:
+            throw RelayClientError.invalidWebSocketMessage
+        }
+    }
+
+    func close() {
+        task.cancel(with: .normalClosure, reason: nil)
+    }
 }
 
 private struct DeviceRequest: Encodable {
@@ -115,4 +255,143 @@ private struct BindingResponse: Decodable {
 private struct ClaimRequest: Encodable {
     var code: String
     var phoneDeviceId: String
+}
+
+private struct RelaySocketRequest: Encodable {
+    var toDeviceId: String
+    var payload: RelayGetStatePayload
+}
+
+private struct RelayGetStatePayload: Encodable {
+    let type = "get_state"
+    var requestId: String
+}
+
+private struct RelaySocketIncoming: Decodable {
+    var type: String
+    var deviceId: String?
+    var bindingId: String?
+    var error: String?
+    var message: RelaySocketRoutedMessage?
+}
+
+private struct RelaySocketRoutedMessage: Decodable {
+    var payload: RelayDaemonPayload
+}
+
+private struct RelayDaemonPayload: Decodable {
+    var type: String
+    var requestId: String?
+    var ok: Bool
+    var data: RelaySessionStateResponse?
+}
+
+private struct RelaySessionStateResponse: Decodable {
+    var tabs: [RelayTabResponse]?
+    var error: String?
+
+    func toRemoteSessionState() throws -> RemoteSessionState {
+        let tabs = try (tabs ?? []).map { try $0.toTerminalTab() }
+        return RemoteSessionState(tabs: tabs)
+    }
+}
+
+private struct RelayTabResponse: Decodable {
+    var id: String
+    var title: String
+    var status: String
+    var widthMode: String
+    var rows: Int
+    var cols: Int
+    var agentStatus: RelayAgentStatusResponse?
+
+    func toTerminalTab() throws -> TerminalTab {
+        TerminalTab(
+            id: id,
+            title: title,
+            state: try TabRunState(relayValue: status),
+            widthMode: try WidthMode(relayValue: widthMode),
+            profile: TerminalProfile(rows: rows, cols: cols),
+            agentStatus: try agentStatus?.toAgentStatus() ?? AgentStatus(
+                kind: .unknown,
+                state: .idle,
+                confidence: 0,
+                source: "unknown"
+            ),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+    }
+}
+
+private struct RelayAgentStatusResponse: Decodable {
+    var kind: String
+    var state: String
+    var confidence: Double
+    var source: String
+
+    func toAgentStatus() throws -> AgentStatus {
+        AgentStatus(
+            kind: AgentKind(relayValue: kind),
+            state: try AgentInteractionState(relayValue: state),
+            confidence: confidence,
+            source: source
+        )
+    }
+}
+
+private extension TabRunState {
+    init(relayValue: String) throws {
+        switch relayValue {
+        case "running":
+            self = .running
+        case "exited":
+            self = .exited
+        case "needs_attention":
+            self = .needsAttention
+        case "needs_restart":
+            self = .needsRestart
+        default:
+            throw RelayClientError.unsupportedRelayValue(relayValue)
+        }
+    }
+}
+
+private extension WidthMode {
+    init(relayValue: String) throws {
+        switch relayValue {
+        case "phone":
+            self = .phone
+        case "computer":
+            self = .computer
+        default:
+            throw RelayClientError.unsupportedRelayValue(relayValue)
+        }
+    }
+}
+
+private extension AgentKind {
+    init(relayValue: String) {
+        self = AgentKind(rawValue: relayValue) ?? .unknown
+    }
+}
+
+private extension AgentInteractionState {
+    init(relayValue: String) throws {
+        switch relayValue {
+        case "running":
+            self = .running
+        case "idle":
+            self = .idle
+        case "waiting_for_input":
+            self = .waitingForInput
+        case "needs_approval":
+            self = .needsApproval
+        case "needs_attention":
+            self = .needsAttention
+        case "exited":
+            self = .exited
+        default:
+            throw RelayClientError.unsupportedRelayValue(relayValue)
+        }
+    }
 }
