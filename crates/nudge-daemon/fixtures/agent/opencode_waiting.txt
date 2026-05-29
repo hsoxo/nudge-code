@@ -1,0 +1,4 @@
+opencode
+
+Waiting for user input.
+Type your message to continue.

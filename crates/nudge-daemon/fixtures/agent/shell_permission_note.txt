@@ -1,0 +1,3 @@
+permission denied while reading ./target
+
+$ chmod +r ./target

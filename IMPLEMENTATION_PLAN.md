@@ -354,11 +354,11 @@ Current implementation status:
 - The daemon records the spawned PTY command name/PID and uses the command name as a process-source signal when it directly identifies Claude, Codex, Opencode, OpenClaw, or a shell.
 - On macOS/Linux, the PTY layer exposes the controlling terminal foreground process group via `tcgetpgrp` through `portable-pty`, and the daemon uses that process group as the authoritative foreground signal when it matches the spawned shell process tree.
 - The daemon scans the PTY child process descendants through `ps -axo pid=,ppid=,pgid=,stat=,comm=` and prefers foreground process-group agent/non-shell descendants before falling back to `STAT` foreground markers, descendant agent commands, root shell command, title, and screen heuristics.
-- The daemon has fixture-backed classifier tests for Claude approval, Codex waiting-for-input, and low-confidence unknown output.
+- The daemon has fixture-backed classifier tests for Claude approval/waiting, Codex approval/waiting, Opencode waiting, OpenClaw Chinese approval, shell permission false positives, and low-confidence unknown output.
 - The daemon broadcasts agent status changes to the bound phone over the live relay session, encrypted when E2E is available; iOS applies those updates to the matching tab without a snapshot request.
 - Current heuristic kinds: `claude`, `codex`, `opencode`, `openclaw`, `shell`, `unknown`.
 - Current heuristic states: `running`, `waiting_for_input`, `needs_approval`, `exited`.
-- Broader classifier fixture expansion remains open Phase 7 work.
+- Additional real-world classifier captures remain useful as agents change their UI text, but the first expanded Phase 7 fixture set is implemented.
 
 Tasks:
 
@@ -556,7 +556,9 @@ Agent tests:
 - foreground process detection on Linux
 - Claude approval text fixture
 - Codex approval text fixture
-- waiting-for-input text fixture
+- Claude/Codex/Opencode waiting-for-input text fixtures
+- OpenClaw Chinese approval text fixture
+- shell permission false-positive fixture
 - low confidence on unknown text
 
 iOS tests:

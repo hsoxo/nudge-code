@@ -1089,32 +1089,10 @@ fn detect_agent_status(
         (AgentKind::Unknown, AgentDetectionSource::Unknown, 0.3)
     };
 
-    let state = if contains_any(
-        &combined,
-        &[
-            "approve?",
-            "approval required",
-            "allow this command",
-            "do you want to proceed",
-            "permission",
-            "需要你确认权限",
-            "确认权限",
-        ],
-    ) {
+    let state = if looks_like_approval_prompt(&combined) {
         confidence = confidence.max(0.82);
         AgentInteractionState::NeedsApproval
-    } else if contains_any(
-        &combined,
-        &[
-            "waiting for input",
-            "press enter",
-            "enter your prompt",
-            "send a message",
-            "what would you like",
-            "等待输入",
-            "等待用户输入",
-        ],
-    ) {
+    } else if looks_like_waiting_prompt(&combined) {
         confidence = confidence.max(0.78);
         AgentInteractionState::WaitingForInput
     } else {
@@ -1131,6 +1109,50 @@ fn detect_agent_status(
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn looks_like_approval_prompt(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "approve?",
+            "approval required",
+            "allow this command",
+            "allow command",
+            "confirm command",
+            "confirm this command",
+            "do you want to proceed",
+            "permission required",
+            "requires permission",
+            "needs your permission",
+            "grant permission",
+            "review permissions",
+            "是否允许",
+            "允许此命令",
+            "需要你确认权限",
+            "确认权限",
+        ],
+    )
+}
+
+fn looks_like_waiting_prompt(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "waiting for input",
+            "waiting for user input",
+            "press enter",
+            "enter your prompt",
+            "send a message",
+            "type your message",
+            "what would you like",
+            "waiting for your response",
+            "等待输入",
+            "等待用户输入",
+            "请输入",
+            "输入你的提示",
+        ],
+    )
 }
 
 fn is_command_name(command_name: &str, expected_names: &[&str]) -> bool {
@@ -3689,6 +3711,21 @@ mod tests {
         );
         assert_eq!(status.kind, AgentKind::Claude);
         assert_eq!(status.state, AgentInteractionState::NeedsApproval);
+        assert_eq!(status.source, AgentDetectionSource::Screen);
+        assert!(status.confidence >= 0.82);
+    }
+
+    #[test]
+    fn detects_codex_approval_from_screen_text() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/codex_approval.txt"),
+            None,
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Codex);
+        assert_eq!(status.state, AgentInteractionState::NeedsApproval);
+        assert_eq!(status.source, AgentDetectionSource::Screen);
         assert!(status.confidence >= 0.82);
     }
 
@@ -3703,6 +3740,61 @@ mod tests {
         assert_eq!(status.kind, AgentKind::Codex);
         assert_eq!(status.state, AgentInteractionState::WaitingForInput);
         assert_eq!(status.source, AgentDetectionSource::Title);
+    }
+
+    #[test]
+    fn detects_claude_waiting_from_screen_text() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/claude_waiting.txt"),
+            None,
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Claude);
+        assert_eq!(status.state, AgentInteractionState::WaitingForInput);
+        assert_eq!(status.source, AgentDetectionSource::Screen);
+        assert!(status.confidence >= 0.78);
+    }
+
+    #[test]
+    fn detects_opencode_waiting_from_screen_text() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/opencode_waiting.txt"),
+            None,
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Opencode);
+        assert_eq!(status.state, AgentInteractionState::WaitingForInput);
+        assert_eq!(status.source, AgentDetectionSource::Screen);
+        assert!(status.confidence >= 0.78);
+    }
+
+    #[test]
+    fn detects_openclaw_approval_from_chinese_screen_text() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/openclaw_approval_zh.txt"),
+            None,
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Openclaw);
+        assert_eq!(status.state, AgentInteractionState::NeedsApproval);
+        assert_eq!(status.source, AgentDetectionSource::Screen);
+        assert!(status.confidence >= 0.82);
+    }
+
+    #[test]
+    fn shell_permission_text_does_not_trigger_approval() {
+        let status = detect_agent_status(
+            "shell",
+            include_str!("../fixtures/agent/shell_permission_note.txt"),
+            None,
+            &TabStatus::Running,
+        );
+        assert_eq!(status.kind, AgentKind::Shell);
+        assert_eq!(status.state, AgentInteractionState::Running);
+        assert_ne!(status.state, AgentInteractionState::NeedsApproval);
     }
 
     #[test]

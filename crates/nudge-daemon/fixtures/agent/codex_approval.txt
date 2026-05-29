@@ -1,0 +1,7 @@
+OpenAI Codex
+
+Approval required before running:
+
+    cargo test -p nudge-daemon
+
+Allow this command?
