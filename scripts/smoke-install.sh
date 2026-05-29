@@ -23,19 +23,17 @@ esac
 
 ARTIFACT="nudge-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
 RELEASE_DIR="$TMP_DIR/releases/latest"
-ARTIFACT_DIR="$TMP_DIR/artifact"
 INSTALL_DIR="$TMP_DIR/install"
+SMOKE_BIN="$TMP_DIR/nudge"
 
-mkdir -p "$RELEASE_DIR" "$ARTIFACT_DIR"
-printf '#!/usr/bin/env sh\necho nudge smoke\n' > "$ARTIFACT_DIR/nudge"
-chmod 755 "$ARTIFACT_DIR/nudge"
-(cd "$ARTIFACT_DIR" && tar -czf "$RELEASE_DIR/$ARTIFACT" nudge)
-
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "$RELEASE_DIR/$ARTIFACT" | awk '{print $1 "  '"$ARTIFACT"'"}' > "$RELEASE_DIR/$ARTIFACT.sha256"
-else
-  shasum -a 256 "$RELEASE_DIR/$ARTIFACT" | awk '{print $1 "  '"$ARTIFACT"'"}' > "$RELEASE_DIR/$ARTIFACT.sha256"
-fi
+mkdir -p "$RELEASE_DIR"
+printf '#!/usr/bin/env sh\necho nudge smoke\n' > "$SMOKE_BIN"
+chmod 755 "$SMOKE_BIN"
+NUDGE_RELEASE_OUT_DIR="$RELEASE_DIR" \
+NUDGE_BINARY="$SMOKE_BIN" \
+NUDGE_TARGET_OS="$TARGET_OS" \
+NUDGE_TARGET_ARCH="$TARGET_ARCH" \
+  "$ROOT_DIR/scripts/package-release.sh" >/dev/null
 
 NUDGE_RELEASE_BASE_URL="$TMP_DIR/releases" \
 NUDGE_INSTALL_DIR="$INSTALL_DIR" \

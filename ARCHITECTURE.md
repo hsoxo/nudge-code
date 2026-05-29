@@ -315,6 +315,7 @@ Installer responsibilities:
 - detect OS and CPU architecture
 - download the matching prebuilt `nudge` artifact
 - verify checksum/signature before installing
+- package release artifacts as `nudge-{macos|linux}-{aarch64|x86_64}.tar.gz` with adjacent `.sha256` files
 - install into a user-writable bin directory by default
 - print the exact install path
 - optionally set up launchd/systemd user service

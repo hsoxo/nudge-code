@@ -18,6 +18,7 @@ npm run smoke:http-disabled --workspace @nudge/relay
 npm run smoke:persistence --workspace @nudge/relay
 npm run smoke:rate-limit --workspace @nudge/relay
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh
+NUDGE_BINARY=target/debug/nudge scripts/package-release.sh
 scripts/smoke-install.sh
 cd apps/mobile-ios && xcodegen generate --spec project.yml
 ```
