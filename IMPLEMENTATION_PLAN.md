@@ -32,7 +32,7 @@ nudge/
 ```
 
 - Use a Rust Cargo workspace for computer-side crates.
-- Use pnpm or npm workspaces only for the hosted relay and TypeScript protocol mirror.
+- Use npm workspaces only for the hosted relay and TypeScript protocol mirror.
 - Put canonical protocol definitions in `proto/nudge.proto`.
 - Generate Rust protocol types into `crates/nudge-protocol`.
 - Generate TypeScript protocol types into `packages/protocol-ts`.

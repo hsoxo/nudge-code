@@ -1,0 +1,15 @@
+{
+  "name": "nudge-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "relay:start": "npm --workspace @nudge/relay run start"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

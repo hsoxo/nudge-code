@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package nudge.v1;
+
+message Envelope {
+  string message_id = 1;
+  oneof payload {
+    AttachClient attach_client = 10;
+    ClientExited client_exited = 11;
+    GetState get_state = 12;
+    SessionState session_state = 13;
+    Error error = 14;
+  }
+}
+
+message AttachClient {
+  string client_id = 1;
+}
+
+message ClientExited {
+  string client_id = 1;
+}
+
+message GetState {}
+
+message SessionState {
+  repeated Tab tabs = 1;
+  Entitlement entitlement = 2;
+}
+
+message Tab {
+  string id = 1;
+  string title = 2;
+  string status = 3;
+}
+
+message Entitlement {
+  string plan = 1;
+  uint32 max_bound_computers = 2;
+  uint32 max_tabs_per_computer = 3;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+}
