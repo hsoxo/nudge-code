@@ -24,6 +24,8 @@ docker run --rm -p 8787:8787 \
 
 The container enables `NUDGE_RELAY_HOSTED_MODE=1` by default.
 
+The release workflow builds this image on Linux and smoke-checks `/readyz` so container regressions are caught before release. Publishing the image to a registry is intentionally left until the hosting target is chosen.
+
 `NUDGE_RELAY_HOSTED_MODE=1` enables the relay hardening defaults expected for hosted service traffic:
 
 - signed websocket auth is required

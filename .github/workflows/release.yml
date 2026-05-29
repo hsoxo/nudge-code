@@ -80,10 +80,61 @@ jobs:
           path: dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz*
           if-no-files-found: error
 
+  relay-container:
+    name: Relay container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check relay container definition
+        run: npm run check:relay-container
+
+      - name: Build relay container
+        run: docker build -f packages/relay/Dockerfile -t nudge-relay:ci .
+
+      - name: Smoke relay container readiness
+        run: |
+          docker run -d --name nudge-relay \
+            -p 8787:8787 \
+            -e NUDGE_RELAY_STATE_PATH=/var/lib/nudge/relay-state.json \
+            nudge-relay:ci
+          ready=0
+          for attempt in $(seq 1 40); do
+            if curl -fsSL http://127.0.0.1:8787/readyz > "$RUNNER_TEMP/relay-readyz.json"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            docker logs nudge-relay
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/relay-readyz.json"
+          node - "$RUNNER_TEMP/relay-readyz.json" <<'NODE'
+          const fs = require('node:fs');
+          const ready = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const unexpected = [
+            'websocket_signature_not_required',
+            'websocket_challenge_not_required',
+            'legacy_http_messages_enabled',
+            'e2e_payload_not_required',
+          ].filter((warning) => ready.warnings.includes(warning));
+          if (!ready.config.hostedMode || !ready.config.statePersistence || unexpected.length > 0) {
+            throw new Error(`relay container not hardened: ${JSON.stringify(ready)}`);
+          }
+          NODE
+
+      - name: Stop relay container
+        if: always()
+        run: docker rm -f nudge-relay >/dev/null 2>&1 || true
+
   publish-github-release:
     name: Publish GitHub release
     if: github.ref_type == 'tag'
-    needs: rust-release
+    needs:
+      - rust-release
+      - relay-container
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
