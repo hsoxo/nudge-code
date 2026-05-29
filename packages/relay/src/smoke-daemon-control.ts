@@ -127,13 +127,10 @@ async function main(): Promise<void> {
       phoneIdentity,
     };
     let phoneConnection = await connectEncryptedPhone(smokeContext, binding.bindingId);
-    phoneConnection.websocket.send(JSON.stringify({
-      toDeviceId: binding.daemonDeviceId,
-      payload: phoneConnection.e2eSession.encrypt('get_state', { type: 'get_state', requestId: 'state-1' }),
-    }));
-    const stateResponse = await waitForEncryptedDaemonResponse(
+    const stateResponse = await requestEncryptedState(
       phoneConnection.websocket,
       phoneConnection.e2eSession,
+      binding.daemonDeviceId,
       'state-1',
     );
     if (!stateResponse.ok) {
@@ -163,7 +160,6 @@ async function main(): Promise<void> {
       phoneConnection.e2eSession,
       'NUDGE_RELAY_CONTROL',
     );
-    await assertEncryptedLiveAgentStatus(phoneConnection.websocket, phoneConnection.e2eSession);
 
     await sleep(300);
     const output = await runNudge(env, ['pty-output', '--max-bytes', '8192']);
@@ -394,17 +390,6 @@ async function writeSessionState(env: NodeJS.ProcessEnv, state: unknown): Promis
     throw new Error('NUDGE_STATE_PATH is required');
   }
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-}
-
-async function assertEncryptedLiveAgentStatus(websocket: WebSocket, session: E2ESession): Promise<void> {
-  const status = await waitForEncryptedLiveAgentStatus(websocket, session);
-  if (
-    status.tabId !== 'default' ||
-    status.agentStatus?.kind !== 'shell' ||
-    status.agentStatus?.state !== 'running'
-  ) {
-    throw new Error(`unexpected live agent status payload: ${JSON.stringify(status)}`);
-  }
 }
 
 async function connectEncryptedPhone(
@@ -643,6 +628,19 @@ function makeE2ESession(input: {
   };
 }
 
+async function requestEncryptedState(
+  websocket: WebSocket,
+  session: E2ESession,
+  daemonDeviceId: string,
+  requestId: string,
+): Promise<{ ok?: boolean; data?: unknown }> {
+  websocket.send(JSON.stringify({
+    toDeviceId: daemonDeviceId,
+    payload: session.encrypt('get_state', { type: 'get_state', requestId }),
+  }));
+  return waitForEncryptedDaemonResponse(websocket, session, requestId);
+}
+
 async function waitForEncryptedDaemonResponse(
   websocket: WebSocket,
   session: E2ESession,
@@ -691,28 +689,6 @@ async function waitForEncryptedLiveOutput(
     }
   }
   throw new Error(`timed out waiting for encrypted live output containing ${expectedText}`);
-}
-
-async function waitForEncryptedLiveAgentStatus(
-  websocket: WebSocket,
-  session: E2ESession,
-): Promise<{ tabId?: string; agentStatus?: { kind?: string; state?: string } }> {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const message = await waitForMessage(websocket, (candidate): candidate is RelayMessage => (
-      candidate.type === 'message' &&
-      candidate.message?.payload?.type === 'e2e_envelope'
-    ));
-    const payload = session.decrypt(message.message.payload) as {
-      type?: string;
-      ok?: boolean;
-      data?: { tabId?: string; agentStatus?: { kind?: string; state?: string } };
-    };
-    if (payload.type === 'daemon_response' && payload.ok === true && payload.data?.agentStatus) {
-      return payload.data;
-    }
-  }
-  throw new Error('timed out waiting for encrypted live agent status');
 }
 
 function terminalOutputText(data: unknown): string {

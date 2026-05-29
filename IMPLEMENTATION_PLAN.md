@@ -493,6 +493,7 @@ Current implementation status:
 - Pairing claim attempts are rate-limited in the relay by client address and normalized pairing code, returning `429 pairing_rate_limited` with `Retry-After` when exceeded.
 - Relay audit logging can be enabled with `NUDGE_RELAY_AUDIT_PATH`; it writes JSONL metadata events for device registration, binding start/claim/confirm/revoke, websocket challenge/authorization/rejection, message routing/queueing, and polling.
 - Relay audit records intentionally omit terminal/control payloads, pairing codes, and device public keys. Message events only record route metadata plus `payloadType`.
+- Daemon audit logging can be enabled with `NUDGE_DAEMON_AUDIT_PATH`; it writes JSONL metadata for explicit approval/rejection actions observed after E2E decryption or local IPC handling, without recording terminal input text or terminal output.
 - Relay E2E payload enforcement can be enabled with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; it rejects plaintext relay payloads and forwards only E2E handshake setup or opaque encrypted envelope payloads.
 - Shared protobuf types define E2E handshake and encrypted envelope messages. Daemon and iOS cover encryption, replay rejection, relay JSON conversion, transcript signature validation, and live relay request/response encryption.
 - Relay hosted mode can be enabled with `NUDGE_RELAY_HOSTED_MODE=1` to require signed/challenged websockets, require E2E relay payloads, and disable legacy HTTP message endpoints together.

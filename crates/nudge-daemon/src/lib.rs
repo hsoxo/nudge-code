@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,36 @@ pub struct DaemonConfig {
 #[derive(Debug, Clone)]
 pub struct StateStore {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct DaemonAuditSink {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ApprovalAuditAction {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ApprovalAuditSource {
+    LocalIpc,
+    RelayControl,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalAuditEvent<'a> {
+    timestamp: String,
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    tab_id: &'a str,
+    agent_kind: &'static str,
+    action: ApprovalAuditAction,
+    source: ApprovalAuditSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +462,52 @@ impl StateStore {
     fn secure_file_permissions(&self) -> Result<()> {
         fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to set permissions on {}", self.path.display()))
+    }
+}
+
+impl DaemonAuditSink {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("NUDGE_DAEMON_AUDIT_PATH").map(|path| Self {
+            path: PathBuf::from(path),
+        })
+    }
+
+    fn write_approval_action(
+        &self,
+        tab_id: &str,
+        agent_status: &AgentStatus,
+        action: ApprovalAuditAction,
+        source: ApprovalAuditSource,
+    ) -> Result<()> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let event = ApprovalAuditEvent {
+            timestamp: now_string(),
+            event_type: "approval_action",
+            tab_id,
+            agent_kind: agent_status.kind.as_str(),
+            action,
+            source,
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        file.write_all(serde_json::to_string(&event)?.as_bytes())
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure {}", self.path.display()))?;
+        Ok(())
     }
 }
 
@@ -1433,6 +1509,7 @@ struct DaemonRuntime {
     relay_state: Arc<Mutex<RelayConnectionState>>,
     terminal_changes: broadcast::Sender<TerminalChange>,
     agent_status_changes: broadcast::Sender<AgentStatusChange>,
+    audit_sink: Option<DaemonAuditSink>,
     started_at: Instant,
     socket_path: PathBuf,
 }
@@ -1457,6 +1534,7 @@ impl DaemonRuntime {
             relay_state: Arc::new(Mutex::new(RelayConnectionState::default())),
             terminal_changes: broadcast::channel(512).0,
             agent_status_changes: broadcast::channel(512).0,
+            audit_sink: DaemonAuditSink::from_env(),
             started_at: Instant::now(),
             socket_path,
         }
@@ -1584,6 +1662,46 @@ impl DaemonRuntime {
             .and_then(|tab| tab.pty.as_ref())
             .with_context(|| format!("tab {tab_id} does not have a pty"))?;
         pty.write_input(&data)
+    }
+
+    async fn write_input_from(
+        &self,
+        tab_id: &str,
+        data: Vec<u8>,
+        source: ApprovalAuditSource,
+    ) -> Result<()> {
+        let audit_event = self.approval_audit_event(tab_id, &data, source).await;
+        self.write_input(tab_id, data).await?;
+        if let Some((agent_status, action, source)) = audit_event {
+            if let Some(audit_sink) = &self.audit_sink {
+                let _ = audit_sink.write_approval_action(tab_id, &agent_status, action, source);
+            }
+        }
+        Ok(())
+    }
+
+    async fn approval_audit_event(
+        &self,
+        tab_id: &str,
+        data: &[u8],
+        source: ApprovalAuditSource,
+    ) -> Option<(AgentStatus, ApprovalAuditAction, ApprovalAuditSource)> {
+        self.audit_sink.as_ref()?;
+        let action = approval_action_from_input(data)?;
+        let agent_status = {
+            let session = self.session.lock().await;
+            session
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| tab.agent_status.clone())
+        };
+        let agent_status = agent_status?;
+        if agent_status.state == AgentInteractionState::NeedsApproval {
+            Some((agent_status, action, source))
+        } else {
+            None
+        }
     }
 
     async fn output_tail(&self, tab_id: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -2414,7 +2532,14 @@ async fn handle_relay_control_request(
             if enter {
                 text.push('\r');
             }
-            match runtime.write_input(&tab_id, text.into_bytes()).await {
+            match runtime
+                .write_input_from(
+                    &tab_id,
+                    text.into_bytes(),
+                    ApprovalAuditSource::RelayControl,
+                )
+                .await
+            {
                 Ok(()) => RelayControlResponse::ok(request_id, json!({"accepted": true})),
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
@@ -2519,6 +2644,17 @@ fn relay_control_response_payload(
         response["relayMessageId"] = Value::String(relay_message_id.to_string());
     }
     response
+}
+
+fn approval_action_from_input(data: &[u8]) -> Option<ApprovalAuditAction> {
+    let text = std::str::from_utf8(data).ok()?.trim();
+    if text.eq_ignore_ascii_case("y") || text.eq_ignore_ascii_case("yes") {
+        Some(ApprovalAuditAction::Approve)
+    } else if text.eq_ignore_ascii_case("n") || text.eq_ignore_ascii_case("no") {
+        Some(ApprovalAuditAction::Reject)
+    } else {
+        None
+    }
 }
 
 fn relay_message_json(
@@ -3037,7 +3173,9 @@ async fn handle_payload(
             }))
         }
         Some(v1::envelope::Payload::TerminalInput(input)) => {
-            runtime.write_input(&input.tab_id, input.data).await?;
+            runtime
+                .write_input_from(&input.tab_id, input.data, ApprovalAuditSource::LocalIpc)
+                .await?;
             Some(v1::envelope::Payload::Ack(v1::Ack {
                 message: "input accepted".to_string(),
             }))
@@ -3253,6 +3391,117 @@ mod tests {
         let proto = session.to_proto();
         assert_eq!(proto.tabs.len(), 1);
         assert_eq!(proto.entitlement, Some(nudge_protocol::free_entitlement()));
+    }
+
+    #[test]
+    fn approval_action_classifier_accepts_only_explicit_answers() {
+        assert_eq!(
+            approval_action_from_input(b"y\r"),
+            Some(ApprovalAuditAction::Approve)
+        );
+        assert_eq!(
+            approval_action_from_input(b"YES\n"),
+            Some(ApprovalAuditAction::Approve)
+        );
+        assert_eq!(
+            approval_action_from_input(b"n\r"),
+            Some(ApprovalAuditAction::Reject)
+        );
+        assert_eq!(approval_action_from_input(b"yes please\r"), None);
+        assert_eq!(approval_action_from_input("确认\n".as_bytes()), None);
+    }
+
+    #[test]
+    fn daemon_audit_writes_approval_metadata_without_input_text() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-daemon-audit-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let audit_path = root.join("daemon-audit.jsonl");
+        let sink = DaemonAuditSink {
+            path: audit_path.clone(),
+        };
+        let status = AgentStatus {
+            kind: AgentKind::Claude,
+            state: AgentInteractionState::NeedsApproval,
+            confidence: 0.84,
+            source: AgentDetectionSource::Screen,
+        };
+
+        sink.write_approval_action(
+            "default",
+            &status,
+            ApprovalAuditAction::Approve,
+            ApprovalAuditSource::RelayControl,
+        )
+        .expect("audit event should write");
+
+        let audit_text = fs::read_to_string(&audit_path).expect("audit log should exist");
+        assert!(audit_text.contains(r#""type":"approval_action""#));
+        assert!(audit_text.contains(r#""tab_id":"default""#));
+        assert!(audit_text.contains(r#""agent_kind":"claude""#));
+        assert!(audit_text.contains(r#""action":"approve""#));
+        assert!(audit_text.contains(r#""source":"relay_control""#));
+        assert!(!audit_text.contains(r#""text""#));
+        assert!(!audit_text.contains("y\r"));
+
+        let permissions = fs::metadata(&audit_path)
+            .expect("audit log metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(permissions, 0o600);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn runtime_prepares_approval_audit_only_for_approval_state() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-daemon-audit-event-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        session.tabs[0].agent_status = AgentStatus {
+            kind: AgentKind::Codex,
+            state: AgentInteractionState::NeedsApproval,
+            confidence: 0.82,
+            source: AgentDetectionSource::Screen,
+        };
+        let mut runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        runtime.audit_sink = Some(DaemonAuditSink {
+            path: root.join("daemon-audit.jsonl"),
+        });
+
+        let event = runtime
+            .approval_audit_event("default", b"y\r", ApprovalAuditSource::LocalIpc)
+            .await
+            .expect("approval input should prepare audit event");
+        assert_eq!(event.0.kind, AgentKind::Codex);
+        assert_eq!(event.1, ApprovalAuditAction::Approve);
+        assert_eq!(event.2, ApprovalAuditSource::LocalIpc);
+
+        assert!(
+            runtime
+                .approval_audit_event("default", b"continue\r", ApprovalAuditSource::LocalIpc)
+                .await
+                .is_none()
+        );
+        {
+            let mut session = runtime.session.lock().await;
+            session.tabs[0].agent_status.state = AgentInteractionState::WaitingForInput;
+        }
+        assert!(
+            runtime
+                .approval_audit_event("default", b"y\r", ApprovalAuditSource::LocalIpc)
+                .await
+                .is_none()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
