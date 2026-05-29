@@ -1217,11 +1217,13 @@ impl DaemonRuntime {
             .iter()
             .find(|tab| tab.tab_id == tab_id)
             .with_context(|| format!("tab {tab_id} was not found"))?;
-        let snapshot = runtime_tab
-            .grid
-            .lock()
-            .expect("terminal grid lock poisoned")
-            .snapshot();
+        let (snapshot, frame) = {
+            let grid = runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned");
+            (grid.snapshot(), grid.render_frame(1))
+        };
         let width_mode = {
             let session = self.session.lock().await;
             session
@@ -1235,7 +1237,7 @@ impl DaemonRuntime {
             tab_id: tab_id.to_string(),
             rows: snapshot.rows as u32,
             cols: snapshot.cols as u32,
-            frame: snapshot.formatted,
+            frame,
             width_mode,
         })
     }

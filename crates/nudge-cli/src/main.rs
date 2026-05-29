@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::{Hide, MoveTo, RestorePosition, SavePosition, Show};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
     MouseEvent, MouseEventKind,
@@ -557,7 +557,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
     if !selected_tab_needs_restart(&state, &selected_tab_id) {
         resize_selected_tab(&selected_tab_id).await?;
     }
-    let mut last_frame = String::new();
+    let mut last_frame = Vec::new();
     let mut prefix_active = false;
 
     loop {
@@ -1064,17 +1064,20 @@ impl Drop for TerminalGuard {
 struct ClientFrame {
     rows: u32,
     cols: u32,
-    text: String,
+    frame: Vec<u8>,
     width_mode: String,
     tab_status: String,
 }
 
 impl ClientFrame {
-    fn fingerprint(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}",
-            self.rows, self.cols, self.width_mode, self.tab_status, self.text
+    fn fingerprint(&self) -> Vec<u8> {
+        let mut fingerprint = format!(
+            "{}:{}:{}:{}:",
+            self.rows, self.cols, self.width_mode, self.tab_status
         )
+        .into_bytes();
+        fingerprint.extend_from_slice(&self.frame);
+        fingerprint
     }
 }
 
@@ -1087,6 +1090,11 @@ async fn draw_frame(
     let mut output = stdout();
     let (terminal_cols, terminal_rows) = size().unwrap_or((80, 24));
     execute!(output, MoveTo(0, 0), Clear(ClearType::All)).context("failed to clear terminal")?;
+    output
+        .write_all(&render.frame)
+        .context("failed to write terminal render frame")?;
+    execute!(output, SavePosition)?;
+    execute!(output, MoveTo(0, 0), Clear(ClearType::CurrentLine))?;
     write!(
         output,
         "{}",
@@ -1095,22 +1103,25 @@ async fn draw_frame(
             terminal_cols as usize
         )
     )?;
-    let content_rows = terminal_rows.saturating_sub(2) as usize;
-    for (index, line) in render.text.lines().take(content_rows).enumerate() {
-        execute!(output, MoveTo(0, (index + 1) as u16))?;
-        write!(output, "{}", fit_line(line, terminal_cols as usize))?;
-    }
-    execute!(output, MoveTo(0, terminal_rows.saturating_sub(1)))?;
+    execute!(
+        output,
+        MoveTo(0, terminal_rows.saturating_sub(1)),
+        Clear(ClearType::CurrentLine)
+    )?;
     write!(
         output,
         "{}",
-        status_line(
-            &render.width_mode,
-            &render.tab_status,
-            render.rows,
-            render.cols,
+        fit_line(
+            &status_line(
+                &render.width_mode,
+                &render.tab_status,
+                render.rows,
+                render.cols,
+            ),
+            terminal_cols as usize,
         )
     )?;
+    execute!(output, RestorePosition)?;
     output.flush().context("failed to flush terminal frame")?;
     Ok(())
 }
@@ -1266,23 +1277,18 @@ async fn get_session_state() -> Result<v1::SessionState> {
 }
 
 async fn render_tab(tab_id: &str, state: &v1::SessionState) -> Result<ClientFrame> {
-    let response = nudge_daemon::request(envelope(v1::envelope::Payload::TerminalSnapshotRequest(
-        v1::TerminalSnapshotRequest {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::TerminalRenderRequest(
+        v1::TerminalRenderRequest {
             tab_id: tab_id.to_string(),
         },
     )))
     .await?;
     match response.payload {
-        Some(v1::envelope::Payload::TerminalSnapshot(snapshot)) => Ok(ClientFrame {
-            rows: snapshot.rows,
-            cols: snapshot.cols,
-            text: snapshot.text,
-            width_mode: state
-                .tabs
-                .iter()
-                .find(|tab| tab.id == tab_id)
-                .map(|tab| tab.width_mode.clone())
-                .unwrap_or_else(|| "computer".to_string()),
+        Some(v1::envelope::Payload::TerminalRender(render)) => Ok(ClientFrame {
+            rows: render.rows,
+            cols: render.cols,
+            frame: render.frame,
+            width_mode: render.width_mode,
             tab_status: state
                 .tabs
                 .iter()
@@ -1293,7 +1299,7 @@ async fn render_tab(tab_id: &str, state: &v1::SessionState) -> Result<ClientFram
         Some(v1::envelope::Payload::Error(error)) => {
             anyhow::bail!("daemon returned {}: {}", error.code, error.message);
         }
-        _ => anyhow::bail!("daemon returned an unexpected snapshot response"),
+        _ => anyhow::bail!("daemon returned an unexpected render response"),
     }
 }
 

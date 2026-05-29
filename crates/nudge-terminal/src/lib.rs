@@ -63,6 +63,110 @@ impl TerminalGrid {
             formatted: self.parser.screen().contents_formatted(),
         }
     }
+
+    pub fn render_frame(&self, row_offset: u16) -> Vec<u8> {
+        let screen = self.parser.screen();
+        let mut frame = Vec::new();
+        push_cursor_visibility(&mut frame, screen.hide_cursor());
+        for (row, row_bytes) in screen.rows_formatted(0, self.size.cols).enumerate() {
+            let row = u16::try_from(row).unwrap_or(u16::MAX);
+            push_move_to(&mut frame, row_offset.saturating_add(row), 0);
+            frame.extend_from_slice(b"\x1b[2K");
+            push_offset_cursor_moves(&mut frame, &row_bytes, row_offset);
+        }
+        frame.extend_from_slice(b"\x1b[m");
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_col = cursor_col.min(self.size.cols.saturating_sub(1));
+        push_move_to(
+            &mut frame,
+            row_offset.saturating_add(cursor_row),
+            cursor_col,
+        );
+        push_cursor_visibility(&mut frame, screen.hide_cursor());
+        frame
+    }
+}
+
+fn push_move_to(buffer: &mut Vec<u8>, row: u16, col: u16) {
+    if row == 0 && col == 0 {
+        buffer.extend_from_slice(b"\x1b[H");
+    } else {
+        buffer.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+    }
+}
+
+fn push_cursor_visibility(buffer: &mut Vec<u8>, hidden: bool) {
+    if hidden {
+        buffer.extend_from_slice(b"\x1b[?25l");
+    } else {
+        buffer.extend_from_slice(b"\x1b[?25h");
+    }
+}
+
+fn push_offset_cursor_moves(buffer: &mut Vec<u8>, bytes: &[u8], row_offset: u16) {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            let sequence_start = index;
+            index += 2;
+            while index < bytes.len() && !(0x40..=0x7e).contains(&bytes[index]) {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                buffer.extend_from_slice(&bytes[sequence_start..]);
+                return;
+            }
+
+            let final_byte = bytes[index];
+            let params = &bytes[(sequence_start + 2)..index];
+            if matches!(final_byte, b'H' | b'f')
+                && let Some((row, col)) = parse_cursor_position_params(params)
+            {
+                let row = row.saturating_add(row_offset);
+                buffer.extend_from_slice(
+                    format!("\x1b[{row};{col}{}", final_byte as char).as_bytes(),
+                );
+            } else {
+                buffer.extend_from_slice(&bytes[sequence_start..=index]);
+            }
+            index += 1;
+        } else {
+            buffer.push(bytes[index]);
+            index += 1;
+        }
+    }
+}
+
+fn parse_cursor_position_params(params: &[u8]) -> Option<(u16, u16)> {
+    if params.is_empty() {
+        return Some((1, 1));
+    }
+    if params
+        .iter()
+        .any(|byte| !byte.is_ascii_digit() && *byte != b';')
+    {
+        return None;
+    }
+    let mut parts = params.split(|byte| *byte == b';');
+    let row = parse_cursor_position_param(parts.next().unwrap_or_default())?;
+    let col = parse_cursor_position_param(parts.next().unwrap_or_default())?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((row, col))
+}
+
+fn parse_cursor_position_param(param: &[u8]) -> Option<u16> {
+    if param.is_empty() {
+        return Some(1);
+    }
+    let mut value = 0u32;
+    for byte in param {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u32::from(byte - b'0'));
+    }
+    Some(value.clamp(1, u32::from(u16::MAX)) as u16)
 }
 
 impl Default for TerminalGrid {
@@ -84,5 +188,44 @@ mod tests {
         assert_eq!(snapshot.cols, 80);
         assert!(snapshot.text.contains("hello"));
         assert!(!snapshot.formatted.is_empty());
+    }
+
+    #[test]
+    fn render_frame_targets_content_area_without_full_screen_clear() {
+        let mut grid = TerminalGrid::default();
+        grid.process(b"\x1b[31mhello");
+
+        let frame = grid.render_frame(1);
+
+        assert!(frame.starts_with(b"\x1b[?25h\x1b[2;1H\x1b[2K"));
+        assert!(
+            frame
+                .windows(b"hello".len())
+                .any(|window| window == b"hello")
+        );
+        assert!(
+            !frame
+                .windows(b"\x1b[H\x1b[J".len())
+                .any(|window| window == b"\x1b[H\x1b[J")
+        );
+    }
+
+    #[test]
+    fn render_frame_restores_offset_cursor_position() {
+        let mut grid = TerminalGrid::default();
+        grid.process(b"hi");
+
+        let frame = grid.render_frame(1);
+
+        assert!(frame.ends_with(b"\x1b[2;3H\x1b[?25h"));
+    }
+
+    #[test]
+    fn render_frame_offsets_absolute_cursor_moves_inside_row_bytes() {
+        let mut frame = Vec::new();
+
+        push_offset_cursor_moves(&mut frame, b"\x1b[Htop\x1b[3;4Hcell\x1b[2K", 1);
+
+        assert_eq!(frame, b"\x1b[2;1Htop\x1b[4;4Hcell\x1b[2K");
     }
 }
