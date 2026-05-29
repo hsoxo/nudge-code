@@ -152,3 +152,8 @@ enum BindingClaimState: Equatable, Sendable {
         return false
     }
 }
+
+struct RelaySyncTaskID: Equatable {
+    var machineID: String?
+    var generation: Int
+}

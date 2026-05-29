@@ -44,7 +44,7 @@ struct TerminalWorkspaceView: View {
                 .accessibilityLabel("Refresh terminal")
             }
         }
-        .task(id: model.selectedMachineID) {
+        .task(id: model.relaySyncTaskID) {
             await model.refreshSelectedMachineBinding()
             await model.syncSelectedMachineSession()
         }

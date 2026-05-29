@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var model = model
@@ -12,6 +13,18 @@ struct RootView: View {
                 BindingView()
             } else {
                 TerminalWorkspaceView()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                model.resumeRelaySessionFromForeground()
+            case .background:
+                model.suspendRelaySessionForBackground()
+            case .inactive:
+                break
+            @unknown default:
+                break
             }
         }
     }

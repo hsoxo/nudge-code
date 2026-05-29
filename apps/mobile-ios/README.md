@@ -41,7 +41,7 @@ Current scaffold:
 - persisted machine binding metadata storage, including peer public identity keys for websocket attach and E2E handshake validation.
 - one-shot relay binding status refresh when opening a pending machine.
 - long-lived `/ws/mobile` session for state, snapshot, byte-safe replayed/live terminal bytes, input-response, phone-profile, and width-mode sync.
-- automatic relay session reconnect with stale-state banner.
+- automatic relay session reconnect with stale-state banner and app background/foreground session restart handling.
 - bundled xterm.js runtime assets copied from `@xterm/xterm`.
 - terminal snapshot fetch, bounded base64 replay buffer, and ephemeral daemon-pushed live terminal bytes into the native terminal preview.
 - terminal input over relay from shortcut buttons and the composer.

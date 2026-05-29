@@ -727,6 +727,106 @@ struct BindingClaimTests {
         #expect(persistence.savedStates.last?.machines.first?.binding?.status == .revoked)
     }
 
+    @Test func appModelSuspendsRelaySessionWhenAppBackgrounds() async throws {
+        let machine = activeMachine()
+        let session = RecordingRelaySession(suspendWhenEmpty: true)
+        let client = RecordingRelayClient(session: session)
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            sessionReconnectDelayNanoseconds: 1_000_000
+        )
+        let syncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            syncTask.cancel()
+        }
+
+        try await waitUntil {
+            client.openSessionRequests == [machine] &&
+                session.sessionStateRequestCount == 1
+        }
+
+        model.suspendRelaySessionForBackground()
+        await syncTask.value
+
+        #expect(session.closed)
+        #expect(client.openSessionRequests == [machine])
+        #expect(model.machines.first?.connectionState == .connecting)
+        #expect(model.machines.first?.lastSeenText == "relay session paused")
+    }
+
+    @Test func appModelResumesRelaySessionWhenAppReturnsForeground() async throws {
+        let machine = activeMachine()
+        let firstSession = RecordingRelaySession(suspendWhenEmpty: true)
+        let secondTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let secondSession = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [secondTab]))
+        ], suspendWhenEmpty: true)
+        let client = RecordingRelayClient(sessions: [firstSession, secondSession])
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: []],
+            selectedMachineID: machine.id,
+            relayClient: client,
+            sessionReconnectDelayNanoseconds: 1_000_000
+        )
+        let firstTaskID = model.relaySyncTaskID
+        let firstSyncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            firstSyncTask.cancel()
+        }
+
+        try await waitUntil {
+            client.openSessionRequests == [machine] &&
+                firstSession.sessionStateRequestCount == 1
+        }
+        model.suspendRelaySessionForBackground()
+        await firstSyncTask.value
+
+        model.resumeRelaySessionFromForeground()
+        let resumedTaskID = model.relaySyncTaskID
+
+        #expect(resumedTaskID.machineID == firstTaskID.machineID)
+        #expect(resumedTaskID.generation == firstTaskID.generation + 1)
+        #expect(model.machines.first?.lastSeenText == "relay session reconnecting")
+
+        let secondSyncTask = Task {
+            await model.syncSelectedMachineSession()
+        }
+        defer {
+            secondSyncTask.cancel()
+        }
+
+        try await waitUntil {
+            client.openSessionRequests.count == 2 &&
+                model.machines.first?.lastSeenText == "relay session synced"
+        }
+
+        secondSyncTask.cancel()
+        await secondSyncTask.value
+
+        #expect(client.openSessionRequests.map(\.id) == [machine.id, machine.id])
+        #expect(firstSession.closed)
+        #expect(secondSession.closed)
+        #expect(secondSession.sessionStateRequestCount == 1)
+        #expect(secondSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(model.tabsByMachine[machine.id]?.first?.id == "default")
+    }
+
     @Test func appModelUpdatesWidthThroughOpenRelaySession() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(
@@ -1194,12 +1294,18 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     }
 
     func receiveEvent() async throws -> RelaySessionEvent {
+        if closed {
+            throw CancellationError()
+        }
         if let errorWhenReceiving {
             throw errorWhenReceiving
         }
         if events.isEmpty {
             if suspendWhenEmpty {
                 while true {
+                    if closed {
+                        throw CancellationError()
+                    }
                     try await Task.sleep(nanoseconds: 1_000_000)
                 }
             }

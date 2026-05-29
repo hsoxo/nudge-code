@@ -25,12 +25,14 @@ final class AppModel {
     var bindingClaimState: BindingClaimState = .idle
     var phoneProfile: TerminalProfile
     var commandComposer = ""
+    private(set) var relaySyncGeneration = 0
     private let relayClient: any RelayClient
     private let persistence: (any AppModelPersistence)?
     private let sessionReconnectDelayNanoseconds: UInt64
     private var relaySession: (any RelaySession)?
     private var relaySessionMachineID: String?
     private var computerProfilesByTabKey: [String: TerminalProfile] = [:]
+    @ObservationIgnored private var relaySessionSuspendedForBackground = false
 
     init(
         machines: [Machine] = [],
@@ -104,6 +106,10 @@ final class AppModel {
     var selectedTab: TerminalTab? {
         let tabs = selectedTabs
         return tabs.first { $0.id == selectedTabID } ?? tabs.first
+    }
+
+    var relaySyncTaskID: RelaySyncTaskID {
+        RelaySyncTaskID(machineID: selectedMachineID, generation: relaySyncGeneration)
     }
 
     func selectMachine(_ machine: Machine) {
@@ -270,6 +276,29 @@ final class AppModel {
         }
     }
 
+    func suspendRelaySessionForBackground() {
+        relaySessionSuspendedForBackground = true
+        closeRelaySession()
+        guard let machineID = selectedMachineID,
+              activeSelectedMachineIndex(machineID: machineID) != nil
+        else {
+            return
+        }
+        markMachine(machineID: machineID, state: .connecting, text: "relay session paused")
+    }
+
+    func resumeRelaySessionFromForeground() {
+        guard relaySessionSuspendedForBackground else {
+            return
+        }
+        relaySessionSuspendedForBackground = false
+        if let machineID = selectedMachineID,
+           activeSelectedMachineIndex(machineID: machineID) != nil {
+            markMachine(machineID: machineID, state: .connecting, text: "relay session reconnecting")
+        }
+        relaySyncGeneration &+= 1
+    }
+
     func syncSelectedMachineSession() async {
         guard let machineID = selectedMachineID
         else {
@@ -278,6 +307,10 @@ final class AppModel {
         }
         closeRelaySession()
         while !Task.isCancelled {
+            guard !relaySessionSuspendedForBackground else {
+                closeRelaySession()
+                return
+            }
             guard let machineIndex = activeSelectedMachineIndex(machineID: machineID) else {
                 closeRelaySession()
                 return
@@ -293,6 +326,9 @@ final class AppModel {
                 return
             } catch {
                 closeRelaySession()
+                guard !relaySessionSuspendedForBackground else {
+                    return
+                }
                 guard activeSelectedMachineIndex(machineID: machineID) != nil else {
                     return
                 }
@@ -471,6 +507,10 @@ final class AppModel {
 
     private func runRelaySession(machineID: String, machine: Machine) async throws {
         let session = try await relayClient.openSession(machine: machine)
+        guard !relaySessionSuspendedForBackground else {
+            session.close()
+            throw CancellationError()
+        }
         relaySession = session
         relaySessionMachineID = machineID
         markMachine(machineID: machineID, state: .online, text: "relay session connected")
