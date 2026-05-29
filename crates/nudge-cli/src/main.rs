@@ -67,6 +67,15 @@ enum Command {
         /// Skip installer checksum verification.
         #[arg(long)]
         skip_checksum: bool,
+        /// Require the installer to verify a release signature.
+        #[arg(long)]
+        require_signature: bool,
+        /// Public key URL for installer signature verification.
+        #[arg(long)]
+        public_key_url: Option<String>,
+        /// Public key file for installer signature verification.
+        #[arg(long)]
+        public_key_file: Option<PathBuf>,
     },
     /// Bind or revoke a phone through the relay.
     Bind {
@@ -342,6 +351,9 @@ async fn main() -> Result<()> {
             version,
             install_dir,
             skip_checksum,
+            require_signature,
+            public_key_url,
+            public_key_file,
         }) => {
             update_nudge(
                 dry_run,
@@ -349,6 +361,9 @@ async fn main() -> Result<()> {
                 version.as_deref(),
                 install_dir.as_deref(),
                 skip_checksum,
+                require_signature,
+                public_key_url.as_deref(),
+                public_key_file.as_deref(),
             )
             .await?
         }
@@ -1812,6 +1827,9 @@ async fn update_nudge(
     version: Option<&str>,
     install_dir: Option<&Path>,
     skip_checksum: bool,
+    require_signature: bool,
+    public_key_url: Option<&str>,
+    public_key_file: Option<&Path>,
 ) -> Result<()> {
     let script = install_script_url.trim();
     if script.is_empty() {
@@ -1830,6 +1848,15 @@ async fn update_nudge(
         if skip_checksum {
             println!("NUDGE_SKIP_CHECKSUM=1");
         }
+        if require_signature {
+            println!("NUDGE_REQUIRE_SIGNATURE=1");
+        }
+        if let Some(public_key_url) = public_key_url {
+            println!("NUDGE_PUBLIC_KEY_URL={public_key_url}");
+        }
+        if let Some(public_key_file) = public_key_file {
+            println!("NUDGE_PUBLIC_KEY_FILE={}", public_key_file.display());
+        }
         println!("command=sh -c {}", shell_quote(&command));
         return Ok(());
     }
@@ -1844,6 +1871,15 @@ async fn update_nudge(
     }
     if skip_checksum {
         process.env("NUDGE_SKIP_CHECKSUM", "1");
+    }
+    if require_signature {
+        process.env("NUDGE_REQUIRE_SIGNATURE", "1");
+    }
+    if let Some(public_key_url) = public_key_url {
+        process.env("NUDGE_PUBLIC_KEY_URL", public_key_url);
+    }
+    if let Some(public_key_file) = public_key_file {
+        process.env("NUDGE_PUBLIC_KEY_FILE", public_key_file);
     }
     let status = process
         .stdin(Stdio::null())
@@ -2390,5 +2426,21 @@ mod tests {
 
         assert_eq!(output.frame, resized.frame);
         assert!(output.full_redraw);
+    }
+
+    #[test]
+    fn update_shell_command_uses_downloader_for_hosted_script() {
+        let command = update_shell_command("https://nudgecode.dev/install.sh");
+
+        assert!(command.contains("curl -fsSL https://nudgecode.dev/install.sh | sh"));
+        assert!(command.contains("wget -qO- https://nudgecode.dev/install.sh | sh"));
+    }
+
+    #[test]
+    fn update_shell_command_runs_local_script_directly() {
+        assert_eq!(
+            update_shell_command("/tmp/nudge install.sh"),
+            "sh '/tmp/nudge install.sh'"
+        );
     }
 }

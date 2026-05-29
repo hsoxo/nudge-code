@@ -10,4 +10,5 @@ Detailed implementation docs can move under this directory as the codebase grows
 
 Current implementation docs:
 
+- `install.md`
 - `relay-hosted.md`

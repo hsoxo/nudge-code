@@ -25,6 +25,7 @@ ARTIFACT="nudge-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
 RELEASE_DIR="$TMP_DIR/releases/latest"
 INSTALL_DIR="$TMP_DIR/install"
 SIGNED_INSTALL_DIR="$TMP_DIR/signed-install"
+SIGNED_URL_INSTALL_DIR="$TMP_DIR/signed-url-install"
 TAMPERED_INSTALL_DIR="$TMP_DIR/tampered-install"
 SMOKE_BIN="$TMP_DIR/nudge"
 SIGNING_KEY="$TMP_DIR/signing-key.pem"
@@ -70,6 +71,18 @@ if command -v openssl >/dev/null 2>&1; then
   SIGNED_OUTPUT="$("$SIGNED_INSTALL_DIR/nudge")"
   if [ "$SIGNED_OUTPUT" != "nudge smoke" ]; then
     echo "unexpected signed installed nudge output: $SIGNED_OUTPUT" >&2
+    exit 1
+  fi
+
+  NUDGE_RELEASE_BASE_URL="$TMP_DIR/releases" \
+  NUDGE_INSTALL_DIR="$SIGNED_URL_INSTALL_DIR" \
+  NUDGE_PUBLIC_KEY_URL="file://$PUBLIC_KEY" \
+  NUDGE_REQUIRE_SIGNATURE=1 \
+    "$ROOT_DIR/scripts/install.sh" >/dev/null
+
+  SIGNED_URL_OUTPUT="$("$SIGNED_URL_INSTALL_DIR/nudge")"
+  if [ "$SIGNED_URL_OUTPUT" != "nudge smoke" ]; then
+    echo "unexpected signed URL-key installed nudge output: $SIGNED_URL_OUTPUT" >&2
     exit 1
   fi
 

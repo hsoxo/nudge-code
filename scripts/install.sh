@@ -8,6 +8,7 @@ INSTALL_DIR="${NUDGE_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${NUDGE_RELEASE_BASE_URL:-https://nudgecode.dev/releases}"
 PUBLIC_KEY="${NUDGE_PUBLIC_KEY:-}"
 PUBLIC_KEY_FILE="${NUDGE_PUBLIC_KEY_FILE:-}"
+PUBLIC_KEY_URL="${NUDGE_PUBLIC_KEY_URL:-}"
 REQUIRE_SIGNATURE="${NUDGE_REQUIRE_SIGNATURE:-0}"
 
 download() {
@@ -91,8 +92,14 @@ if [ "${NUDGE_INSTALL_DRY_RUN:-0}" = "1" ]; then
   echo "url=${URL}"
   echo "checksum_url=${CHECKSUM_URL}"
   echo "signature_url=${SIGNATURE_URL}"
-  if [ -n "$PUBLIC_KEY" ] || [ -n "$PUBLIC_KEY_FILE" ]; then
-    echo "signature_verification=enabled"
+  if [ -n "$PUBLIC_KEY_FILE" ]; then
+    echo "signature_verification=enabled_public_key_file"
+    echo "public_key_file=${PUBLIC_KEY_FILE}"
+  elif [ -n "$PUBLIC_KEY" ]; then
+    echo "signature_verification=enabled_inline_public_key"
+  elif [ -n "$PUBLIC_KEY_URL" ]; then
+    echo "signature_verification=enabled_public_key_url"
+    echo "public_key_url=${PUBLIC_KEY_URL}"
   elif [ "$REQUIRE_SIGNATURE" = "1" ]; then
     echo "signature_verification=required_missing_public_key"
   else
@@ -118,18 +125,20 @@ if [ "${NUDGE_SKIP_CHECKSUM:-0}" != "1" ]; then
   verify_checksum "$ARCHIVE" "$CHECKSUM_FILE"
 fi
 
-if [ -n "$PUBLIC_KEY" ] || [ -n "$PUBLIC_KEY_FILE" ]; then
+if [ -n "$PUBLIC_KEY" ] || [ -n "$PUBLIC_KEY_FILE" ] || [ -n "$PUBLIC_KEY_URL" ]; then
   SIGNATURE_FILE="$TMP_DIR/$ARTIFACT.sig"
   VERIFY_KEY_FILE="$TMP_DIR/nudge-release-public.pem"
   download "$SIGNATURE_URL" "$SIGNATURE_FILE"
   if [ -n "$PUBLIC_KEY_FILE" ]; then
     cp "$PUBLIC_KEY_FILE" "$VERIFY_KEY_FILE"
-  else
+  elif [ -n "$PUBLIC_KEY" ]; then
     printf '%s\n' "$PUBLIC_KEY" > "$VERIFY_KEY_FILE"
+  else
+    download "$PUBLIC_KEY_URL" "$VERIFY_KEY_FILE"
   fi
   verify_signature "$ARCHIVE" "$SIGNATURE_FILE" "$VERIFY_KEY_FILE"
 elif [ "$REQUIRE_SIGNATURE" = "1" ]; then
-  echo "NUDGE_REQUIRE_SIGNATURE=1 requires NUDGE_PUBLIC_KEY or NUDGE_PUBLIC_KEY_FILE" >&2
+  echo "NUDGE_REQUIRE_SIGNATURE=1 requires NUDGE_PUBLIC_KEY, NUDGE_PUBLIC_KEY_FILE, or NUDGE_PUBLIC_KEY_URL" >&2
   exit 1
 fi
 
