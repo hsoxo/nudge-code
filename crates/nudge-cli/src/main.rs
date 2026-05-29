@@ -492,6 +492,7 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
         resize_selected_tab(&selected_tab_id).await?;
     }
     let mut last_frame = String::new();
+    let mut prefix_active = false;
 
     loop {
         state = get_session_state().await?;
@@ -511,11 +512,18 @@ async fn run_interactive_client(mut state: v1::SessionState) -> Result<()> {
 
         if event::poll(Duration::from_millis(60)).context("failed to poll terminal input")? {
             match event::read().context("failed to read terminal input")? {
-                Event::Key(key) if should_detach(key) => break,
-                Event::Key(key) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    handle_control_key(key, &mut selected_tab_id).await?;
+                Event::Key(key) if is_prefix_key(key) => {
+                    prefix_active = true;
                     last_frame.clear();
                 }
+                Event::Key(key) if prefix_active => {
+                    if handle_prefix_key(key, &mut selected_tab_id).await? {
+                        break;
+                    }
+                    prefix_active = false;
+                    last_frame.clear();
+                }
+                Event::Key(key) if should_detach(key) => break,
                 Event::Key(key) => {
                     if !selected_tab_needs_restart(&state, &selected_tab_id)
                         && let Some(bytes) = key_to_pty_bytes(key)
@@ -916,7 +924,7 @@ fn tab_bar(state: &v1::SessionState, selected_tab_id: &str) -> String {
 
 fn status_line(width_mode: &str, tab_status: &str, rows: u32, cols: u32) -> String {
     format!(
-        "Ctrl-d detach | Ctrl-r restart | Ctrl-n next | Ctrl-p previous | status={tab_status} width={width_mode} size={rows}x{cols}"
+        "Ctrl-g c new | x close | n/p switch | r restart | w width | d detach | status={tab_status} width={width_mode} size={rows}x{cols}"
     )
 }
 
@@ -924,43 +932,48 @@ fn fit_line(line: &str, max_cols: usize) -> String {
     line.chars().take(max_cols).collect()
 }
 
-async fn handle_control_key(key: KeyEvent, selected_tab_id: &mut String) -> Result<()> {
+async fn handle_prefix_key(key: KeyEvent, selected_tab_id: &mut String) -> Result<bool> {
     match key.code {
         KeyCode::Char('n') => {
-            let state = get_session_state().await?;
-            if let Some(index) = state.tabs.iter().position(|tab| tab.id == *selected_tab_id) {
-                let next = (index + 1) % state.tabs.len();
-                *selected_tab_id = state.tabs[next].id.clone();
-                if !selected_tab_needs_restart(&state, selected_tab_id) {
-                    resize_selected_tab(selected_tab_id).await?;
-                }
-            }
+            select_relative_tab(selected_tab_id, 1).await?;
         }
         KeyCode::Char('p') => {
-            let state = get_session_state().await?;
-            if let Some(index) = state.tabs.iter().position(|tab| tab.id == *selected_tab_id) {
-                let next = if index == 0 {
-                    state.tabs.len() - 1
-                } else {
-                    index - 1
-                };
-                *selected_tab_id = state.tabs[next].id.clone();
-                if !selected_tab_needs_restart(&state, selected_tab_id) {
-                    resize_selected_tab(selected_tab_id).await?;
-                }
+            select_relative_tab(selected_tab_id, -1).await?;
+        }
+        KeyCode::Char('c') => {
+            let state = create_tab("shell").await?;
+            if let Some(tab) = state.tabs.last() {
+                *selected_tab_id = tab.id.clone();
+                resize_selected_tab(selected_tab_id).await?;
             }
+        }
+        KeyCode::Char('x') => {
+            let state = close_tab(selected_tab_id).await?;
+            *selected_tab_id = state
+                .tabs
+                .first()
+                .map(|tab| tab.id.clone())
+                .context("daemon session has no tabs")?;
         }
         KeyCode::Char('r') => {
             restart_tab(selected_tab_id).await?;
             resize_selected_tab(selected_tab_id).await?;
         }
+        KeyCode::Char('w') => {
+            toggle_width_mode(selected_tab_id).await?;
+        }
+        KeyCode::Char('d') => return Ok(true),
         _ => {
             if let Some(bytes) = control_key_to_pty_bytes(key) {
                 send_terminal_input(selected_tab_id, bytes).await?;
             }
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn is_prefix_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('g'))
 }
 
 fn should_detach(key: KeyEvent) -> bool {
@@ -1033,10 +1046,69 @@ async fn render_tab(tab_id: &str, state: &v1::SessionState) -> Result<ClientFram
     }
 }
 
+async fn select_relative_tab(selected_tab_id: &mut String, delta: isize) -> Result<()> {
+    let state = get_session_state().await?;
+    if state.tabs.is_empty() {
+        anyhow::bail!("daemon session has no tabs");
+    }
+    if let Some(index) = state.tabs.iter().position(|tab| tab.id == *selected_tab_id) {
+        let tab_count = state.tabs.len() as isize;
+        let next = (index as isize + delta).rem_euclid(tab_count) as usize;
+        *selected_tab_id = state.tabs[next].id.clone();
+        if !selected_tab_needs_restart(&state, selected_tab_id) {
+            resize_selected_tab(selected_tab_id).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn create_tab(title: &str) -> Result<v1::SessionState> {
+    let response =
+        nudge_daemon::request(envelope(v1::envelope::Payload::CreateTab(v1::CreateTab {
+            title: title.to_string(),
+        })))
+        .await?;
+    session_from_response(response)
+}
+
+async fn close_tab(tab_id: &str) -> Result<v1::SessionState> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::CloseTab(v1::CloseTab {
+        tab_id: tab_id.to_string(),
+    })))
+    .await?;
+    session_from_response(response)
+}
+
 async fn restart_tab(tab_id: &str) -> Result<()> {
     let response = nudge_daemon::request(envelope(v1::envelope::Payload::RestartTab(
         v1::RestartTab {
             tab_id: tab_id.to_string(),
+        },
+    )))
+    .await?;
+    let _ = session_from_response(response)?;
+    Ok(())
+}
+
+async fn toggle_width_mode(tab_id: &str) -> Result<()> {
+    let state = get_session_state().await?;
+    let tab = state
+        .tabs
+        .iter()
+        .find(|tab| tab.id == tab_id)
+        .with_context(|| format!("tab {tab_id} was not found"))?;
+    let next_mode = if tab.width_mode == "phone" {
+        "computer"
+    } else {
+        "phone"
+    };
+    let (cols, rows) = size().unwrap_or((80, 24));
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetWidthMode(
+        v1::SetWidthMode {
+            tab_id: tab_id.to_string(),
+            mode: next_mode.to_string(),
+            computer_rows: rows.saturating_sub(2).max(1) as u32,
+            computer_cols: cols as u32,
         },
     )))
     .await?;

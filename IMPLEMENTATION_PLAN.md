@@ -134,8 +134,9 @@ Current implementation status:
 
 - Running `nudge` starts or attaches to the daemon and enters a raw-mode alternate-screen terminal client.
 - The first client renders a Nudge tab/status chrome plus daemon-owned terminal snapshots, forwards basic key input, handles resize, and detaches with `Ctrl-d`.
-- `Ctrl-r` restarts a restored tab that is marked `needs_restart`; `Ctrl-n`/`Ctrl-p` switch selected tab when multiple tabs are available.
-- Full Zellij-like prefix bindings, mouse tab selection, rename/new/close inside the TUI, and high-fidelity ANSI frame composition remain open Phase 3 work.
+- `Ctrl-g` opens a Zellij-like prefix layer: `c` new tab, `x` close tab, `n`/`p` switch tabs, `r` restart, `w` toggle phone/computer width, `d` detach.
+- Free entitlement currently rejects `Ctrl-g c` until paid/multi-tab entitlement exists.
+- Mouse tab selection, rename inside the TUI, and high-fidelity ANSI frame composition remain open Phase 3 work.
 
 Tasks:
 
