@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 interface ReadinessResponse {
   ok: boolean;
   config: {
+    hostedMode: boolean;
     statePersistence: boolean;
     requireWebSocketSignature: boolean;
     requireWebSocketChallenge: boolean;
@@ -34,14 +35,22 @@ async function main(): Promise<void> {
 
     await withRelay({
       NUDGE_RELAY_STATE_PATH: join(tmp, 'relay-state.json'),
-      NUDGE_RELAY_REQUIRE_WS_SIGNATURE: '1',
-      NUDGE_RELAY_REQUIRE_WS_CHALLENGE: '1',
-      NUDGE_RELAY_REQUIRE_E2E_PAYLOAD: '1',
-      NUDGE_RELAY_DISABLE_HTTP_MESSAGES: '1',
+      NUDGE_RELAY_HOSTED_MODE: '1',
     }, async () => {
       const ready = await getJson<ReadinessResponse>('/readyz');
+      if (!ready.config.hostedMode) {
+        throw new Error(`expected hosted mode config, got ${JSON.stringify(ready)}`);
+      }
       if (!ready.config.statePersistence) {
         throw new Error(`expected persistent state config, got ${JSON.stringify(ready)}`);
+      }
+      if (
+        !ready.config.requireWebSocketSignature ||
+        !ready.config.requireWebSocketChallenge ||
+        !ready.config.requireE2EPayload ||
+        !ready.config.disableHttpMessageEndpoints
+      ) {
+        throw new Error(`expected hosted hardening config, got ${JSON.stringify(ready)}`);
       }
       for (const warning of [
         'relay_state_not_persistent',

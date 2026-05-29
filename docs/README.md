@@ -7,3 +7,7 @@ Planning documents currently live at the repository root:
 - `IMPLEMENTATION_PLAN.md`
 
 Detailed implementation docs can move under this directory as the codebase grows.
+
+Current implementation docs:
+
+- `relay-hosted.md`

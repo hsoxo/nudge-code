@@ -109,10 +109,11 @@ class FixedWindowRateLimiter {
 }
 
 const port = Number.parseInt(process.env.NUDGE_RELAY_PORT ?? '8787', 10);
-const requireWebSocketSignature = process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
-const requireWebSocketChallenge = process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
-const requireE2EPayload = process.env.NUDGE_RELAY_REQUIRE_E2E_PAYLOAD === '1';
-const disableHttpMessageEndpoints = process.env.NUDGE_RELAY_DISABLE_HTTP_MESSAGES === '1';
+const hostedMode = process.env.NUDGE_RELAY_HOSTED_MODE === '1';
+const requireWebSocketSignature = hostedMode || process.env.NUDGE_RELAY_REQUIRE_WS_SIGNATURE === '1';
+const requireWebSocketChallenge = hostedMode || process.env.NUDGE_RELAY_REQUIRE_WS_CHALLENGE === '1';
+const requireE2EPayload = hostedMode || process.env.NUDGE_RELAY_REQUIRE_E2E_PAYLOAD === '1';
+const disableHttpMessageEndpoints = hostedMode || process.env.NUDGE_RELAY_DISABLE_HTTP_MESSAGES === '1';
 const relayStatePath = process.env.NUDGE_RELAY_STATE_PATH;
 const relayAuditPath = process.env.NUDGE_RELAY_AUDIT_PATH;
 const trustProxyHeaders = process.env.NUDGE_RELAY_TRUST_PROXY === '1';
@@ -926,6 +927,7 @@ function readiness(): Record<string, unknown> {
     sockets: sockets.size,
     queuedMessages: [...messages.values()].reduce((count, queue) => count + queue.length, 0),
     config: {
+      hostedMode,
       statePersistence: Boolean(relayStatePath),
       auditLog: Boolean(relayAuditPath),
       requireWebSocketSignature,
