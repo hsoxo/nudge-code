@@ -34,6 +34,8 @@ pub struct MachineSession {
     pub entitlement: Entitlement,
     #[serde(default)]
     pub phone_profile: Option<PhoneProfile>,
+    #[serde(default)]
+    pub binding: Option<BindingState>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -83,6 +85,27 @@ pub struct PhoneProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindingState {
+    pub relay_url: String,
+    pub daemon_device_id: String,
+    pub binding_id: String,
+    pub code: String,
+    pub expires_at: String,
+    pub status: BindingStatus,
+    #[serde(default)]
+    pub bound_phone_id: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingStatus {
+    Pending,
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entitlement {
     pub plan: String,
     pub max_bound_computers: u32,
@@ -102,6 +125,8 @@ pub enum SessionError {
     MissingPhoneProfile,
     #[error("unsupported width mode {mode}")]
     UnsupportedWidthMode { mode: String },
+    #[error("unsupported binding status {status}")]
+    UnsupportedBindingStatus { status: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,6 +208,7 @@ impl MachineSession {
             tabs: vec![TerminalTab::new("default".to_string(), "shell".to_string())],
             entitlement: Entitlement::free(),
             phone_profile: None,
+            binding: None,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -303,11 +329,22 @@ impl MachineSession {
         Ok(target_size)
     }
 
+    pub fn set_binding(&mut self, binding: BindingState) {
+        self.binding = Some(binding);
+        self.updated_at = now_string();
+    }
+
+    pub fn clear_binding(&mut self) {
+        self.binding = None;
+        self.updated_at = now_string();
+    }
+
     pub fn to_proto(&self) -> v1::SessionState {
         v1::SessionState {
             tabs: self.tabs.iter().map(TerminalTab::to_proto).collect(),
             entitlement: Some(self.entitlement.to_proto()),
             phone_profile: self.phone_profile.as_ref().map(PhoneProfile::to_proto),
+            binding: self.binding.as_ref().map(BindingState::to_proto),
         }
     }
 }
@@ -382,6 +419,77 @@ impl PhoneProfile {
     }
 }
 
+impl BindingState {
+    pub fn pending(
+        relay_url: String,
+        daemon_device_id: String,
+        binding_id: String,
+        code: String,
+        expires_at: String,
+    ) -> Self {
+        Self {
+            relay_url,
+            daemon_device_id,
+            binding_id,
+            code,
+            expires_at,
+            status: BindingStatus::Pending,
+            bound_phone_id: None,
+            updated_at: now_string(),
+        }
+    }
+
+    pub fn active(mut self, bound_phone_id: String) -> Self {
+        self.status = BindingStatus::Active;
+        self.bound_phone_id = Some(bound_phone_id);
+        self.updated_at = now_string();
+        self
+    }
+
+    pub fn revoked(mut self) -> Self {
+        self.status = BindingStatus::Revoked;
+        self.updated_at = now_string();
+        self
+    }
+
+    pub fn to_proto(&self) -> v1::BindingState {
+        v1::BindingState {
+            relay_url: self.relay_url.clone(),
+            daemon_device_id: self.daemon_device_id.clone(),
+            binding_id: self.binding_id.clone(),
+            code: self.code.clone(),
+            expires_at: self.expires_at.clone(),
+            status: self.status.as_str().to_string(),
+            bound_phone_id: self.bound_phone_id.clone().unwrap_or_default(),
+        }
+    }
+}
+
+impl BindingStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+impl std::str::FromStr for BindingStatus {
+    type Err = SessionError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            other => Err(SessionError::UnsupportedBindingStatus {
+                status: other.to_string(),
+            }),
+        }
+    }
+}
+
 impl Entitlement {
     pub fn free() -> Self {
         Self {
@@ -431,6 +539,40 @@ pub fn close_tab(tab_id: &str) -> Result<MachineSession> {
     session.close_tab(tab_id)?;
     store.save(&session)?;
     Ok(session)
+}
+
+pub fn save_binding_state(binding: BindingState) -> Result<MachineSession> {
+    let store = StateStore::from_env_or_default()?;
+    let mut session = store.load_or_create()?;
+    session.set_binding(binding);
+    store.save(&session)?;
+    Ok(session)
+}
+
+pub fn clear_binding_state() -> Result<MachineSession> {
+    let store = StateStore::from_env_or_default()?;
+    let mut session = store.load_or_create()?;
+    session.clear_binding();
+    store.save(&session)?;
+    Ok(session)
+}
+
+fn binding_from_proto(binding: v1::BindingState) -> Result<BindingState> {
+    let bound_phone_id = if binding.bound_phone_id.is_empty() {
+        None
+    } else {
+        Some(binding.bound_phone_id)
+    };
+    Ok(BindingState {
+        relay_url: binding.relay_url,
+        daemon_device_id: binding.daemon_device_id,
+        binding_id: binding.binding_id,
+        code: binding.code,
+        expires_at: binding.expires_at,
+        status: binding.status.parse()?,
+        bound_phone_id,
+        updated_at: now_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -699,6 +841,24 @@ impl DaemonRuntime {
         Ok(self.session_state().await)
     }
 
+    async fn set_binding(&self, binding: BindingState) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.set_binding(binding);
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
+    async fn clear_binding(&self) -> Result<v1::SessionState> {
+        {
+            let mut session = self.session.lock().await;
+            session.clear_binding();
+            self.state_store.save(&session)?;
+        }
+        Ok(self.session_state().await)
+    }
+
     async fn resize_tab(&self, tab_id: &str, size: TerminalSize) -> Result<()> {
         let ptys = self.ptys.lock().await;
         let pty = ptys
@@ -931,6 +1091,19 @@ async fn handle_payload(
                     .await?,
             ))
         }
+        Some(v1::envelope::Payload::SetBindingState(request)) => {
+            let binding = binding_from_proto(
+                request
+                    .binding
+                    .context("set_binding_state requires a binding")?,
+            )?;
+            Some(v1::envelope::Payload::SessionState(
+                runtime.set_binding(binding).await?,
+            ))
+        }
+        Some(v1::envelope::Payload::ClearBindingState(_)) => Some(
+            v1::envelope::Payload::SessionState(runtime.clear_binding().await?),
+        ),
         Some(v1::envelope::Payload::CreateTab(request)) => Some(
             v1::envelope::Payload::SessionState(runtime.create_tab(request.title).await?),
         ),
@@ -1156,5 +1329,28 @@ mod tests {
         assert_eq!(session.tabs[0].width_mode, WidthMode::Computer);
         assert_eq!(session.tabs[0].rows, 40);
         assert_eq!(session.tabs[0].cols, 120);
+    }
+
+    #[test]
+    fn binding_state_round_trips_to_proto() {
+        let mut session = MachineSession::new_default();
+        session.set_binding(BindingState::pending(
+            "http://127.0.0.1:8787".to_string(),
+            "daemon_1".to_string(),
+            "bind_1".to_string(),
+            "ABC123".to_string(),
+            "2026-05-29T00:00:00.000Z".to_string(),
+        ));
+
+        let proto = session.to_proto();
+        let binding = proto.binding.expect("binding should be present");
+        assert_eq!(binding.relay_url, "http://127.0.0.1:8787");
+        assert_eq!(binding.daemon_device_id, "daemon_1");
+        assert_eq!(binding.binding_id, "bind_1");
+        assert_eq!(binding.status, "pending");
+
+        let parsed = binding_from_proto(binding).expect("proto binding should parse");
+        assert_eq!(parsed.status, BindingStatus::Pending);
+        assert_eq!(parsed.bound_phone_id, None);
     }
 }

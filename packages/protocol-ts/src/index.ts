@@ -19,6 +19,7 @@ export interface SessionState {
   tabs: Tab[];
   entitlement: Entitlement;
   phoneProfile?: PhoneProfile;
+  binding?: BindingState;
 }
 
 export interface DaemonStatus {
@@ -81,6 +82,18 @@ export interface TerminalRender {
 export interface PhoneProfile {
   rows: number;
   cols: number;
+}
+
+export type BindingStatus = 'pending' | 'active' | 'revoked';
+
+export interface BindingState {
+  relayUrl: string;
+  daemonDeviceId: string;
+  bindingId: string;
+  code: string;
+  expiresAt: string;
+  status: BindingStatus;
+  boundPhoneId?: string;
 }
 
 export interface SetPhoneProfile {

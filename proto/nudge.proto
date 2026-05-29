@@ -28,6 +28,8 @@ message Envelope {
     SetWidthMode set_width_mode = 30;
     TerminalRenderRequest terminal_render_request = 31;
     TerminalRender terminal_render = 32;
+    SetBindingState set_binding_state = 33;
+    ClearBindingState clear_binding_state = 34;
   }
 }
 
@@ -132,10 +134,17 @@ message TerminalRender {
   string width_mode = 5;
 }
 
+message SetBindingState {
+  BindingState binding = 1;
+}
+
+message ClearBindingState {}
+
 message SessionState {
   repeated Tab tabs = 1;
   Entitlement entitlement = 2;
   PhoneProfile phone_profile = 3;
+  BindingState binding = 4;
 }
 
 message Tab {
@@ -156,6 +165,16 @@ message Entitlement {
 message PhoneProfile {
   uint32 rows = 1;
   uint32 cols = 2;
+}
+
+message BindingState {
+  string relay_url = 1;
+  string daemon_device_id = 2;
+  string binding_id = 3;
+  string code = 4;
+  string expires_at = 5;
+  string status = 6;
+  string bound_phone_id = 7;
 }
 
 message Error {

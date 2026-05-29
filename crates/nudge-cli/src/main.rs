@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use nudge_daemon::DaemonConfig;
+use nudge_daemon::{BindingState, BindingStatus, DaemonConfig};
 use nudge_protocol::v1;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 
 #[derive(Debug, Parser)]
@@ -27,6 +28,11 @@ enum Command {
         placeholder: bool,
         #[command(subcommand)]
         command: Option<DaemonCommand>,
+    },
+    /// Bind or revoke a phone through the relay.
+    Bind {
+        #[command(subcommand)]
+        command: BindCommand,
     },
     /// Print current placeholder entitlement.
     #[command(hide = true)]
@@ -155,6 +161,42 @@ enum DaemonCommand {
     Stop,
 }
 
+#[derive(Debug, Subcommand)]
+enum BindCommand {
+    /// Start phone binding and print the pairing code.
+    Phone {
+        /// Relay HTTP base URL.
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        relay_url: String,
+    },
+    /// Revoke the currently stored phone binding.
+    Revoke {
+        /// Relay HTTP base URL override.
+        #[arg(long)]
+        relay_url: Option<String>,
+    },
+    /// Simulate phone-side pairing code claim.
+    #[command(hide = true)]
+    Claim {
+        /// Relay HTTP base URL.
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        relay_url: String,
+        /// Pairing code printed by `nudge bind phone`.
+        #[arg(long)]
+        code: String,
+        /// Development phone public key placeholder.
+        #[arg(long, default_value = "nudge-smoke-phone-key")]
+        phone_public_key: String,
+    },
+    /// Confirm a claimed binding from the computer side.
+    #[command(hide = true)]
+    Confirm {
+        /// Relay HTTP base URL override.
+        #[arg(long)]
+        relay_url: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -181,6 +223,16 @@ async fn main() -> Result<()> {
             command: Some(DaemonCommand::Stop),
             ..
         }) => stop_daemon().await?,
+        Some(Command::Bind { command }) => match command {
+            BindCommand::Phone { relay_url } => bind_phone(&relay_url).await?,
+            BindCommand::Revoke { relay_url } => revoke_binding(relay_url.as_deref()).await?,
+            BindCommand::Claim {
+                relay_url,
+                code,
+                phone_public_key,
+            } => claim_binding(&relay_url, &code, &phone_public_key).await?,
+            BindCommand::Confirm { relay_url } => confirm_binding(relay_url.as_deref()).await?,
+        },
         Some(Command::Entitlement) => {
             let entitlement = nudge_protocol::free_entitlement();
             println!(
@@ -392,6 +444,291 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn bind_phone(relay_url: &str) -> Result<()> {
+    let relay_url = normalize_relay_url(relay_url);
+    ensure_daemon().await?;
+    let session = nudge_daemon::load_session()?;
+    if let Some(binding) = session.binding.as_ref() {
+        if binding.status != BindingStatus::Revoked {
+            anyhow::bail!(
+                "this computer already has a {} binding; run `nudge bind revoke` first",
+                binding.status.as_str()
+            );
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let daemon_device = register_device(
+        &client,
+        &relay_url,
+        "daemon",
+        &format!("nudge-daemon-dev-key-{}", now_millis()),
+    )
+    .await?;
+    let binding_response = post_json::<StartBindingRequest, BindingResponse>(
+        &client,
+        &relay_url,
+        "/api/bind/start",
+        &StartBindingRequest {
+            daemon_device_id: daemon_device.device.id.clone(),
+        },
+    )
+    .await?;
+    let binding = BindingState::pending(
+        relay_url.clone(),
+        daemon_device.device.id,
+        binding_response.binding.id,
+        binding_response.binding.code,
+        binding_response.binding.expires_at,
+    );
+    set_binding_state(binding.clone()).await?;
+
+    println!("binding pending");
+    println!("relay_url={}", binding.relay_url);
+    println!("daemon_device_id={}", binding.daemon_device_id);
+    println!("binding_id={}", binding.binding_id);
+    println!("pairing_code={}", binding.code);
+    println!(
+        "pairing_url={}/pair?code={}",
+        binding.relay_url, binding.code
+    );
+    println!("expires_at={}", binding.expires_at);
+    println!("waiting for phone claim; computer confirmation is required after claim");
+    Ok(())
+}
+
+async fn claim_binding(relay_url: &str, code: &str, phone_public_key: &str) -> Result<()> {
+    let relay_url = normalize_relay_url(relay_url);
+    let client = reqwest::Client::new();
+    let phone = register_device(&client, &relay_url, "phone", phone_public_key).await?;
+    let binding_response = post_json::<ClaimBindingRequest, BindingResponse>(
+        &client,
+        &relay_url,
+        "/api/bind/claim",
+        &ClaimBindingRequest {
+            code: code.to_string(),
+            phone_device_id: phone.device.id.clone(),
+        },
+    )
+    .await?;
+    println!("phone claimed");
+    println!("phone_device_id={}", phone.device.id);
+    println!("binding_id={}", binding_response.binding.id);
+    println!("status={}", binding_response.binding.status);
+    Ok(())
+}
+
+async fn confirm_binding(relay_url: Option<&str>) -> Result<()> {
+    ensure_daemon().await?;
+    let pending = current_binding()?;
+    if pending.status == BindingStatus::Active {
+        println!("binding already active");
+        println!("binding_id={}", pending.binding_id);
+        if let Some(phone_id) = pending.bound_phone_id {
+            println!("bound_phone_id={phone_id}");
+        }
+        return Ok(());
+    }
+    if pending.status != BindingStatus::Pending {
+        anyhow::bail!("stored binding is not pending");
+    }
+    let relay_url = relay_url
+        .map(normalize_relay_url)
+        .unwrap_or_else(|| pending.relay_url.clone());
+    let client = reqwest::Client::new();
+    let binding_response = post_json::<ConfirmBindingRequest, BindingResponse>(
+        &client,
+        &relay_url,
+        "/api/bind/confirm",
+        &ConfirmBindingRequest {
+            binding_id: pending.binding_id.clone(),
+            daemon_device_id: pending.daemon_device_id.clone(),
+        },
+    )
+    .await?;
+    let phone_id = binding_response
+        .binding
+        .phone_device_id
+        .context("relay confirmed binding without phone device id")?;
+    let mut active = pending.active(phone_id.clone());
+    active.relay_url = relay_url;
+    active.binding_id = binding_response.binding.id;
+    active.expires_at = binding_response.binding.expires_at;
+    set_binding_state(active.clone()).await?;
+    println!("binding active");
+    println!("binding_id={}", active.binding_id);
+    println!("bound_phone_id={phone_id}");
+    Ok(())
+}
+
+async fn revoke_binding(relay_url: Option<&str>) -> Result<()> {
+    ensure_daemon().await?;
+    let binding = current_binding()?;
+    let relay_url = relay_url
+        .map(normalize_relay_url)
+        .unwrap_or_else(|| binding.relay_url.clone());
+    let client = reqwest::Client::new();
+    let binding_response = post_json::<RevokeBindingRequest, BindingResponse>(
+        &client,
+        &relay_url,
+        "/api/bind/revoke",
+        &RevokeBindingRequest {
+            binding_id: binding.binding_id.clone(),
+            device_id: binding.daemon_device_id.clone(),
+        },
+    )
+    .await?;
+    clear_binding_state().await?;
+    println!("binding revoked");
+    println!("binding_id={}", binding_response.binding.id);
+    println!("status={}", binding_response.binding.status);
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceResponse {
+    device: RelayDevice,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayDevice {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BindingResponse {
+    binding: RelayBinding,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayBinding {
+    id: String,
+    code: String,
+    phone_device_id: Option<String>,
+    status: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterDeviceRequest {
+    kind: String,
+    public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartBindingRequest {
+    daemon_device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimBindingRequest {
+    code: String,
+    phone_device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmBindingRequest {
+    binding_id: String,
+    daemon_device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevokeBindingRequest {
+    binding_id: String,
+    device_id: String,
+}
+
+async fn register_device(
+    client: &reqwest::Client,
+    relay_url: &str,
+    kind: &str,
+    public_key: &str,
+) -> Result<DeviceResponse> {
+    post_json::<RegisterDeviceRequest, DeviceResponse>(
+        client,
+        relay_url,
+        "/api/devices/register",
+        &RegisterDeviceRequest {
+            kind: kind.to_string(),
+            public_key: public_key.to_string(),
+        },
+    )
+    .await
+}
+
+async fn post_json<Request, Response>(
+    client: &reqwest::Client,
+    relay_url: &str,
+    path: &str,
+    body: &Request,
+) -> Result<Response>
+where
+    Request: Serialize + ?Sized,
+    Response: for<'de> Deserialize<'de>,
+{
+    let url = format!("{relay_url}{path}");
+    let response = client
+        .post(&url)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("failed to call {url}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read response from {url}"))?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes);
+        anyhow::bail!("relay returned HTTP {status} from {path}: {body}");
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse response from {url}"))
+}
+
+async fn set_binding_state(binding: BindingState) -> Result<v1::SessionState> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::SetBindingState(
+        v1::SetBindingState {
+            binding: Some(binding.to_proto()),
+        },
+    )))
+    .await?;
+    session_from_response(response)
+}
+
+async fn clear_binding_state() -> Result<v1::SessionState> {
+    let response = nudge_daemon::request(envelope(v1::envelope::Payload::ClearBindingState(
+        v1::ClearBindingState {},
+    )))
+    .await?;
+    session_from_response(response)
+}
+
+fn session_from_response(response: v1::Envelope) -> Result<v1::SessionState> {
+    match response.payload {
+        Some(v1::envelope::Payload::SessionState(state)) => Ok(state),
+        Some(v1::envelope::Payload::Error(error)) => {
+            anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+        }
+        _ => anyhow::bail!("daemon returned an unexpected session response"),
+    }
+}
+
+fn current_binding() -> Result<BindingState> {
+    nudge_daemon::load_session()?
+        .binding
+        .context("no phone binding is stored; run `nudge bind phone` first")
+}
+
+fn normalize_relay_url(relay_url: &str) -> String {
+    relay_url.trim_end_matches('/').to_string()
 }
 
 fn print_session_response(response: v1::Envelope, ok_message: &str) -> Result<()> {
