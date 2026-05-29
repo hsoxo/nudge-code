@@ -17,6 +17,24 @@ export interface SessionState {
   entitlement: Entitlement;
 }
 
+export interface DaemonStatus {
+  socketPath: string;
+  statePath: string;
+  connectedClients: number;
+  uptimeSeconds: number;
+  tabs: number;
+  plan: EntitlementPlan;
+}
+
+export interface Ack {
+  message: string;
+}
+
+export interface ProtocolError {
+  code: string;
+  message: string;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,

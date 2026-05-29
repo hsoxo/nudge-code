@@ -10,6 +10,10 @@ message Envelope {
     GetState get_state = 12;
     SessionState session_state = 13;
     Error error = 14;
+    DaemonStatusRequest daemon_status_request = 15;
+    DaemonStatus daemon_status = 16;
+    StopDaemon stop_daemon = 17;
+    Ack ack = 18;
   }
 }
 
@@ -22,6 +26,23 @@ message ClientExited {
 }
 
 message GetState {}
+
+message DaemonStatusRequest {}
+
+message DaemonStatus {
+  string socket_path = 1;
+  string state_path = 2;
+  uint32 connected_clients = 3;
+  uint64 uptime_seconds = 4;
+  uint32 tabs = 5;
+  string plan = 6;
+}
+
+message StopDaemon {}
+
+message Ack {
+  string message = 1;
+}
 
 message SessionState {
   repeated Tab tabs = 1;

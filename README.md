@@ -7,8 +7,15 @@ Nudge is a Rust-first remote shell workspace for coding-agent sessions. The comp
 ```sh
 cargo build
 cargo run -p nudge-cli -- --help
-cargo run -p nudge-cli -- daemon --placeholder
 npm install
 npm run build
 NUDGE_INSTALL_DRY_RUN=1 scripts/install.sh
+```
+
+## Current Local Daemon Checks
+
+```sh
+cargo run -p nudge-cli --
+cargo run -p nudge-cli -- daemon status
+cargo run -p nudge-cli -- daemon stop
 ```
