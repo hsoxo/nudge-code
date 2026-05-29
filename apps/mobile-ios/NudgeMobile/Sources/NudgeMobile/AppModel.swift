@@ -98,8 +98,7 @@ final class AppModel {
         guard let machineID = selectedMachineID,
               let machine = selectedMachine,
               let tabID = selectedTab?.id,
-              let tab = selectedTab,
-              let index = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID })
+              let tab = selectedTab
         else {
             return
         }
@@ -108,7 +107,9 @@ final class AppModel {
             computerProfilesByTabKey[profileKey] = tab.profile
         }
         let previousTab = tab
-        tabsByMachine[machineID]?[index].widthMode = widthMode
+        updateTab(machineID: machineID, tabID: tabID) { tab in
+            tab.widthMode = widthMode
+        }
         let computerProfile = computerProfilesByTabKey[profileKey] ?? tab.profile
         do {
             if let relaySession, relaySessionMachineID == machineID {
@@ -127,7 +128,7 @@ final class AppModel {
                 applyRemoteSessionState(state, machineID: machineID)
             }
         } catch {
-            tabsByMachine[machineID]?[index] = previousTab
+            replaceTab(previousTab, machineID: machineID)
             if let machineIndex = machines.firstIndex(where: { $0.id == machineID }) {
                 machines[machineIndex].lastSeenText = "Unable to update width"
             }
@@ -281,7 +282,7 @@ final class AppModel {
             binding: MachineBinding(claim: claim)
         )
         machines.insert(machine, at: 0)
-        tabsByMachine[machine.id] = [
+        replaceTabs([
             TerminalTab(
                 id: "default",
                 title: "shell",
@@ -291,7 +292,7 @@ final class AppModel {
                 agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "placeholder"),
                 previewText: "$ nudge bind confirmed\nWaiting for relay session..."
             )
-        ]
+        ], machineID: machine.id)
         bindingDraft = nil
         bindingClaimState = .claimed
         selectMachine(machine)
@@ -410,7 +411,7 @@ final class AppModel {
 
     private func applyRemoteSessionState(_ state: RemoteSessionState, machineID: String) {
         let previousSelectedTabID = selectedTabID
-        tabsByMachine[machineID] = state.tabs
+        replaceTabs(state.tabs, machineID: machineID)
         if let previousSelectedTabID,
            state.tabs.contains(where: { $0.id == previousSelectedTabID }) {
             selectedTabID = previousSelectedTabID
@@ -436,57 +437,82 @@ final class AppModel {
             let snapshot = try await relayClient.fetchTerminalSnapshot(machine: machine, tabID: tabID)
             applyTerminalSnapshot(snapshot, machineID: machineID)
         } catch {
-            guard let tabIndex = tabsByMachine[machineID]?.firstIndex(where: { $0.id == tabID }) else {
-                return
+            updateTab(machineID: machineID, tabID: tabID) { tab in
+                tab.previewText = "Unable to refresh terminal snapshot"
             }
-            tabsByMachine[machineID]?[tabIndex].previewText = "Unable to refresh terminal snapshot"
         }
     }
 
     private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
-        guard var tabs = tabsByMachine[machineID],
-              let tabIndex = tabs.firstIndex(where: { $0.id == snapshot.tabID })
-        else {
-            return
+        updateTab(machineID: machineID, tabID: snapshot.tabID) { tab in
+            tab.profile = snapshot.profile
+            tab.previewText = snapshot.text
+            tab.replayOutputBase64 = ""
+            tab.replayOutputSequence += 1
+            tab.pendingOutputBase64 = ""
         }
-        tabs[tabIndex].profile = snapshot.profile
-        tabs[tabIndex].previewText = snapshot.text
-        tabs[tabIndex].replayOutputBase64 = ""
-        tabs[tabIndex].replayOutputSequence += 1
-        tabs[tabIndex].pendingOutputBase64 = ""
-        tabsByMachine[machineID] = tabs
     }
 
     private func applyTerminalOutput(_ output: TerminalOutput, machineID: String) {
-        guard var tabs = tabsByMachine[machineID],
-              let tabIndex = tabs.firstIndex(where: { $0.id == output.tabID })
-        else {
-            return
+        updateTab(machineID: machineID, tabID: output.tabID) { tab in
+            if output.isReplay {
+                tab.replayOutputBase64 = output.bytesBase64
+                tab.replayOutputSequence += 1
+                tab.pendingOutputBase64 = ""
+                return
+            }
+            tab.replayOutputBase64 = appendBase64Output(
+                tab.replayOutputBase64,
+                output.bytesBase64
+            )
+            tab.pendingOutputBase64 = output.bytesBase64
+            tab.outputSequence += 1
         }
-        if output.isReplay {
-            tabs[tabIndex].replayOutputBase64 = output.bytesBase64
-            tabs[tabIndex].replayOutputSequence += 1
-            tabs[tabIndex].pendingOutputBase64 = ""
-            tabsByMachine[machineID] = tabs
-            return
-        }
-        tabs[tabIndex].replayOutputBase64 = appendBase64Output(
-            tabs[tabIndex].replayOutputBase64,
-            output.bytesBase64
-        )
-        tabs[tabIndex].pendingOutputBase64 = output.bytesBase64
-        tabs[tabIndex].outputSequence += 1
-        tabsByMachine[machineID] = tabs
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
-        guard var tabs = tabsByMachine[machineID],
-              let tabIndex = tabs.firstIndex(where: { $0.id == update.tabID })
-        else {
-            return
+        updateTab(machineID: machineID, tabID: update.tabID) { tab in
+            tab.agentStatus = update.status
         }
-        tabs[tabIndex].agentStatus = update.status
-        tabsByMachine[machineID] = tabs
+    }
+
+    private func replaceTabs(_ tabs: [TerminalTab], machineID: String) {
+        var nextTabsByMachine = tabsByMachine
+        nextTabsByMachine[machineID] = tabs
+        tabsByMachine = nextTabsByMachine
+    }
+
+    private func replaceTab(_ tab: TerminalTab, machineID: String) {
+        updateTabs(machineID: machineID) { tabs in
+            guard let tabIndex = tabs.firstIndex(where: { $0.id == tab.id }) else {
+                return false
+            }
+            tabs[tabIndex] = tab
+            return true
+        }
+    }
+
+    private func updateTab(machineID: String, tabID: String, mutate: (inout TerminalTab) -> Void) {
+        updateTabs(machineID: machineID) { tabs in
+            guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID }) else {
+                return false
+            }
+            mutate(&tabs[tabIndex])
+            return true
+        }
+    }
+
+    @discardableResult
+    private func updateTabs(machineID: String, mutate: (inout [TerminalTab]) -> Bool) -> Bool {
+        var nextTabsByMachine = tabsByMachine
+        guard var tabs = nextTabsByMachine[machineID],
+              mutate(&tabs)
+        else {
+            return false
+        }
+        nextTabsByMachine[machineID] = tabs
+        tabsByMachine = nextTabsByMachine
+        return true
     }
 
     private func appendBase64Output(_ existingBase64: String, _ newBase64: String) -> String {
