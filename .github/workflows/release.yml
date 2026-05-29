@@ -54,11 +54,16 @@ jobs:
       - name: Prepare release signing key
         env:
           NUDGE_RELEASE_SIGNING_KEY_PEM: ${{ secrets.NUDGE_RELEASE_SIGNING_KEY_PEM }}
+          NUDGE_RELEASE_PUBLIC_KEY_PEM: ${{ vars.NUDGE_RELEASE_PUBLIC_KEY_PEM || secrets.NUDGE_RELEASE_PUBLIC_KEY_PEM }}
         run: |
           if [ -n "$NUDGE_RELEASE_SIGNING_KEY_PEM" ]; then
             printf '%s\n' "$NUDGE_RELEASE_SIGNING_KEY_PEM" > "$RUNNER_TEMP/nudge-release-signing-key.pem"
             chmod 600 "$RUNNER_TEMP/nudge-release-signing-key.pem"
             echo "NUDGE_SIGNING_KEY=$RUNNER_TEMP/nudge-release-signing-key.pem" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$NUDGE_RELEASE_PUBLIC_KEY_PEM" ]; then
+            printf '%s\n' "$NUDGE_RELEASE_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/nudge-release-public.pem"
+            echo "NUDGE_RELEASE_PUBLIC_KEY_FILE=$RUNNER_TEMP/nudge-release-public.pem" >> "$GITHUB_ENV"
           fi
 
       - name: Package release artifact
@@ -74,11 +79,29 @@ jobs:
           NUDGE_TARGET_OS: ${{ matrix.target.os }}
           NUDGE_TARGET_ARCH: ${{ matrix.target.arch }}
 
+      - name: Prepare hosted install site shard
+        run: |
+          if [ -n "${NUDGE_SIGNING_KEY:-}" ]; then
+            export NUDGE_REQUIRE_PUBLIC_KEY=1
+          else
+            export NUDGE_REQUIRE_PUBLIC_KEY=0
+          fi
+          scripts/prepare-install-site.sh
+        env:
+          NUDGE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}
           path: dist/releases/${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}/nudge-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz*
+          if-no-files-found: error
+
+      - name: Upload hosted install site shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-site-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: dist/install-site/**
           if-no-files-found: error
 
   relay-container:
@@ -167,9 +190,37 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: artifacts/nudge-*/*.tar.gz*
+
+  publish-install-site-artifact:
+    name: Publish install site artifact
+    if: github.ref_type == 'tag'
+    needs:
+      - rust-release
+      - publish-github-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: install-site-*
+          path: install-site
+          merge-multiple: true
+
+      - name: Pack install site
+        run: tar -czf nudge-install-site.tar.gz -C install-site .
+
+      - name: Upload install site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nudge-install-site
+          path: nudge-install-site.tar.gz
+          if-no-files-found: error
+
+      - name: Publish install site release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nudge-install-site.tar.gz

@@ -10,5 +10,5 @@ Detailed implementation docs can move under this directory as the codebase grows
 
 Current implementation docs:
 
-- `install.md`
+- `install.md`: native installer, update, signature verification, and static hosting bundle.
 - `relay-hosted.md`
