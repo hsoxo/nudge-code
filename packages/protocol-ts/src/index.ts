@@ -35,6 +35,21 @@ export interface ProtocolError {
   message: string;
 }
 
+export interface TerminalInput {
+  tabId: string;
+  data: Uint8Array;
+}
+
+export interface TerminalOutputRequest {
+  tabId: string;
+  maxBytes: number;
+}
+
+export interface TerminalOutput {
+  tabId: string;
+  data: Uint8Array;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,

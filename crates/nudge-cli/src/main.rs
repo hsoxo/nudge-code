@@ -41,6 +41,28 @@ enum Command {
         #[arg(long, default_value = "shell")]
         title: String,
     },
+    /// Send bytes to a tab pty.
+    #[command(hide = true)]
+    PtyInput {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+        /// Append carriage return after the text.
+        #[arg(long)]
+        enter: bool,
+        /// Text to write to the PTY.
+        text: String,
+    },
+    /// Print recent bytes from a tab pty.
+    #[command(hide = true)]
+    PtyOutput {
+        /// Tab id.
+        #[arg(long, default_value = "default")]
+        tab_id: String,
+        /// Maximum bytes to print.
+        #[arg(long, default_value_t = 4096)]
+        max_bytes: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,15 +85,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Daemon {
-            placeholder,
-            command: None,
-        }) => {
-            nudge_daemon::run_server(DaemonConfig {
-                placeholder,
-                foreground: true,
-            })
-            .await?;
+        Some(Command::Daemon { command: None, .. }) => {
+            print_daemon_status().await?;
         }
         Some(Command::Daemon {
             command: Some(DaemonCommand::Run { placeholder }),
@@ -118,6 +133,47 @@ async fn main() -> Result<()> {
         Some(Command::CreateTab { title }) => {
             let session = nudge_daemon::create_tab(title)?;
             println!("tab created; tabs={}", session.tabs.len());
+        }
+        Some(Command::PtyInput {
+            tab_id,
+            enter,
+            mut text,
+        }) => {
+            ensure_daemon().await?;
+            if enter {
+                text.push('\r');
+            }
+            let response = nudge_daemon::request(envelope(v1::envelope::Payload::TerminalInput(
+                v1::TerminalInput {
+                    tab_id,
+                    data: text.into_bytes(),
+                },
+            )))
+            .await?;
+            match response.payload {
+                Some(v1::envelope::Payload::Ack(ack)) => println!("{}", ack.message),
+                Some(v1::envelope::Payload::Error(error)) => {
+                    anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+                }
+                _ => anyhow::bail!("daemon returned an unexpected terminal input response"),
+            }
+        }
+        Some(Command::PtyOutput { tab_id, max_bytes }) => {
+            ensure_daemon().await?;
+            let response =
+                nudge_daemon::request(envelope(v1::envelope::Payload::TerminalOutputRequest(
+                    v1::TerminalOutputRequest { tab_id, max_bytes },
+                )))
+                .await?;
+            match response.payload {
+                Some(v1::envelope::Payload::TerminalOutput(output)) => {
+                    print!("{}", String::from_utf8_lossy(&output.data));
+                }
+                Some(v1::envelope::Payload::Error(error)) => {
+                    anyhow::bail!("daemon returned {}: {}", error.code, error.message);
+                }
+                _ => anyhow::bail!("daemon returned an unexpected terminal output response"),
+            }
         }
         None => {
             ensure_daemon().await?;

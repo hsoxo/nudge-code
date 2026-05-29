@@ -7,11 +7,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use nudge_protocol::v1;
+use nudge_pty::{PtyTab, TerminalSize};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
+use tokio::task;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -275,6 +277,7 @@ impl IpcPaths {
 struct DaemonRuntime {
     state_store: StateStore,
     session: Arc<Mutex<MachineSession>>,
+    ptys: Arc<Mutex<Vec<RuntimeTab>>>,
     shutdown: Arc<Notify>,
     connected_clients: Arc<AtomicU32>,
     started_at: Instant,
@@ -283,9 +286,18 @@ struct DaemonRuntime {
 
 impl DaemonRuntime {
     fn new(state_store: StateStore, session: MachineSession, socket_path: PathBuf) -> Self {
+        let ptys = session
+            .tabs
+            .iter()
+            .map(|tab| RuntimeTab {
+                tab_id: tab.id.clone(),
+                pty: None,
+            })
+            .collect();
         Self {
             state_store,
             session: Arc::new(Mutex::new(session)),
+            ptys: Arc::new(Mutex::new(ptys)),
             shutdown: Arc::new(Notify::new()),
             connected_clients: Arc::new(AtomicU32::new(0)),
             started_at: Instant::now(),
@@ -308,6 +320,49 @@ impl DaemonRuntime {
     async fn session_state(&self) -> v1::SessionState {
         self.session.lock().await.to_proto()
     }
+
+    async fn ensure_ptys(&self) -> Result<()> {
+        let mut ptys = self.ptys.lock().await;
+        for runtime_tab in ptys.iter_mut() {
+            if runtime_tab.pty.is_none() {
+                let tab_id = runtime_tab.tab_id.clone();
+                let pty =
+                    task::spawn_blocking(move || PtyTab::spawn_shell(TerminalSize::default()))
+                        .await
+                        .context("pty spawn task failed")?
+                        .with_context(|| format!("failed to spawn shell for tab {tab_id}"))?;
+                runtime_tab.pty = Some(pty);
+            }
+        }
+        Ok(())
+    }
+
+    async fn write_input(&self, tab_id: &str, data: Vec<u8>) -> Result<()> {
+        self.ensure_ptys().await?;
+        let ptys = self.ptys.lock().await;
+        let pty = ptys
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .and_then(|tab| tab.pty.as_ref())
+            .with_context(|| format!("tab {tab_id} does not have a pty"))?;
+        pty.write_input(&data)
+    }
+
+    async fn output_tail(&self, tab_id: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        self.ensure_ptys().await?;
+        let ptys = self.ptys.lock().await;
+        let pty = ptys
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .and_then(|tab| tab.pty.as_ref())
+            .with_context(|| format!("tab {tab_id} does not have a pty"))?;
+        Ok(pty.output_tail(max_bytes))
+    }
+}
+
+struct RuntimeTab {
+    tab_id: String,
+    pty: Option<PtyTab>,
 }
 
 pub async fn run_server(config: DaemonConfig) -> Result<()> {
@@ -335,6 +390,7 @@ pub async fn run_server(config: DaemonConfig) -> Result<()> {
         .with_context(|| format!("failed to secure {}", paths.socket_path().display()))?;
 
     let runtime = DaemonRuntime::new(state_store, session, paths.socket_path().to_path_buf());
+    runtime.ensure_ptys().await?;
 
     if config.placeholder || config.foreground {
         let state = runtime.session_state().await;
@@ -405,7 +461,25 @@ impl Drop for ClientCountGuard {
 }
 
 async fn handle_envelope(envelope: v1::Envelope, runtime: &DaemonRuntime) -> v1::Envelope {
-    let response_payload = match envelope.payload {
+    let response_payload = match handle_payload(envelope.payload, runtime).await {
+        Ok(payload) => payload,
+        Err(error) => v1::envelope::Payload::Error(v1::Error {
+            code: "daemon_error".to_string(),
+            message: format!("{error:#}"),
+        }),
+    };
+
+    v1::Envelope {
+        message_id: envelope.message_id,
+        payload: Some(response_payload),
+    }
+}
+
+async fn handle_payload(
+    payload: Option<v1::envelope::Payload>,
+    runtime: &DaemonRuntime,
+) -> Result<v1::envelope::Payload> {
+    let response_payload = match payload {
         Some(v1::envelope::Payload::AttachClient(_)) => Some(v1::envelope::Payload::SessionState(
             runtime.session_state().await,
         )),
@@ -424,6 +498,24 @@ async fn handle_envelope(envelope: v1::Envelope, runtime: &DaemonRuntime) -> v1:
                 message: "stopping".to_string(),
             }))
         }
+        Some(v1::envelope::Payload::TerminalInput(input)) => {
+            runtime.write_input(&input.tab_id, input.data).await?;
+            Some(v1::envelope::Payload::Ack(v1::Ack {
+                message: "input accepted".to_string(),
+            }))
+        }
+        Some(v1::envelope::Payload::TerminalOutputRequest(request)) => {
+            let max_bytes = if request.max_bytes == 0 {
+                4096
+            } else {
+                request.max_bytes.min(128 * 1024) as usize
+            };
+            let data = runtime.output_tail(&request.tab_id, max_bytes).await?;
+            Some(v1::envelope::Payload::TerminalOutput(v1::TerminalOutput {
+                tab_id: request.tab_id,
+                data,
+            }))
+        }
         Some(_) => Some(v1::envelope::Payload::Error(v1::Error {
             code: "unsupported_message".to_string(),
             message: "daemon cannot handle this message yet".to_string(),
@@ -433,11 +525,7 @@ async fn handle_envelope(envelope: v1::Envelope, runtime: &DaemonRuntime) -> v1:
             message: "ipc envelope did not include a payload".to_string(),
         })),
     };
-
-    v1::Envelope {
-        message_id: envelope.message_id,
-        payload: response_payload,
-    }
+    Ok(response_payload.expect("all daemon payload branches return a response"))
 }
 
 pub async fn request(envelope: v1::Envelope) -> Result<v1::Envelope> {
