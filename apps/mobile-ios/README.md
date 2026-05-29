@@ -25,6 +25,7 @@ Current scaffold:
 - Keychain-backed phone signing identity.
 - relay claim client using the phone public key.
 - machine binding metadata storage for later websocket attach.
+- one-shot relay binding status refresh when opening a pending machine.
 - adaptive shortcut keyboard model for shell, Claude, Codex, and approval/waiting states.
 
 Still open:

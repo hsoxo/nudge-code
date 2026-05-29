@@ -2,6 +2,7 @@ import Foundation
 
 protocol RelayClient: Sendable {
     func claimBinding(code: String, relayURL: URL) async throws -> BindingClaim
+    func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim
     func connect(machine: Machine) async throws
 }
 
@@ -18,17 +19,21 @@ struct HTTPRelayClient: RelayClient {
         request.httpBody = try JSONEncoder().encode(ClaimRequest(code: code, phoneDeviceId: device.id))
         let (data, response) = try await urlSession.data(for: request)
         try validate(response: response)
-        let binding = try JSONDecoder().decode(BindingResponse.self, from: data).binding
-        guard let phoneDeviceID = binding.phoneDeviceId else {
-            throw RelayClientError.missingPhoneDeviceID
+        return try decodeBindingClaim(from: data)
+    }
+
+    func fetchBindingStatus(binding: MachineBinding, relayURL: URL) async throws -> BindingClaim {
+        var components = URLComponents(url: relayURL.appending(path: "/api/bind/status"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "bindingId", value: binding.bindingID),
+            URLQueryItem(name: "deviceId", value: binding.phoneDeviceID)
+        ]
+        guard let url = components?.url else {
+            throw RelayClientError.badURL
         }
-        return BindingClaim(
-            bindingID: binding.id,
-            daemonDeviceID: binding.daemonDeviceId,
-            phoneDeviceID: phoneDeviceID,
-            status: binding.status,
-            expiresAt: binding.expiresAt
-        )
+        let (data, response) = try await urlSession.data(from: url)
+        try validate(response: response)
+        return try decodeBindingClaim(from: data)
     }
 
     func connect(machine: Machine) async throws {
@@ -45,6 +50,20 @@ struct HTTPRelayClient: RelayClient {
         return try JSONDecoder().decode(DeviceResponse.self, from: data).device
     }
 
+    private func decodeBindingClaim(from data: Data) throws -> BindingClaim {
+        let binding = try JSONDecoder().decode(BindingResponse.self, from: data).binding
+        guard let phoneDeviceID = binding.phoneDeviceId else {
+            throw RelayClientError.missingPhoneDeviceID
+        }
+        return BindingClaim(
+            bindingID: binding.id,
+            daemonDeviceID: binding.daemonDeviceId,
+            phoneDeviceID: phoneDeviceID,
+            status: binding.status,
+            expiresAt: binding.expiresAt
+        )
+    }
+
     private func validate(response: URLResponse) throws {
         guard let http = response as? HTTPURLResponse,
               200 ..< 300 ~= http.statusCode
@@ -55,6 +74,7 @@ struct HTTPRelayClient: RelayClient {
 }
 
 enum RelayClientError: Error {
+    case badURL
     case badStatus
     case missingPhoneDeviceID
 }

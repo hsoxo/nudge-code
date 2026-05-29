@@ -21,6 +21,9 @@ struct TerminalWorkspaceView: View {
         }
         .navigationTitle(model.selectedMachine?.name ?? "Nudge")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: model.selectedMachineID) {
+            await model.refreshSelectedMachineBinding()
+        }
     }
 }
 

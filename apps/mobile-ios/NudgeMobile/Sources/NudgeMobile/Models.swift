@@ -67,6 +67,30 @@ struct MachineBinding: Codable, Equatable, Sendable {
     var phoneDeviceID: String
     var status: BindingStatus
     var expiresAt: String
+
+    init(
+        bindingID: String,
+        daemonDeviceID: String,
+        phoneDeviceID: String,
+        status: BindingStatus,
+        expiresAt: String
+    ) {
+        self.bindingID = bindingID
+        self.daemonDeviceID = daemonDeviceID
+        self.phoneDeviceID = phoneDeviceID
+        self.status = status
+        self.expiresAt = expiresAt
+    }
+
+    init(claim: BindingClaim) {
+        self.init(
+            bindingID: claim.bindingID,
+            daemonDeviceID: claim.daemonDeviceID,
+            phoneDeviceID: claim.phoneDeviceID,
+            status: claim.status,
+            expiresAt: claim.expiresAt
+        )
+    }
 }
 
 enum BindingStatus: String, Codable, Sendable {

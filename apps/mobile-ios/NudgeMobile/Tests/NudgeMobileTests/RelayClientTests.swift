@@ -40,6 +40,37 @@ struct RelayClientTests {
         #expect(bodies[1].contains(#""code":"pair-123""#))
         #expect(bodies[1].contains(#""phoneDeviceId":"phone_1""#))
     }
+
+    @Test func fetchBindingStatusUsesPhoneDeviceAsParticipant() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [
+            StubResponse(
+                path: "/api/bind/status",
+                data: #"{"binding":{"id":"bind_1","daemonDeviceId":"daemon_1","phoneDeviceId":"phone_1","status":"active","expiresAt":"2026-05-29T00:00:00Z"}}"#.data(using: .utf8)!
+            )
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key")
+        )
+
+        let claim = try await client.fetchBindingStatus(
+            binding: MachineBinding(
+                bindingID: "bind_1",
+                daemonDeviceID: "daemon_1",
+                phoneDeviceID: "phone_1",
+                status: .claimed,
+                expiresAt: "2026-05-29T00:00:00Z"
+            ),
+            relayURL: URL(string: "https://relay.test")!
+        )
+
+        #expect(claim.status == .active)
+        #expect(URLProtocolStub.requests.map(\.url?.path) == ["/api/bind/status"])
+        #expect(URLProtocolStub.requests.first?.url?.query == "bindingId=bind_1&deviceId=phone_1")
+    }
 }
 
 private struct MemoryPhoneIdentityStore: PhoneIdentityStore {

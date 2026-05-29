@@ -69,6 +69,26 @@ final class AppModel {
         tabsByMachine[machineID]?[index].widthMode = widthMode
     }
 
+    func refreshSelectedMachineBinding() async {
+        guard let machineID = selectedMachineID,
+              let machineIndex = machines.firstIndex(where: { $0.id == machineID }),
+              let binding = machines[machineIndex].binding
+        else {
+            return
+        }
+        guard binding.status != .active else {
+            return
+        }
+
+        do {
+            let claim = try await relayClient.fetchBindingStatus(binding: binding, relayURL: machines[machineIndex].relayURL)
+            applyBindingClaim(claim, toMachineAt: machineIndex)
+        } catch {
+            machines[machineIndex].connectionState = .offline
+            machines[machineIndex].lastSeenText = "Unable to refresh binding"
+        }
+    }
+
     func parsePairingURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
               let draft = BindingDraft(pairingURL: url)
@@ -99,13 +119,7 @@ final class AppModel {
             relayURL: draft.relayURL,
             connectionState: .connecting,
             lastSeenText: "Waiting for computer confirmation",
-            binding: MachineBinding(
-                bindingID: claim.bindingID,
-                daemonDeviceID: claim.daemonDeviceID,
-                phoneDeviceID: claim.phoneDeviceID,
-                status: claim.status,
-                expiresAt: claim.expiresAt
-            )
+            binding: MachineBinding(claim: claim)
         )
         machines.insert(machine, at: 0)
         tabsByMachine[machine.id] = [
@@ -124,6 +138,21 @@ final class AppModel {
         selectMachine(machine)
     }
 
+    private func applyBindingClaim(_ claim: BindingClaim, toMachineAt index: Int) {
+        machines[index].binding = MachineBinding(claim: claim)
+        switch claim.status {
+        case .pending, .claimed:
+            machines[index].connectionState = .connecting
+            machines[index].lastSeenText = "Waiting for computer confirmation"
+        case .active:
+            machines[index].connectionState = .online
+            machines[index].lastSeenText = "binding active"
+        case .revoked:
+            machines[index].connectionState = .offline
+            machines[index].lastSeenText = "binding revoked"
+        }
+    }
+
     static func preview() -> AppModel {
         let machine = Machine(
             id: "macbook",
@@ -131,13 +160,13 @@ final class AppModel {
             relayURL: URL(string: "https://nudgecode.dev")!,
             connectionState: .online,
             lastSeenText: "online now",
-            binding: MachineBinding(
+            binding: MachineBinding(claim: BindingClaim(
                 bindingID: "bind_preview",
                 daemonDeviceID: "daemon_preview",
                 phoneDeviceID: "phone_preview",
                 status: .active,
                 expiresAt: ""
-            )
+            ))
         )
         let tabs = [
             TerminalTab(
