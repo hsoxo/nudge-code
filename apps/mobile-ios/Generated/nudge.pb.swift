@@ -234,6 +234,30 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     set {payload = .clearBindingState_p(newValue)}
   }
 
+  var e2EHandshakeStart: Nudge_V1_E2EHandshakeStart {
+    get {
+      if case .e2EHandshakeStart(let v)? = payload {return v}
+      return Nudge_V1_E2EHandshakeStart()
+    }
+    set {payload = .e2EHandshakeStart(newValue)}
+  }
+
+  var e2EHandshakeFinish: Nudge_V1_E2EHandshakeFinish {
+    get {
+      if case .e2EHandshakeFinish(let v)? = payload {return v}
+      return Nudge_V1_E2EHandshakeFinish()
+    }
+    set {payload = .e2EHandshakeFinish(newValue)}
+  }
+
+  var e2EEncryptedEnvelope: Nudge_V1_E2EEncryptedEnvelope {
+    get {
+      if case .e2EEncryptedEnvelope(let v)? = payload {return v}
+      return Nudge_V1_E2EEncryptedEnvelope()
+    }
+    set {payload = .e2EEncryptedEnvelope(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Payload: Equatable, Sendable {
@@ -262,6 +286,9 @@ nonisolated struct Nudge_V1_Envelope: Sendable {
     case terminalRender(Nudge_V1_TerminalRender)
     case setBindingState(Nudge_V1_SetBindingState)
     case clearBindingState_p(Nudge_V1_ClearBindingState)
+    case e2EHandshakeStart(Nudge_V1_E2EHandshakeStart)
+    case e2EHandshakeFinish(Nudge_V1_E2EHandshakeFinish)
+    case e2EEncryptedEnvelope(Nudge_V1_E2EEncryptedEnvelope)
 
   }
 
@@ -603,6 +630,76 @@ nonisolated struct Nudge_V1_ClearBindingState: Sendable {
   init() {}
 }
 
+nonisolated struct Nudge_V1_E2EHandshakeStart: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var sessionID: String = String()
+
+  var senderDeviceID: String = String()
+
+  var recipientDeviceID: String = String()
+
+  var senderIdentityPublicKey: Data = Data()
+
+  var senderEphemeralPublicKey: Data = Data()
+
+  var transcriptSignature: Data = Data()
+
+  var createdAt: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Nudge_V1_E2EHandshakeFinish: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var sessionID: String = String()
+
+  var senderDeviceID: String = String()
+
+  var recipientDeviceID: String = String()
+
+  var senderEphemeralPublicKey: Data = Data()
+
+  var transcriptSignature: Data = Data()
+
+  var acceptedAt: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Nudge_V1_E2EEncryptedEnvelope: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var sessionID: String = String()
+
+  var senderDeviceID: String = String()
+
+  var recipientDeviceID: String = String()
+
+  var messageType: String = String()
+
+  var sequence: UInt64 = 0
+
+  var nonce: Data = Data()
+
+  var ciphertext: Data = Data()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
 nonisolated struct Nudge_V1_SessionState: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -771,7 +868,7 @@ fileprivate nonisolated let _protobuf_package = "nudge.v1"
 
 nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{4}\u{9}attach_client\0\u{3}client_exited\0\u{3}get_state\0\u{3}session_state\0\u{1}error\0\u{3}daemon_status_request\0\u{3}daemon_status\0\u{3}stop_daemon\0\u{1}ack\0\u{3}terminal_input\0\u{3}terminal_output_request\0\u{3}terminal_output\0\u{3}create_tab\0\u{3}rename_tab\0\u{3}close_tab\0\u{3}resize_tab\0\u{3}restart_tab\0\u{3}terminal_snapshot_request\0\u{3}terminal_snapshot\0\u{3}set_phone_profile\0\u{3}set_width_mode\0\u{3}terminal_render_request\0\u{3}terminal_render\0\u{3}set_binding_state\0\u{3}clear_binding_state\0\u{3}e2e_handshake_start\0\u{3}e2e_handshake_finish\0\u{3}e2e_encrypted_envelope\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1105,6 +1202,45 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .clearBindingState_p(v)
         }
       }()
+      case 35: try {
+        var v: Nudge_V1_E2EHandshakeStart?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .e2EHandshakeStart(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .e2EHandshakeStart(v)
+        }
+      }()
+      case 36: try {
+        var v: Nudge_V1_E2EHandshakeFinish?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .e2EHandshakeFinish(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .e2EHandshakeFinish(v)
+        }
+      }()
+      case 37: try {
+        var v: Nudge_V1_E2EEncryptedEnvelope?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .e2EEncryptedEnvelope(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .e2EEncryptedEnvelope(v)
+        }
+      }()
       default: break
       }
     }
@@ -1218,6 +1354,18 @@ nonisolated extension Nudge_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._M
     case .clearBindingState_p?: try {
       guard case .clearBindingState_p(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
+    }()
+    case .e2EHandshakeStart?: try {
+      guard case .e2EHandshakeStart(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+    }()
+    case .e2EHandshakeFinish?: try {
+      guard case .e2EHandshakeFinish(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
+    }()
+    case .e2EEncryptedEnvelope?: try {
+      guard case .e2EEncryptedEnvelope(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 37)
     }()
     case nil: break
     }
@@ -2022,6 +2170,181 @@ nonisolated extension Nudge_V1_ClearBindingState: SwiftProtobuf.Message, SwiftPr
   }
 
   static func ==(lhs: Nudge_V1_ClearBindingState, rhs: Nudge_V1_ClearBindingState) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Nudge_V1_E2EHandshakeStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".E2EHandshakeStart"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}sender_device_id\0\u{3}recipient_device_id\0\u{3}sender_identity_public_key\0\u{3}sender_ephemeral_public_key\0\u{3}transcript_signature\0\u{3}created_at\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderDeviceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.recipientDeviceID) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.senderIdentityPublicKey) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.senderEphemeralPublicKey) }()
+      case 6: try { try decoder.decodeSingularBytesField(value: &self.transcriptSignature) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.createdAt) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.senderDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderDeviceID, fieldNumber: 2)
+    }
+    if !self.recipientDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.recipientDeviceID, fieldNumber: 3)
+    }
+    if !self.senderIdentityPublicKey.isEmpty {
+      try visitor.visitSingularBytesField(value: self.senderIdentityPublicKey, fieldNumber: 4)
+    }
+    if !self.senderEphemeralPublicKey.isEmpty {
+      try visitor.visitSingularBytesField(value: self.senderEphemeralPublicKey, fieldNumber: 5)
+    }
+    if !self.transcriptSignature.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transcriptSignature, fieldNumber: 6)
+    }
+    if !self.createdAt.isEmpty {
+      try visitor.visitSingularStringField(value: self.createdAt, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Nudge_V1_E2EHandshakeStart, rhs: Nudge_V1_E2EHandshakeStart) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.senderDeviceID != rhs.senderDeviceID {return false}
+    if lhs.recipientDeviceID != rhs.recipientDeviceID {return false}
+    if lhs.senderIdentityPublicKey != rhs.senderIdentityPublicKey {return false}
+    if lhs.senderEphemeralPublicKey != rhs.senderEphemeralPublicKey {return false}
+    if lhs.transcriptSignature != rhs.transcriptSignature {return false}
+    if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Nudge_V1_E2EHandshakeFinish: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".E2EHandshakeFinish"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}sender_device_id\0\u{3}recipient_device_id\0\u{3}sender_ephemeral_public_key\0\u{3}transcript_signature\0\u{3}accepted_at\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderDeviceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.recipientDeviceID) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.senderEphemeralPublicKey) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.transcriptSignature) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.acceptedAt) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.senderDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderDeviceID, fieldNumber: 2)
+    }
+    if !self.recipientDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.recipientDeviceID, fieldNumber: 3)
+    }
+    if !self.senderEphemeralPublicKey.isEmpty {
+      try visitor.visitSingularBytesField(value: self.senderEphemeralPublicKey, fieldNumber: 4)
+    }
+    if !self.transcriptSignature.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transcriptSignature, fieldNumber: 5)
+    }
+    if !self.acceptedAt.isEmpty {
+      try visitor.visitSingularStringField(value: self.acceptedAt, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Nudge_V1_E2EHandshakeFinish, rhs: Nudge_V1_E2EHandshakeFinish) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.senderDeviceID != rhs.senderDeviceID {return false}
+    if lhs.recipientDeviceID != rhs.recipientDeviceID {return false}
+    if lhs.senderEphemeralPublicKey != rhs.senderEphemeralPublicKey {return false}
+    if lhs.transcriptSignature != rhs.transcriptSignature {return false}
+    if lhs.acceptedAt != rhs.acceptedAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Nudge_V1_E2EEncryptedEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".E2EEncryptedEnvelope"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}sender_device_id\0\u{3}recipient_device_id\0\u{3}message_type\0\u{1}sequence\0\u{1}nonce\0\u{1}ciphertext\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderDeviceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.recipientDeviceID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.messageType) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.sequence) }()
+      case 6: try { try decoder.decodeSingularBytesField(value: &self.nonce) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self.ciphertext) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.senderDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderDeviceID, fieldNumber: 2)
+    }
+    if !self.recipientDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.recipientDeviceID, fieldNumber: 3)
+    }
+    if !self.messageType.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageType, fieldNumber: 4)
+    }
+    if self.sequence != 0 {
+      try visitor.visitSingularUInt64Field(value: self.sequence, fieldNumber: 5)
+    }
+    if !self.nonce.isEmpty {
+      try visitor.visitSingularBytesField(value: self.nonce, fieldNumber: 6)
+    }
+    if !self.ciphertext.isEmpty {
+      try visitor.visitSingularBytesField(value: self.ciphertext, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Nudge_V1_E2EEncryptedEnvelope, rhs: Nudge_V1_E2EEncryptedEnvelope) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.senderDeviceID != rhs.senderDeviceID {return false}
+    if lhs.recipientDeviceID != rhs.recipientDeviceID {return false}
+    if lhs.messageType != rhs.messageType {return false}
+    if lhs.sequence != rhs.sequence {return false}
+    if lhs.nonce != rhs.nonce {return false}
+    if lhs.ciphertext != rhs.ciphertext {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

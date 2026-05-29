@@ -30,6 +30,9 @@ message Envelope {
     TerminalRender terminal_render = 32;
     SetBindingState set_binding_state = 33;
     ClearBindingState clear_binding_state = 34;
+    E2EHandshakeStart e2e_handshake_start = 35;
+    E2EHandshakeFinish e2e_handshake_finish = 36;
+    E2EEncryptedEnvelope e2e_encrypted_envelope = 37;
   }
 }
 
@@ -145,6 +148,35 @@ message SetBindingState {
 }
 
 message ClearBindingState {}
+
+message E2EHandshakeStart {
+  string session_id = 1;
+  string sender_device_id = 2;
+  string recipient_device_id = 3;
+  bytes sender_identity_public_key = 4;
+  bytes sender_ephemeral_public_key = 5;
+  bytes transcript_signature = 6;
+  string created_at = 7;
+}
+
+message E2EHandshakeFinish {
+  string session_id = 1;
+  string sender_device_id = 2;
+  string recipient_device_id = 3;
+  bytes sender_ephemeral_public_key = 4;
+  bytes transcript_signature = 5;
+  string accepted_at = 6;
+}
+
+message E2EEncryptedEnvelope {
+  string session_id = 1;
+  string sender_device_id = 2;
+  string recipient_device_id = 3;
+  string message_type = 4;
+  uint64 sequence = 5;
+  bytes nonce = 6;
+  bytes ciphertext = 7;
+}
 
 message SessionState {
   repeated Tab tabs = 1;

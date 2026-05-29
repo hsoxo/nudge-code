@@ -627,6 +627,7 @@ E2E envelope:
 - encrypt protobuf payload bytes with ChaCha20-Poly1305
 - include monotonically increasing sequence numbers to reject replay
 - relay sees route metadata, device ids, message type class, and ciphertext length, but not terminal/control contents
+- `proto/nudge.proto` defines the shared handshake and encrypted envelope messages; runtime key agreement and encryption/decryption are implementation work, not relay behavior
 - hosted relay should run with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1` after daemon and iOS both support envelope encryption
 
 Preferred future hardening:

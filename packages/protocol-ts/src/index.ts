@@ -154,6 +154,35 @@ export interface RestartTab {
   tabId: string;
 }
 
+export interface E2EHandshakeStart {
+  sessionId: string;
+  senderDeviceId: string;
+  recipientDeviceId: string;
+  senderIdentityPublicKey: Uint8Array;
+  senderEphemeralPublicKey: Uint8Array;
+  transcriptSignature: Uint8Array;
+  createdAt: string;
+}
+
+export interface E2EHandshakeFinish {
+  sessionId: string;
+  senderDeviceId: string;
+  recipientDeviceId: string;
+  senderEphemeralPublicKey: Uint8Array;
+  transcriptSignature: Uint8Array;
+  acceptedAt: string;
+}
+
+export interface E2EEncryptedEnvelope {
+  sessionId: string;
+  senderDeviceId: string;
+  recipientDeviceId: string;
+  messageType: string;
+  sequence: bigint;
+  nonce: Uint8Array;
+  ciphertext: Uint8Array;
+}
+
 export const FREE_ENTITLEMENT: Entitlement = {
   plan: 'free',
   maxBoundComputers: 1,

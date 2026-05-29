@@ -1,3 +1,4 @@
+import Foundation
 import SwiftProtobuf
 import Testing
 @testable import NudgeMobile
@@ -28,5 +29,28 @@ struct GeneratedProtocolTests {
         #expect(decoded.tabs[0].id == "default")
         #expect(decoded.tabs[0].agentStatus.kind == "claude")
         #expect(decoded.tabs[0].agentStatus.state == "needs_approval")
+    }
+
+    @Test func encryptedEnvelopeRoundTripsThroughGeneratedProtobuf() throws {
+        var envelope = Nudge_V1_E2EEncryptedEnvelope()
+        envelope.sessionID = "session-1"
+        envelope.senderDeviceID = "phone_1"
+        envelope.recipientDeviceID = "daemon_1"
+        envelope.messageType = "terminal_input"
+        envelope.sequence = 7
+        envelope.nonce = Data([1, 2, 3])
+        envelope.ciphertext = Data([4, 5, 6])
+
+        var outer = Nudge_V1_Envelope()
+        outer.messageID = "msg-1"
+        outer.e2EEncryptedEnvelope = envelope
+
+        let encoded = try outer.serializedData()
+        let decoded = try Nudge_V1_Envelope(serializedBytes: encoded)
+
+        #expect(decoded.messageID == "msg-1")
+        #expect(decoded.e2EEncryptedEnvelope.sessionID == "session-1")
+        #expect(decoded.e2EEncryptedEnvelope.sequence == 7)
+        #expect(decoded.e2EEncryptedEnvelope.ciphertext == Data([4, 5, 6]))
     }
 }
