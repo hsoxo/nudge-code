@@ -48,7 +48,7 @@
     const term = new Terminal({
       convertEol: true,
       cursorBlink: false,
-      disableStdin: true,
+      disableStdin: false,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.35,
@@ -97,6 +97,13 @@
       }
       lastReportedPhoneProfile = profile;
       window.webkit?.messageHandlers?.phoneProfile?.postMessage(profile);
+    }
+
+    function postTerminalInput(data) {
+      if (!data) {
+        return;
+      }
+      window.webkit?.messageHandlers?.terminalInput?.postMessage({ data });
     }
 
     function reportPhoneProfile() {
@@ -214,6 +221,7 @@
       }
     };
 
+    term.onData(postTerminalInput);
     new ResizeObserver(schedulePhoneProfileReport).observe(container);
   </script>
 </body>

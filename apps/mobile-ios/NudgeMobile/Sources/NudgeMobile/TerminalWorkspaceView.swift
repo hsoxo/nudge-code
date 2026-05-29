@@ -102,6 +102,7 @@ struct TabStripView: View {
 }
 
 struct TerminalView: View {
+    @Environment(AppModel.self) private var model
     var tab: TerminalTab
     var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
@@ -114,6 +115,11 @@ struct TerminalView: View {
             replayOutputSequence: tab.replayOutputSequence,
             outputBase64: tab.pendingOutputBase64,
             outputSequence: tab.outputSequence,
+            onTerminalInput: { data in
+                Task {
+                    await model.sendSelectedTabInput(data, enter: false)
+                }
+            },
             onPhoneProfileMeasured: onPhoneProfileMeasured
         )
             .background(Color.black)
@@ -132,11 +138,13 @@ struct TerminalWebView: UIViewRepresentable {
     var replayOutputSequence: Int
     var outputBase64: String
     var outputSequence: Int
+    var onTerminalInput: (String) -> Void = { _ in }
     var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(context.coordinator, name: "phoneProfile")
+        configuration.userContentController.add(context.coordinator, name: "terminalInput")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.scrollView.bounces = false
@@ -154,6 +162,7 @@ struct TerminalWebView: UIViewRepresentable {
             replayOutputSequence: replayOutputSequence,
             outputBase64: outputBase64,
             outputSequence: outputSequence,
+            onTerminalInput: onTerminalInput,
             onPhoneProfileMeasured: onPhoneProfileMeasured,
             in: webView
         )
@@ -165,6 +174,7 @@ struct TerminalWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "phoneProfile")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "terminalInput")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -175,6 +185,7 @@ struct TerminalWebView: UIViewRepresentable {
         private var pendingOutput: (base64: String, sequence: Int)?
         private var lastReplayOutputSequence = 0
         private var lastOutputSequence = 0
+        private var onTerminalInput: (String) -> Void = { _ in }
         private var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
 
         func loadTerminal(in webView: WKWebView) {
@@ -193,9 +204,11 @@ struct TerminalWebView: UIViewRepresentable {
             replayOutputSequence: Int,
             outputBase64: String,
             outputSequence: Int,
+            onTerminalInput: @escaping (String) -> Void,
             onPhoneProfileMeasured: @escaping (TerminalProfile) -> Void,
             in webView: WKWebView
         ) {
+            self.onTerminalInput = onTerminalInput
             self.onPhoneProfileMeasured = onPhoneProfileMeasured
             let snapshot = (text: snapshotText, widthMode: widthMode, profile: profile)
             guard isLoaded else {
@@ -268,6 +281,17 @@ struct TerminalWebView: UIViewRepresentable {
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "terminalInput" {
+                guard let body = message.body as? [String: Any],
+                      let data = body["data"] as? String,
+                      !data.isEmpty
+                else {
+                    return
+                }
+                onTerminalInput(data)
+                return
+            }
+
             guard message.name == "phoneProfile",
                   let body = message.body as? [String: Any],
                   let rows = body["rows"] as? Int,

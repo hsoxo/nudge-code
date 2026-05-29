@@ -44,4 +44,13 @@ struct TerminalWebAssetsTests {
         #expect(html.contains("messageHandlers?.phoneProfile?.postMessage(profile)"))
         #expect(html.contains("new ResizeObserver(schedulePhoneProfileReport).observe(container)"))
     }
+
+    @Test func terminalRendererForwardsRawInputToNativeShell() throws {
+        let url = try #require(TerminalWebAssets.indexURL())
+        let html = try String(contentsOf: url, encoding: .utf8)
+
+        #expect(html.contains("disableStdin: false"))
+        #expect(html.contains("term.onData(postTerminalInput)"))
+        #expect(html.contains("messageHandlers?.terminalInput?.postMessage({ data })"))
+    }
 }
