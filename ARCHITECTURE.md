@@ -614,6 +614,7 @@ Baseline:
 - relay revocation closes participant sockets with `binding_revoked`; daemon and iOS persist/surface revoked local state and stop reconnect loops
 - relay enforces route authorization
 - hosted relay disables legacy HTTP message send/poll endpoints with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`
+- `/readyz` exposes hosted relay hardening warnings and runtime counters for deployment checks
 - terminal/control payloads are end-to-end encrypted between phone and daemon
 - terminal data is not logged
 - optional relay audit logging writes metadata-only JSONL events to `NUDGE_RELAY_AUDIT_PATH`

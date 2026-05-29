@@ -182,6 +182,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
 
+  if (method === 'GET' && url.pathname === '/readyz') {
+    writeJson(response, 200, readiness());
+    return;
+  }
+
   if (method === 'GET' && url.pathname === '/entitlement/free') {
     writeJson(response, 200, FREE_ENTITLEMENT);
     return;
@@ -744,6 +749,43 @@ function isBase64(value: string): boolean {
     return false;
   }
   return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+function readiness(): Record<string, unknown> {
+  const warnings: string[] = [];
+  if (!relayStatePath) {
+    warnings.push('relay_state_not_persistent');
+  }
+  if (!requireWebSocketSignature) {
+    warnings.push('websocket_signature_not_required');
+  }
+  if (!requireWebSocketChallenge) {
+    warnings.push('websocket_challenge_not_required');
+  }
+  if (!disableHttpMessageEndpoints) {
+    warnings.push('legacy_http_messages_enabled');
+  }
+  if (!requireE2EPayload) {
+    warnings.push('e2e_payload_not_required');
+  }
+  return {
+    ok: true,
+    service: 'nudge-relay',
+    devices: devices.size,
+    bindings: bindings.size,
+    sockets: sockets.size,
+    queuedMessages: [...messages.values()].reduce((count, queue) => count + queue.length, 0),
+    config: {
+      statePersistence: Boolean(relayStatePath),
+      auditLog: Boolean(relayAuditPath),
+      requireWebSocketSignature,
+      requireWebSocketChallenge,
+      requireE2EPayload,
+      disableHttpMessageEndpoints,
+      trustProxyHeaders,
+    },
+    warnings,
+  };
 }
 
 function audit(type: AuditEventType, fields: Record<string, unknown> = {}): void {

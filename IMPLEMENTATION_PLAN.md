@@ -231,6 +231,7 @@ Current implementation status:
 - Relay rate-limits pairing claim attempts by client address and normalized pairing code; this protects the short pairing code from simple online guessing while keeping the limits configurable for hosted deployment.
 - Relay can require opaque encrypted payload envelopes with `NUDGE_RELAY_REQUIRE_E2E_PAYLOAD=1`; in that mode it rejects plaintext relay payloads and only forwards `e2e_envelope` metadata plus ciphertext fields.
 - Relay can disable legacy unauthenticated HTTP message send/poll endpoints with `NUDGE_RELAY_DISABLE_HTTP_MESSAGES=1`; hosted deployments should use signed websocket routing for cross-device control.
+- Relay exposes `/readyz` with config flags, runtime counts, and warnings for weak hosted settings such as missing persistence, unsigned websockets, missing websocket challenges, legacy HTTP messages, and non-required E2E envelopes.
 - Daemon persists a long-lived Ed25519 identity in the user state file, registers its public key during pairing, and signs relay websocket URLs before connecting.
 - iOS sends signed mobile websocket URLs using its Keychain-backed signing identity.
 - Daemon marks a relay-revoked binding as revoked locally and stops reconnecting; iOS maps `binding_revoked` relay errors to a revoked/offline machine instead of a generic reconnect loop.
@@ -519,6 +520,7 @@ Relay tests:
 - signed websocket auth
 - E2E envelope enforcement rejects plaintext relay payloads
 - hosted-mode HTTP message endpoints disabled while websocket routing still works
+- readiness endpoint surfaces hosted relay hardening warnings
 - replayed encrypted payload rejected
 - pairing challenge expiration
 - pairing claim rate limiting

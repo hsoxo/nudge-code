@@ -15,6 +15,7 @@
     "smoke:http-disabled": "node dist/smoke-http-messages-disabled.js",
     "smoke:persistence": "node dist/smoke-persistence.js",
     "smoke:rate-limit": "node dist/smoke-rate-limit.js",
+    "smoke:readyz": "node dist/smoke-readyz.js",
     "smoke:websocket": "node dist/smoke-websocket.js",
     "start": "node dist/index.js"
   },
