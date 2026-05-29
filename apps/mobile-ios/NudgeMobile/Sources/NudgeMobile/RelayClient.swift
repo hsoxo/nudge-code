@@ -9,6 +9,10 @@ protocol RelayClient: Sendable {
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState
+    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState
+    func renameTab(machine: Machine, tabID: String, title: String) async throws -> RemoteSessionState
+    func closeTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
+    func restartTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
     func setWidthMode(
         machine: Machine,
         tabID: String,
@@ -178,6 +182,58 @@ struct HTTPRelayClient: RelayClient {
         let payload = try await sendDaemonRequest(
             machine: machine,
             payload: RelaySetPhoneProfilePayload(requestId: requestID, rows: profile.rows, cols: profile.cols),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
+    }
+
+    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelayCreateTabPayload(requestId: requestID, title: title),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
+    }
+
+    func renameTab(machine: Machine, tabID: String, title: String) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelayRenameTabPayload(requestId: requestID, tabId: tabID, title: title),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
+    }
+
+    func closeTab(machine: Machine, tabID: String) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelayCloseTabPayload(requestId: requestID, tabId: tabID),
+            requestID: requestID
+        )
+        guard let data = payload.data else {
+            throw RelayClientError.invalidWebSocketMessage
+        }
+        return try data.toRemoteSessionState()
+    }
+
+    func restartTab(machine: Machine, tabID: String) async throws -> RemoteSessionState {
+        let requestID = requestIDGenerator()
+        let payload = try await sendDaemonRequest(
+            machine: machine,
+            payload: RelayRestartTabPayload(requestId: requestID, tabId: tabID),
             requestID: requestID
         )
         guard let data = payload.data else {
@@ -439,6 +495,10 @@ protocol RelaySession: Sendable {
     func requestTerminalOutput(tabID: String, maxBytes: Int) async throws
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(_ profile: TerminalProfile) async throws
+    func createTab(title: String) async throws
+    func renameTab(tabID: String, title: String) async throws
+    func closeTab(tabID: String) async throws
+    func restartTab(tabID: String) async throws
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
     func receiveEvent() async throws -> RelaySessionEvent
     func close()
@@ -569,6 +629,42 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             kind: .sessionState,
             requestID: requestID,
             payload: RelaySetPhoneProfilePayload(requestId: requestID, rows: profile.rows, cols: profile.cols)
+        )
+    }
+
+    func createTab(title: String) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelayCreateTabPayload(requestId: requestID, title: title)
+        )
+    }
+
+    func renameTab(tabID: String, title: String) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelayRenameTabPayload(requestId: requestID, tabId: tabID, title: title)
+        )
+    }
+
+    func closeTab(tabID: String) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelayCloseTabPayload(requestId: requestID, tabId: tabID)
+        )
+    }
+
+    func restartTab(tabID: String) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelayRestartTabPayload(requestId: requestID, tabId: tabID)
         )
     }
 
@@ -945,6 +1041,31 @@ private struct RelaySetPhoneProfilePayload: Encodable {
     var requestId: String
     var rows: Int
     var cols: Int
+}
+
+private struct RelayCreateTabPayload: Encodable {
+    let type = "create_tab"
+    var requestId: String
+    var title: String
+}
+
+private struct RelayRenameTabPayload: Encodable {
+    let type = "rename_tab"
+    var requestId: String
+    var tabId: String
+    var title: String
+}
+
+private struct RelayCloseTabPayload: Encodable {
+    let type = "close_tab"
+    var requestId: String
+    var tabId: String
+}
+
+private struct RelayRestartTabPayload: Encodable {
+    let type = "restart_tab"
+    var requestId: String
+    var tabId: String
 }
 
 private struct RelaySetWidthModePayload: Encodable {

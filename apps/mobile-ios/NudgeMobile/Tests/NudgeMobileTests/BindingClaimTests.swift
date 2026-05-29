@@ -902,6 +902,104 @@ struct BindingClaimTests {
         await syncTask.value
     }
 
+    @Test func appModelCreatesRenamesRestartsAndClosesTabsThroughOneShotRelay() async throws {
+        let machine = activeMachine()
+        let defaultTab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let secondTab = TerminalTab(
+            id: "tab-2",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: defaultTab.agentStatus,
+            previewText: "$ "
+        )
+        let renamedSecondTab = TerminalTab(
+            id: "tab-2",
+            title: "Claude",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: defaultTab.agentStatus,
+            previewText: "$ "
+        )
+        let client = RecordingRelayClient(tabActionStates: [
+            RemoteSessionState(tabs: [defaultTab, secondTab]),
+            RemoteSessionState(tabs: [
+                defaultTab,
+                renamedSecondTab
+            ]),
+            RemoteSessionState(tabs: [
+                defaultTab,
+                renamedSecondTab
+            ]),
+            RemoteSessionState(tabs: [defaultTab])
+        ])
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [defaultTab]],
+            selectedMachineID: machine.id,
+            selectedTabID: defaultTab.id,
+            relayClient: client
+        )
+
+        await model.createRemoteTab()
+        model.selectTab(secondTab)
+        await model.renameSelectedTab(to: "Claude")
+        await model.restartSelectedTab()
+        await model.closeSelectedTab()
+
+        #expect(client.createTabRequests == [CreateTabClientRequest(machine: machine, title: "shell")])
+        #expect(client.renameTabRequests == [RenameTabClientRequest(machine: machine, tabID: "tab-2", title: "Claude")])
+        #expect(client.restartTabRequests == [RestartTabClientRequest(machine: machine, tabID: "tab-2")])
+        #expect(client.closeTabRequests == [CloseTabClientRequest(machine: machine, tabID: "tab-2")])
+        #expect(model.tabsByMachine[machine.id]?.map(\.id) == ["default"])
+        #expect(model.selectedTabID == "default")
+    }
+
+    @Test func appModelUsesOneShotRelayForTabActionsWhenSessionIsClosed() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let returnedTab = TerminalTab(
+            id: "default",
+            title: "Claude",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: tab.agentStatus,
+            previewText: "Relay session attached\nWaiting for terminal snapshot..."
+        )
+        let client = RecordingRelayClient(tabActionState: RemoteSessionState(tabs: [returnedTab]))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.renameSelectedTab(to: "Claude")
+
+        #expect(client.renameTabRequests == [RenameTabClientRequest(machine: machine, tabID: "default", title: "Claude")])
+        #expect(model.tabsByMachine[machine.id]?.first?.title == "Claude")
+    }
+
     @Test func appModelUpdatesWidthThroughOneShotRelayWhenSessionIsClosed() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(
@@ -1053,6 +1151,27 @@ private struct WidthModeRequest: Equatable {
     var computerProfile: TerminalProfile
 }
 
+private struct CreateTabClientRequest: Equatable {
+    var machine: Machine
+    var title: String
+}
+
+private struct RenameTabClientRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+    var title: String
+}
+
+private struct CloseTabClientRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+}
+
+private struct RestartTabClientRequest: Equatable {
+    var machine: Machine
+    var tabID: String
+}
+
 private func activeMachine() -> Machine {
     Machine(
         id: "mac",
@@ -1094,6 +1213,10 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var snapshotRequests: [TerminalSnapshotRequest] = []
     var phoneProfileRequests: [PhoneProfileClientRequest] = []
     var widthModeRequests: [WidthModeClientRequest] = []
+    var createTabRequests: [CreateTabClientRequest] = []
+    var renameTabRequests: [RenameTabClientRequest] = []
+    var closeTabRequests: [CloseTabClientRequest] = []
+    var restartTabRequests: [RestartTabClientRequest] = []
     var phoneKeyRotationRequests: [Machine] = []
     var revokeRequests: [Machine] = []
     var statusClaim: BindingClaim
@@ -1103,6 +1226,8 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
     var snapshots: [String: TerminalSnapshot]
     var phoneProfileState: RemoteSessionState
     var widthModeState: RemoteSessionState
+    var tabActionState: RemoteSessionState
+    var tabActionStates: [RemoteSessionState]
     var sessions: [RecordingRelaySession]
     var error: Error?
 
@@ -1128,6 +1253,8 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         snapshots: [String: TerminalSnapshot] = [:],
         phoneProfileState: RemoteSessionState = RemoteSessionState(tabs: []),
         widthModeState: RemoteSessionState = RemoteSessionState(tabs: []),
+        tabActionState: RemoteSessionState = RemoteSessionState(tabs: []),
+        tabActionStates: [RemoteSessionState]? = nil,
         session: RecordingRelaySession = RecordingRelaySession(),
         sessions: [RecordingRelaySession]? = nil,
         error: Error? = nil
@@ -1139,6 +1266,8 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         self.snapshots = snapshots
         self.phoneProfileState = phoneProfileState
         self.widthModeState = widthModeState
+        self.tabActionState = tabActionState
+        self.tabActionStates = tabActionStates ?? [tabActionState]
         self.sessions = sessions ?? [session]
         self.error = error
     }
@@ -1216,6 +1345,45 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         }
         phoneProfileRequests.append(PhoneProfileClientRequest(machine: machine, profile: profile))
         return phoneProfileState
+    }
+
+    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        createTabRequests.append(CreateTabClientRequest(machine: machine, title: title))
+        return nextTabActionState()
+    }
+
+    func renameTab(machine: Machine, tabID: String, title: String) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        renameTabRequests.append(RenameTabClientRequest(machine: machine, tabID: tabID, title: title))
+        return nextTabActionState()
+    }
+
+    func closeTab(machine: Machine, tabID: String) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        closeTabRequests.append(CloseTabClientRequest(machine: machine, tabID: tabID))
+        return nextTabActionState()
+    }
+
+    func restartTab(machine: Machine, tabID: String) async throws -> RemoteSessionState {
+        if let error {
+            throw error
+        }
+        restartTabRequests.append(RestartTabClientRequest(machine: machine, tabID: tabID))
+        return nextTabActionState()
+    }
+
+    private func nextTabActionState() -> RemoteSessionState {
+        guard !tabActionStates.isEmpty else {
+            return tabActionState
+        }
+        return tabActionStates.removeFirst()
     }
 
     func setWidthMode(
@@ -1301,6 +1469,23 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
 
     func setPhoneProfile(_ profile: TerminalProfile) async throws {
         phoneProfiles.append(profile)
+    }
+
+    func createTab(title: String) async throws {
+        _ = title
+    }
+
+    func renameTab(tabID: String, title: String) async throws {
+        _ = tabID
+        _ = title
+    }
+
+    func closeTab(tabID: String) async throws {
+        _ = tabID
+    }
+
+    func restartTab(tabID: String) async throws {
+        _ = tabID
     }
 
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws {

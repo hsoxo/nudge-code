@@ -87,7 +87,9 @@ On the iOS simulator or phone:
 3. Scan the QR code or paste the printed `app_pairing_url=nudge://pair?...`.
 4. Tap Claim And Wait.
 5. Confirm the binding in the computer CLI.
-6. Open the machine in the app and verify tab list, terminal output, shortcut keyboard, and command input.
+6. Open the machine in the app and verify tab list, terminal output, shortcut keyboard, command input, and tab actions.
+
+For the free first-version entitlement, one computer and one tab are allowed. Rename and restart should work on the default tab, closing the only tab is disabled in the native UI, and creating a second tab is expected to be rejected until a higher tab entitlement is available.
 
 ## Current Boundary
 

@@ -785,6 +785,66 @@ struct RelayClientTests {
         #expect(socket.closed)
     }
 
+    @Test func tabActionsSendRelayControlRequests() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [
+            socketChallengeResponse(),
+            socketChallengeResponse(),
+            socketChallengeResponse(),
+            socketChallengeResponse()
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let sockets = [
+            RecordingWebSocket(messages: [
+                #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+                #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"create-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"phone","rows":32,"cols":48},{"id":"tab-2","title":"shell","status":"running","widthMode":"phone","rows":32,"cols":48}]}}}}"#
+            ]),
+            RecordingWebSocket(messages: [
+                #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+                #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"rename-1","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48}]}}}}"#
+            ]),
+            RecordingWebSocket(messages: [
+                #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+                #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"restart-1","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48}]}}}}"#
+            ]),
+            RecordingWebSocket(messages: [
+                #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+                #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"close-1","ok":true,"data":{"tabs":[{"id":"default","title":"Claude","status":"running","widthMode":"phone","rows":32,"cols":48}]}}}}"#
+            ])
+        ]
+        let factory = QueueingWebSocketFactory(sockets: sockets)
+        let requestIDs = RequestIDSequence(["create-1", "rename-1", "restart-1", "close-1"])
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { requestIDs.next() }
+        )
+
+        let createState = try await client.createTab(machine: activeMachine, title: "shell")
+        let renameState = try await client.renameTab(machine: activeMachine, tabID: "default", title: "Claude")
+        let restartState = try await client.restartTab(machine: activeMachine, tabID: "default")
+        let closeState = try await client.closeTab(machine: activeMachine, tabID: "tab-2")
+
+        let sent = sockets.flatMap(\.sent)
+        #expect(sent.count == 4)
+        #expect(sent[0].contains(#""type":"create_tab""#))
+        #expect(sent[0].contains(#""title":"shell""#))
+        #expect(sent[1].contains(#""type":"rename_tab""#))
+        #expect(sent[1].contains(#""tabId":"default""#))
+        #expect(sent[1].contains(#""title":"Claude""#))
+        #expect(sent[2].contains(#""type":"restart_tab""#))
+        #expect(sent[2].contains(#""tabId":"default""#))
+        #expect(sent[3].contains(#""type":"close_tab""#))
+        #expect(sent[3].contains(#""tabId":"tab-2""#))
+        #expect(createState.tabs.map(\.id) == ["default", "tab-2"])
+        #expect(renameState.tabs.first?.title == "Claude")
+        #expect(restartState.tabs.first?.state == .running)
+        #expect(closeState.tabs.map(\.id) == ["default"])
+        #expect(sockets.allSatisfy { $0.closed })
+    }
+
     private var activeMachine: Machine {
         Machine(
             id: "mac",
@@ -1039,6 +1099,23 @@ private final class RecordingWebSocketFactory: RelayWebSocketFactory, @unchecked
     func webSocket(for url: URL) throws -> any RelayWebSocketTransport {
         urls.append(url)
         return socket
+    }
+}
+
+private final class QueueingWebSocketFactory: RelayWebSocketFactory, @unchecked Sendable {
+    var urls: [URL] = []
+    private let lock = NSLock()
+    private var sockets: [RecordingWebSocket]
+
+    init(sockets: [RecordingWebSocket]) {
+        self.sockets = sockets
+    }
+
+    func webSocket(for url: URL) throws -> any RelayWebSocketTransport {
+        urls.append(url)
+        return lock.withLock {
+            sockets.removeFirst()
+        }
     }
 }
 

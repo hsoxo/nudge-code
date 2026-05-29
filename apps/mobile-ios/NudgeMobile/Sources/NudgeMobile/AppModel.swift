@@ -385,6 +385,50 @@ final class AppModel {
         await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
     }
 
+    func createRemoteTab(title: String = "shell") async {
+        guard let machine = selectedMachine else {
+            return
+        }
+        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab") {
+            try await relayClient.createTab(machine: machine, title: title)
+        }
+    }
+
+    func renameSelectedTab(to title: String) async {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              let machine = selectedMachine,
+              let tab = selectedTab
+        else {
+            return
+        }
+        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to rename tab") {
+            try await relayClient.renameTab(machine: machine, tabID: tab.id, title: title)
+        }
+    }
+
+    func closeSelectedTab() async {
+        guard let machine = selectedMachine,
+              let tab = selectedTab
+        else {
+            return
+        }
+        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to close tab") {
+            try await relayClient.closeTab(machine: machine, tabID: tab.id)
+        }
+    }
+
+    func restartSelectedTab() async {
+        guard let machine = selectedMachine,
+              let tab = selectedTab
+        else {
+            return
+        }
+        await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to restart tab") {
+            try await relayClient.restartTab(machine: machine, tabID: tab.id)
+        }
+    }
+
     func parsePairingURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
               let draft = BindingDraft(pairingURL: url)
@@ -556,6 +600,19 @@ final class AppModel {
             if let tabID {
                 try await session.requestTerminalSnapshot(tabID: tabID)
             }
+        }
+    }
+
+    private func applyTabAction(
+        machineID: String,
+        fallbackErrorText: String,
+        action: () async throws -> RemoteSessionState
+    ) async {
+        do {
+            let state = try await action()
+            applyRemoteSessionState(state, machineID: machineID)
+        } catch {
+            markMachine(machineID: machineID, state: .online, text: fallbackErrorText)
         }
     }
 

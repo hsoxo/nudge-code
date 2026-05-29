@@ -3,6 +3,9 @@ import WebKit
 
 struct TerminalWorkspaceView: View {
     @Environment(AppModel.self) private var model
+    @State private var showingRenameTab = false
+    @State private var showingCloseTab = false
+    @State private var renameTitle = ""
 
     var body: some View {
         @Bindable var model = model
@@ -34,6 +37,29 @@ struct TerminalWorkspaceView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                TabActionsMenu(
+                    canCloseTab: model.selectedTabs.count > 1,
+                    onNewTab: {
+                        Task {
+                            await model.createRemoteTab()
+                        }
+                    },
+                    onRenameTab: {
+                        renameTitle = model.selectedTab?.title ?? ""
+                        showingRenameTab = true
+                    },
+                    onRestartTab: {
+                        Task {
+                            await model.restartSelectedTab()
+                        }
+                    },
+                    onCloseTab: {
+                        showingCloseTab = true
+                    }
+                )
+                .disabled(model.selectedMachine == nil)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Task {
                         await model.refreshSelectedTabSnapshot()
@@ -44,10 +70,59 @@ struct TerminalWorkspaceView: View {
                 .accessibilityLabel("Refresh terminal")
             }
         }
+        .alert("Rename Tab", isPresented: $showingRenameTab) {
+            TextField("Title", text: $renameTitle)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Rename") {
+                let title = renameTitle
+                Task {
+                    await model.renameSelectedTab(to: title)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Close Tab", isPresented: $showingCloseTab) {
+            Button("Close Tab", role: .destructive) {
+                Task {
+                    await model.closeSelectedTab()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .task(id: model.relaySyncTaskID) {
             await model.refreshSelectedMachineBinding()
             await model.syncSelectedMachineSession()
         }
+    }
+}
+
+struct TabActionsMenu: View {
+    var canCloseTab: Bool
+    var onNewTab: () -> Void
+    var onRenameTab: () -> Void
+    var onRestartTab: () -> Void
+    var onCloseTab: () -> Void
+
+    var body: some View {
+        Menu {
+            Button(action: onNewTab) {
+                Label("New Tab", systemImage: "plus")
+            }
+            Button(action: onRenameTab) {
+                Label("Rename Tab", systemImage: "pencil")
+            }
+            Button(action: onRestartTab) {
+                Label("Restart Tab", systemImage: "arrow.triangle.2.circlepath")
+            }
+            Button(role: .destructive, action: onCloseTab) {
+                Label("Close Tab", systemImage: "xmark")
+            }
+            .disabled(!canCloseTab)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("Tab actions")
     }
 }
 

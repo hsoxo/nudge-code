@@ -313,6 +313,24 @@ enum RelayControlRequest {
         #[serde(rename = "computerCols")]
         computer_cols: u32,
     },
+    CreateTab {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        title: String,
+    },
+    RenameTab {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        title: String,
+    },
+    CloseTab {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+    },
     RestartTab {
         #[serde(rename = "requestId")]
         request_id: String,
@@ -2671,6 +2689,26 @@ async fn handle_relay_control_request(
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
         }
+        RelayControlRequest::CreateTab { request_id, title } => {
+            match runtime.create_tab(title).await {
+                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
+        RelayControlRequest::RenameTab {
+            request_id,
+            tab_id,
+            title,
+        } => match runtime.rename_tab(&tab_id, title).await {
+            Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+            Err(error) => RelayControlResponse::error(request_id, error),
+        },
+        RelayControlRequest::CloseTab { request_id, tab_id } => {
+            match runtime.close_tab(&tab_id).await {
+                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+                Err(error) => RelayControlResponse::error(request_id, error),
+            }
+        }
         RelayControlRequest::RestartTab { request_id, tab_id } => {
             match runtime.restart_tab(&tab_id).await {
                 Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
@@ -3808,6 +3846,73 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn relay_control_tab_actions_return_session_state() {
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-tab-actions-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        session.set_entitlement(Entitlement {
+            plan: "paid".to_string(),
+            max_bound_computers: 1,
+            max_tabs_per_computer: 2,
+            updated_at: "1".to_string(),
+        });
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::CreateTab {
+                request_id: "create-1".to_string(),
+                title: "shell".to_string(),
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["tabs"][1]["id"], "tab-2");
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::RenameTab {
+                request_id: "rename-1".to_string(),
+                tab_id: "tab-2".to_string(),
+                title: "Claude".to_string(),
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["tabs"][1]["title"], "Claude");
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::RestartTab {
+                request_id: "restart-1".to_string(),
+                tab_id: "tab-2".to_string(),
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["tabs"][1]["status"], "running");
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::CloseTab {
+                request_id: "close-1".to_string(),
+                tab_id: "tab-2".to_string(),
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["tabs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(response.payload["tabs"][0]["id"], "default");
 
         let _ = fs::remove_dir_all(&root);
     }
