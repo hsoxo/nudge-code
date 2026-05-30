@@ -9,6 +9,7 @@ struct NewTabSheet: View {
     /// `cwd` is `nil` when the folder field is empty (daemon defaults to home).
     var onCreate: (_ title: String, _ cwd: String?, _ launch: String) -> Void
 
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var agent: TabAgent = .shell
     @State private var folderPath: String = ""
@@ -46,6 +47,12 @@ struct NewTabSheet: View {
             case .codex: return "Launch codex with approvals + sandbox bypassed."
             }
         }
+
+        /// Map a persisted wire value back to an agent, defaulting to `.shell`.
+        static func from(launch: String?) -> TabAgent {
+            guard let launch else { return .shell }
+            return TabAgent(rawValue: launch) ?? .shell
+        }
     }
 
     var body: some View {
@@ -53,29 +60,7 @@ struct NewTabSheet: View {
             List {
                 Section {
                     ForEach(TabAgent.allCases) { option in
-                        Button {
-                            agent = option
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: option.systemImage)
-                                    .frame(width: 22)
-                                    .foregroundStyle(agent == option ? Color.accent : Color.textMuted)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(option.title)
-                                        .font(.system(.body, design: .monospaced))
-                                        .foregroundStyle(Color.textPrimary)
-                                    Text(option.detail)
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .foregroundStyle(Color.textMuted)
-                                }
-                                Spacer()
-                                if agent == option {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(Color.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.surface)
+                        agentRow(option)
                     }
                 } header: {
                     sectionHeader("Open")
@@ -90,6 +75,11 @@ struct NewTabSheet: View {
                         .keyboardType(.asciiCapable)
                         .submitLabel(.done)
                         .listRowBackground(Color.surface)
+
+                    if !model.recentFolders.isEmpty {
+                        recentFolders
+                            .listRowBackground(Color.surface)
+                    }
                 } header: {
                     sectionHeader("Folder on the computer")
                 } footer: {
@@ -110,19 +100,93 @@ struct NewTabSheet: View {
                         .foregroundStyle(Color.textMuted)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        let trimmed = folderPath.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let cwd = trimmed.isEmpty ? nil : trimmed
-                        onCreate(agent.title, cwd, agent.launch)
-                        dismiss()
-                    }
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Color.accent)
+                    Button("Create") { create() }
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.accent)
                 }
             }
         }
         .presentationDetents([.medium, .large])
         .presentationBackground(Color.appBg)
+        .onAppear {
+            agent = TabAgent.from(launch: model.lastLaunchAgent)
+        }
+    }
+
+    @ViewBuilder
+    private func agentRow(_ option: TabAgent) -> some View {
+        let isSelected = agent == option
+        Button {
+            agent = option
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: option.systemImage)
+                    .frame(width: 22)
+                    .foregroundStyle(isSelected ? Color.accent : Color.textMuted)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.title)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(Color.textPrimary)
+                    Text(option.detail)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Color.textMuted)
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(Color.accent)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .listRowBackground(isSelected ? Color.accentGlowSm : Color.surface)
+        .listRowSeparatorTint(Color.border)
+    }
+
+    private var recentFolders: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RECENT")
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .foregroundStyle(Color.textSubtle)
+                .kerning(1.1)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(model.recentFolders, id: \.self) { folder in
+                        Button {
+                            folderPath = folder
+                        } label: {
+                            Text(folder)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(folderPath == folder ? Color.accent : Color.textMuted)
+                                .lineLimit(1)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(folderPath == folder ? Color.accent.opacity(0.12) : Color.surface2)
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(
+                                            folderPath == folder ? Color.accent.opacity(0.30) : Color.border,
+                                            lineWidth: 1
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Use folder \(folder)")
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func create() {
+        let trimmed = folderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cwd = trimmed.isEmpty ? nil : trimmed
+        model.recordLaunch(agent: agent.launch, folder: cwd)
+        onCreate(agent.title, cwd, agent.launch)
+        dismiss()
     }
 
     private func sectionHeader(_ text: String) -> some View {

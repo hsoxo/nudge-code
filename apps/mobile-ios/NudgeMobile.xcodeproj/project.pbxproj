@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		03EE4D1513845181B16ED137 /* AppModelLaunchPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD55852C5018F5133E9E51F7 /* AppModelLaunchPreferencesTests.swift */; };
 		0CDC9B264B69FD50023D155C /* KeyboardLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A64C81DFA8F0101C1F6F42E7 /* KeyboardLayoutTests.swift */; };
 		0F7C0B5D76DD96DFAEB8D7C7 /* BindingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CABE48C4A03FA5502C2F6BA /* BindingView.swift */; };
 		1CC0D59ADB5B5A7C68E92D5A /* KeyboardEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45C983C7A4BCCCD170037BF6 /* KeyboardEditorView.swift */; };
@@ -74,6 +75,7 @@
 		A6981535CC9741519F80F820 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
 		AB01709288152649A72DFD88 /* TerminalWebAssetsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWebAssetsTests.swift; sourceTree = "<group>"; };
 		B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerTests.swift; sourceTree = "<group>"; };
+		BD55852C5018F5133E9E51F7 /* AppModelLaunchPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelLaunchPreferencesTests.swift; sourceTree = "<group>"; };
 		BFC367395E42690D0611FD4F /* PhoneIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneIdentity.swift; sourceTree = "<group>"; };
 		C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWorkspaceView.swift; sourceTree = "<group>"; };
 		CB1C132CE5FD653198268E74 /* NewTabSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabSheet.swift; sourceTree = "<group>"; };
@@ -107,6 +109,7 @@
 			isa = PBXGroup;
 			children = (
 				7DC6A8CEDAE88D494044A53F /* AppModelKeyboardTests.swift */,
+				BD55852C5018F5133E9E51F7 /* AppModelLaunchPreferencesTests.swift */,
 				2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */,
 				5176396EFFD6E84B7038953C /* BindingDraftTests.swift */,
 				D990E73A9E6DBBEC0F8A6389 /* E2EEnvelopeTests.swift */,
@@ -257,6 +260,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CF2D270FE4634E7763E0BE4B /* AppModelKeyboardTests.swift in Sources */,
+				03EE4D1513845181B16ED137 /* AppModelLaunchPreferencesTests.swift in Sources */,
 				820FDE26D6F3F8D74FF189EE /* BindingClaimTests.swift in Sources */,
 				EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */,
 				DF94358231F40AEC8B848CEE /* E2EEnvelopeTests.swift in Sources */,

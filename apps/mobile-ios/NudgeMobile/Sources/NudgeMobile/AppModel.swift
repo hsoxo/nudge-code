@@ -30,9 +30,17 @@ final class AppModel {
     var workspaceNoticeText: String?
     var commandComposer = ""
 
+    /// Folders the user recently launched a tab in, most-recent first. Surfaced
+    /// as quick-fill chips in the New Tab sheet. Capped at `maxRecentFolders`.
+    private(set) var recentFolders: [String]
+    /// Wire value (`shell`/`claude`/`codex`) of the agent the user last launched,
+    /// used to preselect the New Tab sheet. `nil` until the first launch.
+    private(set) var lastLaunchAgent: String?
+
     static let minFontSize = TerminalFontSize.min
     static let maxFontSize = TerminalFontSize.max
     static let defaultFontSize = TerminalFontSize.default
+    static let maxRecentFolders = 5
     private(set) var relaySyncGeneration = 0
     private let relayClient: any RelayClient
     private let persistence: (any AppModelPersistence)?
@@ -52,6 +60,8 @@ final class AppModel {
         terminalFontSize: Int = TerminalFontSize.default,
         keyboardLayout: KeyboardLayout = .default,
         keyboardSoundEnabled: Bool = false,
+        recentFolders: [String] = [],
+        lastLaunchAgent: String? = nil,
         relayClient: any RelayClient = HTTPRelayClient(),
         persistence: (any AppModelPersistence)? = nil,
         sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
@@ -68,6 +78,8 @@ final class AppModel {
         self.terminalFontSize = TerminalFontSize.clamp(terminalFontSize)
         self.keyboardLayout = keyboardLayout
         self.keyboardSoundEnabled = keyboardSoundEnabled
+        self.recentFolders = Self.sanitizedRecentFolders(recentFolders)
+        self.lastLaunchAgent = lastLaunchAgent
         self.relayClient = relayClient
         self.persistence = persistence
         self.sessionReconnectDelayNanoseconds = sessionReconnectDelayNanoseconds
@@ -102,6 +114,8 @@ final class AppModel {
             terminalFontSize: storedState?.terminalFontSize ?? TerminalFontSize.default,
             keyboardLayout: storedState?.keyboardLayout ?? .default,
             keyboardSoundEnabled: storedState?.keyboardSoundEnabled ?? false,
+            recentFolders: storedState?.recentFolders ?? [],
+            lastLaunchAgent: storedState?.lastLaunchAgent,
             relayClient: relayClient,
             persistence: persistence,
             sessionReconnectDelayNanoseconds: sessionReconnectDelayNanoseconds
@@ -110,6 +124,25 @@ final class AppModel {
 
     static func clampFontSize(_ value: Int) -> Int {
         TerminalFontSize.clamp(value)
+    }
+
+    /// Trim, drop blanks, de-duplicate (keeping first occurrence), and cap the
+    /// recent-folders list. Shared by the initializer and the record path so a
+    /// restored list is always normalized.
+    static func sanitizedRecentFolders(_ folders: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for folder in folders {
+            let trimmed = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else {
+                continue
+            }
+            result.append(trimmed)
+            if result.count == maxRecentFolders {
+                break
+            }
+        }
+        return result
     }
 
     var selectedMachine: Machine? {
@@ -453,6 +486,36 @@ final class AppModel {
         if let newTab = selectedTabs.last {
             selectTab(newTab)
         }
+        // The live relay session only streams output for the tabs that were
+        // present when it attached, so a freshly created tab would otherwise
+        // stay blank until the next natural re-sync. Bump the sync generation to
+        // re-run the session task: it re-attaches and re-subscribes every current
+        // tab (including the new one) so the tab renders its live output.
+        relaySyncGeneration &+= 1
+    }
+
+    /// Persist the user's New Tab choices so the sheet can preselect the
+    /// last-used agent and offer recent folders next time. `agent` is the wire
+    /// launch value (`shell`/`claude`/`codex`); `folder` is the chosen path or
+    /// `nil`/blank when launching in the home directory (not recorded).
+    func recordLaunch(agent: String, folder: String?) {
+        var changed = false
+        if agent != lastLaunchAgent {
+            lastLaunchAgent = agent
+            changed = true
+        }
+        if let folder,
+           case let trimmed = folder.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            let updated = Self.sanitizedRecentFolders([trimmed] + recentFolders)
+            if updated != recentFolders {
+                recentFolders = updated
+                changed = true
+            }
+        }
+        if changed {
+            persistStableState()
+        }
     }
 
     func renameSelectedTab(to title: String) async {
@@ -653,7 +716,11 @@ final class AppModel {
                 machines[index].lastSeenText = "relay session synced"
             }
             for tab in state.tabs {
-                try await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
+                // Best-effort per tab: a tab that cannot currently stream (e.g. a
+                // restored tab awaiting restart after a computer-side daemon
+                // bounce) must not throw and tear down the whole session, which
+                // would otherwise wedge the phone in a relay reconnect loop.
+                try? await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
             }
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)
@@ -838,7 +905,9 @@ final class AppModel {
             phoneProfile: phoneProfile,
             terminalFontSize: terminalFontSize,
             keyboardLayout: keyboardLayout,
-            keyboardSoundEnabled: keyboardSoundEnabled
+            keyboardSoundEnabled: keyboardSoundEnabled,
+            recentFolders: recentFolders,
+            lastLaunchAgent: lastLaunchAgent
         ))
     }
 
@@ -919,15 +988,19 @@ struct AppModelStoredState: Codable, Equatable {
     var terminalFontSize: Int
     var keyboardLayout: KeyboardLayout
     var keyboardSoundEnabled: Bool
+    var recentFolders: [String]
+    var lastLaunchAgent: String?
 
     init(
-        version: Int = 1,
+        version: Int = 2,
         machines: [Machine],
         selectedMachineID: String?,
         phoneProfile: TerminalProfile,
         terminalFontSize: Int = TerminalFontSize.default,
         keyboardLayout: KeyboardLayout = .default,
-        keyboardSoundEnabled: Bool = false
+        keyboardSoundEnabled: Bool = false,
+        recentFolders: [String] = [],
+        lastLaunchAgent: String? = nil
     ) {
         self.version = version
         self.machines = machines
@@ -936,6 +1009,8 @@ struct AppModelStoredState: Codable, Equatable {
         self.terminalFontSize = terminalFontSize
         self.keyboardLayout = keyboardLayout
         self.keyboardSoundEnabled = keyboardSoundEnabled
+        self.recentFolders = recentFolders
+        self.lastLaunchAgent = lastLaunchAgent
     }
 
     init(from decoder: Decoder) throws {
@@ -951,6 +1026,9 @@ struct AppModelStoredState: Codable, Equatable {
             ?? .default
         keyboardSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .keyboardSoundEnabled)
             ?? false
+        recentFolders = try container.decodeIfPresent([String].self, forKey: .recentFolders)
+            ?? []
+        lastLaunchAgent = try container.decodeIfPresent(String.self, forKey: .lastLaunchAgent)
     }
 }
 

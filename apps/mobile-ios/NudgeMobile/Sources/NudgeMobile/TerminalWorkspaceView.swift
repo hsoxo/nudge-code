@@ -18,6 +18,11 @@ struct TerminalWorkspaceView: View {
                     .background(Color.border)
             }
             if let tab = model.selectedTab {
+                if model.selectedTabs.count > 1 {
+                    TabStripView()
+                    Divider()
+                        .background(Color.border)
+                }
                 TerminalView(
                     tab: tab,
                     fontSize: model.terminalFontSize,
@@ -25,8 +30,19 @@ struct TerminalWorkspaceView: View {
                         Task {
                             await model.updatePhoneProfile(profile)
                         }
+                    },
+                    onRestart: {
+                        Task {
+                            await model.restartSelectedTab()
+                        }
                     }
                 )
+                // Identify the renderer by tab id: switching tabs reuses a single
+                // WebView whose sequence-based update guards would otherwise keep
+                // showing the previously selected tab's output. A fresh id per tab
+                // makes each render its own content (streaming to the same tab does
+                // not change the id, so live output never forces a reload).
+                .id(tab.id)
                 Divider()
                     .background(Color.border)
                 TerminalKeyboardView(onEditLayout: {
@@ -87,6 +103,7 @@ struct TerminalWorkspaceView: View {
                     await model.createRemoteTab(title: title, cwd: cwd, launch: launch)
                 }
             }
+            .environment(model)
         }
         .alert("Rename Tab", isPresented: $showingRenameTab) {
             TextField("Title", text: $renameTitle)
@@ -261,6 +278,21 @@ struct TerminalView: View {
     var tab: TerminalTab
     var fontSize: Int
     var onPhoneProfileMeasured: (TerminalProfile) -> Void = { _ in }
+    var onRestart: () -> Void = {}
+
+    /// True once the tab has any terminal output to render. Until then the
+    /// terminal area is blank, so we show the connecting state instead.
+    private var hasContent: Bool {
+        !tab.previewText.isEmpty
+            || !tab.replayOutputBase64.isEmpty
+            || !tab.pendingOutputBase64.isEmpty
+            || tab.outputSequence > 0
+            || tab.replayOutputSequence > 0
+    }
+
+    private var isExited: Bool {
+        tab.agentStatus.state == .exited
+    }
 
     var body: some View {
         TerminalWebView(
@@ -280,10 +312,73 @@ struct TerminalView: View {
             onPhoneProfileMeasured: onPhoneProfileMeasured
         )
         .background(Color.black)
+        .overlay {
+            if isExited {
+                ProcessExitedState(onRestart: onRestart)
+            } else if !hasContent {
+                ConnectingState()
+            }
+        }
         .overlay(alignment: .topTrailing) {
             AgentBadge(status: tab.agentStatus)
                 .padding(10)
         }
+    }
+}
+
+/// Centered placeholder shown while a tab is connecting and has no terminal
+/// content yet: a pulsing emerald dot beside a mono "Connecting…" label.
+struct ConnectingState: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(Color.accent)
+            Text("Connecting…")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Color.textMuted)
+                .opacity(pulsing ? 1 : 0.45)
+                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulsing)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .onAppear { pulsing = true }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Connecting")
+    }
+}
+
+/// Centered state shown when the tab's process has exited: a clear label plus a
+/// prominent emerald Restart button that re-spawns the tab's PTY.
+struct ProcessExitedState: View {
+    var onRestart: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 6) {
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 26))
+                    .foregroundStyle(Color.danger.opacity(0.85))
+                Text("Process exited")
+                    .font(.system(.subheadline, design: .monospaced))
+                    .foregroundStyle(Color.textPrimary)
+            }
+            Button(action: onRestart) {
+                Label("Restart", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(Color.appBg)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color.accent)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Restart process")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.92))
     }
 }
 
@@ -495,12 +590,25 @@ struct TerminalWebView: UIViewRepresentable {
 struct AgentBadge: View {
     var status: AgentStatus
 
+    /// Emerald while the agent is live; amber when it needs the user; dim red
+    /// once the process has exited.
+    private var stateColor: Color {
+        switch status.state {
+        case .exited:
+            return Color.danger.opacity(0.85)
+        case .needsApproval, .needsAttention:
+            return Color(hex: "#e3b341")
+        case .running, .idle, .waitingForInput:
+            return Color.accent
+        }
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             Text(status.kind.rawValue)
                 .foregroundStyle(Color.textMuted)
             Text(status.state.rawValue)
-                .foregroundStyle(Color.accent)
+                .foregroundStyle(stateColor)
         }
         .font(.system(.caption2, design: .monospaced))
         .padding(.horizontal, 8)

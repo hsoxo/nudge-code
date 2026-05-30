@@ -1715,10 +1715,13 @@ impl DaemonRuntime {
             tab_id
         };
         self.ensure_ptys().await?;
-        // Pre-trust the folder so Claude does not show its workspace-trust
-        // dialog (the user explicitly chose this folder when launching the agent).
-        if matches!(launch_kind, TabLaunch::Claude) {
-            pretrust_claude_folder(cwd.as_deref());
+        // Pre-trust the folder so the agent does not show its first-run
+        // directory-trust dialog (the user explicitly chose this folder when
+        // launching the agent).
+        match launch_kind {
+            TabLaunch::Claude => pretrust_claude_folder(cwd.as_deref()),
+            TabLaunch::Codex => pretrust_codex_folder(cwd.as_deref()),
+            TabLaunch::Shell => {}
         }
         if let Some(command) = launch_kind.initial_command(cwd.as_deref()) {
             self.write_input(&new_tab_id, command.into_bytes()).await?;
@@ -2343,6 +2346,16 @@ impl TabLaunch {
 /// Best-effort: mark the folder as trusted in ~/.claude.json so Claude skips
 /// its workspace-trust dialog. Writes atomically (temp + rename) so a concurrent
 /// Claude process can never read a torn file. Silently no-ops on any error.
+/// Resolve a launch directory to the canonical, symlink-free absolute path that
+/// Claude and Codex compute for their own directory-trust lookups (e.g. on macOS
+/// `/tmp` resolves to `/private/tmp`). The trust entry must be keyed by this
+/// resolved path or the agent's runtime lookup misses it and still prompts.
+/// Falls back to the path as-given when it cannot be resolved (e.g. it does not
+/// exist yet), preserving best-effort behavior.
+fn canonical_launch_dir(dir: std::path::PathBuf) -> std::path::PathBuf {
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
 fn pretrust_claude_folder(cwd: Option<&str>) {
     let Some(home) = dirs::home_dir() else {
         return;
@@ -2352,6 +2365,7 @@ fn pretrust_claude_folder(cwd: Option<&str>) {
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.clone());
+    let dir = canonical_launch_dir(dir);
     let key = dir.to_string_lossy().to_string();
     let config_path = home.join(".claude.json");
     let mut root: serde_json::Value = std::fs::read(&config_path)
@@ -2383,6 +2397,65 @@ fn pretrust_claude_folder(cwd: Option<&str>) {
             let _ = std::fs::rename(&tmp_path, &config_path);
         }
     }
+}
+
+/// Best-effort: mark the folder as trusted in ~/.codex/config.toml so Codex
+/// skips its first-run directory-trust prompt ("allow Codex to work here").
+/// Codex keys trust off a `[projects."<abs-path>"]` table with
+/// `trust_level = "trusted"`; the `--dangerously-bypass-approvals-and-sandbox`
+/// flag only disables per-command approval/sandboxing, not this directory gate.
+/// Writes atomically (temp + rename) so a concurrent Codex process can never
+/// read a torn file. Silently no-ops on any error.
+fn pretrust_codex_folder(cwd: Option<&str>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let dir = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let dir = canonical_launch_dir(dir);
+    let config_path = home.join(".codex").join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let Some(updated) = codex_config_with_trusted_project(&existing, &dir.to_string_lossy())
+    else {
+        return;
+    };
+    let tmp_path = home.join(".codex").join("config.toml.nudge-tmp");
+    if std::fs::write(&tmp_path, updated).is_ok() {
+        let _ = std::fs::rename(&tmp_path, &config_path);
+    }
+}
+
+/// Returns the contents of a Codex `config.toml` with a trusted-project entry
+/// for `dir`, or `None` when the directory is already trusted (so the caller
+/// can skip the write). Appends a new `[projects."<dir>"]` table rather than
+/// reparsing the whole document, preserving the user's existing formatting and
+/// comments. The path is quoted as a TOML basic string with backslashes and
+/// double quotes escaped.
+fn codex_config_with_trusted_project(existing: &str, dir: &str) -> Option<String> {
+    let escaped = dir.replace('\\', "\\\\").replace('"', "\\\"");
+    let header = format!("[projects.\"{escaped}\"]");
+    // Already declared (with any trust level / settings): leave the file alone.
+    if existing
+        .lines()
+        .any(|line| line.trim() == header.as_str())
+    {
+        return None;
+    }
+    let mut updated = String::with_capacity(existing.len() + header.len() + 32);
+    updated.push_str(existing);
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        updated.push('\n');
+    }
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated.push_str(&header);
+    updated.push('\n');
+    updated.push_str("trust_level = \"trusted\"\n");
+    Some(updated)
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -4255,6 +4328,85 @@ mod tests {
         assert_eq!(
             shell_single_quote("/tmp/o'brien && rm -rf /"),
             "'/tmp/o'\\''brien && rm -rf /'"
+        );
+    }
+
+    #[test]
+    fn canonical_launch_dir_resolves_symlinks() {
+        // Regression: Codex/Claude key directory trust off the canonical,
+        // symlink-resolved path (e.g. `/tmp` -> `/private/tmp` on macOS). The
+        // pre-trust entry must be written under that resolved path or the
+        // agent still shows its first-run trust prompt.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("nudge-canon-{}", std::process::id()));
+        let real = base.join("real");
+        let link = base.join("link");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&real).expect("create real dir");
+        symlink(&real, &link).expect("create symlink");
+
+        let resolved = canonical_launch_dir(link.clone());
+        assert_eq!(resolved, std::fs::canonicalize(&real).expect("canonicalize real"));
+        assert_ne!(resolved, link, "symlink path should be resolved away");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn canonical_launch_dir_falls_back_for_missing_path() {
+        let missing = std::path::PathBuf::from("/no/such/nudge/launch/dir/xyz");
+        assert_eq!(canonical_launch_dir(missing.clone()), missing);
+    }
+
+    #[test]
+    fn codex_config_appends_trusted_project_to_empty_config() {
+        let updated = codex_config_with_trusted_project("", "/Users/me/Projects/app")
+            .expect("an empty config should gain a trusted-project entry");
+        assert_eq!(
+            updated,
+            "[projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_appends_trusted_project_preserving_existing_contents() {
+        let existing = "model = \"gpt-5.5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n";
+        let updated = codex_config_with_trusted_project(existing, "/Users/me/Projects/app")
+            .expect("a populated config should gain a trusted-project entry");
+        assert_eq!(
+            updated,
+            "model = \"gpt-5.5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n\n\
+             [projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_inserts_newline_when_existing_lacks_trailing_newline() {
+        let updated = codex_config_with_trusted_project("model = \"gpt-5.5\"", "/tmp/work")
+            .expect("config without trailing newline should still gain an entry");
+        assert_eq!(
+            updated,
+            "model = \"gpt-5.5\"\n\n[projects.\"/tmp/work\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_skips_write_when_project_already_declared() {
+        let existing =
+            "[projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n";
+        assert_eq!(
+            codex_config_with_trusted_project(existing, "/Users/me/Projects/app"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_config_escapes_quotes_and_backslashes_in_path() {
+        let updated = codex_config_with_trusted_project("", "/tmp/o\"brien\\dir")
+            .expect("a path with special characters should still produce an entry");
+        assert_eq!(
+            updated,
+            "[projects.\"/tmp/o\\\"brien\\\\dir\"]\ntrust_level = \"trusted\"\n"
         );
     }
 
