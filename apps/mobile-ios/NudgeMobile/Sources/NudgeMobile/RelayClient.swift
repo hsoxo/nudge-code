@@ -9,7 +9,7 @@ protocol RelayClient: Sendable {
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState
     func renameTab(machine: Machine, tabID: String, title: String) async throws -> RemoteSessionState
     func closeTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
     func restartTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
@@ -21,6 +21,13 @@ protocol RelayClient: Sendable {
     ) async throws -> RemoteSessionState
     func openSession(machine: Machine) async throws -> any RelaySession
     func connect(machine: Machine) async throws
+}
+
+extension RelayClient {
+    /// Convenience for the common plain-shell create-tab (no cwd/agent).
+    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+        try await createTab(machine: machine, title: title, cwd: nil, launch: nil)
+    }
 }
 
 struct HTTPRelayClient: RelayClient {
@@ -191,11 +198,11 @@ struct HTTPRelayClient: RelayClient {
         return try data.toRemoteSessionState()
     }
 
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState {
         let requestID = requestIDGenerator()
         let payload = try await sendDaemonRequest(
             machine: machine,
-            payload: RelayCreateTabPayload(requestId: requestID, title: title),
+            payload: RelayCreateTabPayload(requestId: requestID, title: title, cwd: cwd, launch: launch),
             requestID: requestID
         )
         guard let data = payload.data else {
@@ -500,13 +507,20 @@ protocol RelaySession: Sendable {
     func requestTerminalOutput(tabID: String, maxBytes: Int) async throws
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(_ profile: TerminalProfile) async throws
-    func createTab(title: String) async throws
+    func createTab(title: String, cwd: String?, launch: String?) async throws
     func renameTab(tabID: String, title: String) async throws
     func closeTab(tabID: String) async throws
     func restartTab(tabID: String) async throws
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
     func receiveEvent() async throws -> RelaySessionEvent
     func close()
+}
+
+extension RelaySession {
+    /// Convenience for the common plain-shell create-tab (no cwd/agent).
+    func createTab(title: String) async throws {
+        try await createTab(title: title, cwd: nil, launch: nil)
+    }
 }
 
 protocol RelayWebSocketTransport: Sendable {
@@ -637,12 +651,12 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
         )
     }
 
-    func createTab(title: String) async throws {
+    func createTab(title: String, cwd: String?, launch: String?) async throws {
         let requestID = requestIDGenerator()
         try await rememberAndSend(
             kind: .sessionState,
             requestID: requestID,
-            payload: RelayCreateTabPayload(requestId: requestID, title: title)
+            payload: RelayCreateTabPayload(requestId: requestID, title: title, cwd: cwd, launch: launch)
         )
     }
 
@@ -1054,6 +1068,24 @@ private struct RelayCreateTabPayload: Encodable {
     let type = "create_tab"
     var requestId: String
     var title: String
+    /// Optional working directory the new tab should start in.
+    var cwd: String?
+    /// Optional agent to auto-launch in the new tab: "shell" | "claude" | "codex".
+    var launch: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, requestId, title, cwd, launch
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(title, forKey: .title)
+        // Omit cwd/launch when unset so the plain-shell wire payload is unchanged.
+        try container.encodeIfPresent(cwd, forKey: .cwd)
+        try container.encodeIfPresent(launch, forKey: .launch)
+    }
 }
 
 private struct RelayRenameTabPayload: Encodable {

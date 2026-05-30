@@ -6,6 +6,7 @@ struct TerminalWorkspaceView: View {
     @State private var showingRenameTab = false
     @State private var showingCloseTab = false
     @State private var showingKeyboardEditor = false
+    @State private var showingNewTab = false
     @State private var renameTitle = ""
 
     var body: some View {
@@ -50,9 +51,7 @@ struct TerminalWorkspaceView: View {
                         model.selectTab(tab)
                     },
                     onNewTab: {
-                        Task {
-                            await model.createRemoteTab()
-                        }
+                        showingNewTab = true
                     },
                     onRenameTab: {
                         renameTitle = model.selectedTab?.title ?? ""
@@ -81,6 +80,13 @@ struct TerminalWorkspaceView: View {
         .sheet(isPresented: $showingKeyboardEditor) {
             KeyboardEditorView(layout: model.keyboardLayout)
                 .environment(model)
+        }
+        .sheet(isPresented: $showingNewTab) {
+            NewTabSheet { title, cwd, launch in
+                Task {
+                    await model.createRemoteTab(title: title, cwd: cwd, launch: launch)
+                }
+            }
         }
         .alert("Rename Tab", isPresented: $showingRenameTab) {
             TextField("Title", text: $renameTitle)

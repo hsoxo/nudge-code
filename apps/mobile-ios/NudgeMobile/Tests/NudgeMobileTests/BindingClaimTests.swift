@@ -1213,6 +1213,8 @@ private struct WidthModeRequest: Equatable {
 private struct CreateTabClientRequest: Equatable {
     var machine: Machine
     var title: String
+    var cwd: String? = nil
+    var launch: String? = nil
 }
 
 private struct RenameTabClientRequest: Equatable {
@@ -1406,11 +1408,11 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         return phoneProfileState
     }
 
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState {
         if let error {
             throw error
         }
-        createTabRequests.append(CreateTabClientRequest(machine: machine, title: title))
+        createTabRequests.append(CreateTabClientRequest(machine: machine, title: title, cwd: cwd, launch: launch))
         return nextTabActionState()
     }
 
@@ -1530,8 +1532,10 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
         phoneProfiles.append(profile)
     }
 
-    func createTab(title: String) async throws {
+    func createTab(title: String, cwd: String?, launch: String?) async throws {
         _ = title
+        _ = cwd
+        _ = launch
     }
 
     func renameTab(tabID: String, title: String) async throws {

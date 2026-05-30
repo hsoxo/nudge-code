@@ -442,12 +442,12 @@ final class AppModel {
         await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
     }
 
-    func createRemoteTab(title: String = "shell") async {
+    func createRemoteTab(title: String = "shell", cwd: String? = nil, launch: String? = nil) async {
         guard let machine = selectedMachine else {
             return
         }
         await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab", fallbackNoticeText: "Free version is limited to one tab on this computer.") {
-            try await relayClient.createTab(machine: machine, title: title)
+            try await relayClient.createTab(machine: machine, title: title, cwd: cwd, launch: launch)
         }
     }
 
