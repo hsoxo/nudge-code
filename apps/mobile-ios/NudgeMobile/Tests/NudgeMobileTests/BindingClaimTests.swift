@@ -1031,6 +1031,34 @@ struct BindingClaimTests {
         #expect(model.workspaceNoticeText == nil)
     }
 
+    @Test func appModelKeepsActionFallbackNoticeWhenTabErrorIsNotFreeLimit() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        // A non-limit daemon rejection that still contains the word "tab" must not be
+        // mislabeled as the free-plan limit notice (regression: rename/close/restart).
+        let client = RecordingRelayClient(error: RelayClientError.daemonRejected("tab default was not found"))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.renameSelectedTab(to: "Claude")
+
+        #expect(model.workspaceNoticeText == "Unable to rename tab")
+        #expect(model.workspaceNoticeText != "Free version is limited to one tab on this computer.")
+    }
+
     @Test func appModelUpdatesWidthThroughOneShotRelayWhenSessionIsClosed() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(

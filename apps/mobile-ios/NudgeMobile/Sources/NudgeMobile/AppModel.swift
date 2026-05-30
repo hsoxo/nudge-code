@@ -628,7 +628,7 @@ final class AppModel {
         guard case RelayClientError.daemonRejected(let message) = error else {
             return fallback
         }
-        if message.contains("free entitlement") || message.contains("max_tabs") || message.contains("tab") {
+        if message.contains("free entitlement") || message.contains("max_tabs") {
             return "Free version is limited to one tab on this computer."
         }
         return fallback
