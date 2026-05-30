@@ -7,3 +7,6 @@ build/
 *.tmp
 *.tsbuildinfo
 /.nudge-dev/
+.omc/
+.omx/
+.playwright-mcp/
