@@ -412,8 +412,15 @@ final class AppModel {
                 await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
             }
         } catch {
-            if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
-                machines[machineIndex].lastSeenText = "Unable to send input"
+            // The long-lived session may be stale (e.g. mid-reconnect after a
+            // drop); fall back to a one-shot send so input still reaches the tab.
+            do {
+                try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
+                await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
+            } catch {
+                if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
+                    machines[machineIndex].lastSeenText = "Unable to send input"
+                }
             }
         }
     }
