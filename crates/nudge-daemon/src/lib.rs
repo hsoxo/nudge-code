@@ -1715,6 +1715,11 @@ impl DaemonRuntime {
             tab_id
         };
         self.ensure_ptys().await?;
+        // Pre-trust the folder so Claude does not show its workspace-trust
+        // dialog (the user explicitly chose this folder when launching the agent).
+        if matches!(launch_kind, TabLaunch::Claude) {
+            pretrust_claude_folder(cwd.as_deref());
+        }
         if let Some(command) = launch_kind.initial_command(cwd.as_deref()) {
             self.write_input(&new_tab_id, command.into_bytes()).await?;
         }
@@ -2335,6 +2340,51 @@ impl TabLaunch {
 
 /// Wrap `value` in single quotes for safe use in a POSIX shell command,
 /// escaping any embedded single quotes via the `'\''` idiom.
+/// Best-effort: mark the folder as trusted in ~/.claude.json so Claude skips
+/// its workspace-trust dialog. Writes atomically (temp + rename) so a concurrent
+/// Claude process can never read a torn file. Silently no-ops on any error.
+fn pretrust_claude_folder(cwd: Option<&str>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let dir = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let key = dir.to_string_lossy().to_string();
+    let config_path = home.join(".claude.json");
+    let mut root: serde_json::Value = std::fs::read(&config_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(root_obj) = root.as_object_mut() else {
+        return;
+    };
+    let projects = root_obj
+        .entry("projects".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(projects_obj) = projects.as_object_mut() else {
+        return;
+    };
+    let project = projects_obj
+        .entry(key)
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(project_obj) = project.as_object_mut() else {
+        return;
+    };
+    project_obj.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Ok(serialized) = serde_json::to_vec_pretty(&root) {
+        let tmp_path = home.join(".claude.json.nudge-tmp");
+        if std::fs::write(&tmp_path, serialized).is_ok() {
+            let _ = std::fs::rename(&tmp_path, &config_path);
+        }
+    }
+}
+
 fn shell_single_quote(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('\'');

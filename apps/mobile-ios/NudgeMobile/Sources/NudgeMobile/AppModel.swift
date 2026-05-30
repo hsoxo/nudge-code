@@ -449,6 +449,10 @@ final class AppModel {
         await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab", fallbackNoticeText: "Free version is limited to one tab on this computer.") {
             try await relayClient.createTab(machine: machine, title: title, cwd: cwd, launch: launch)
         }
+        // Switch to the newly created tab (it is appended last).
+        if let newTab = selectedTabs.last {
+            selectTab(newTab)
+        }
     }
 
     func renameSelectedTab(to title: String) async {
