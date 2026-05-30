@@ -2,13 +2,14 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <link rel="stylesheet" href="xterm.css">
   <style>
     html, body {
       margin: 0;
       width: 100%;
       height: 100%;
+      height: 100dvh;
       overflow: hidden;
       background: #050505;
     }
@@ -43,12 +44,16 @@
 <body>
   <div id="terminal"></div>
   <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+  <script src="addon-webgl.js"></script>
+  <script src="addon-unicode11.js"></script>
   <script>
     const container = document.getElementById('terminal');
     const term = new Terminal({
       convertEol: true,
       cursorBlink: false,
       disableStdin: false,
+      allowProposedApi: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.35,
@@ -61,7 +66,41 @@
       }
     });
 
+    // The fit addon must be loaded before open() so the first layout pass can
+    // measure the container correctly.
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
     term.open(container);
+
+    // Wider Unicode glyph widths (best-effort; ignore if unavailable).
+    try {
+      const unicode11 = new Unicode11Addon.Unicode11Addon();
+      term.loadAddon(unicode11);
+      term.unicode.activeVersion = '11';
+    } catch (error) {
+      // fall back to the default unicode handling
+    }
+
+    // Prefer the WebGL renderer, falling back to the DOM renderer. The bare DOM
+    // renderer can paint a black screen in WKWebView until a fit/reflow happens,
+    // so an explicit renderer plus the refit() pass below keeps output visible.
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch (error) {
+      // DOM renderer remains active
+    }
+
+    // On iOS the xterm helper textarea would summon the system keyboard when the
+    // terminal is focused. Input arrives through the native composer / shortcut
+    // keys instead, so suppress the system keyboard here.
+    const helperTextarea = container.querySelector('.xterm-helper-textarea');
+    if (helperTextarea) {
+      helperTextarea.inputMode = 'none';
+      helperTextarea.setAttribute('virtualkeyboardpolicy', 'manual');
+    }
+
     let lastReportedPhoneProfile = null;
     let resizeReportHandle = 0;
     let encoder = new TextEncoder();
@@ -79,14 +118,31 @@
       return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
     }
 
-    function cellHeight() {
-      return term._core?._renderService?.dimensions?.css?.cell?.height || 17;
+    // Force a paint+measure pass. The double requestAnimationFrame is the key
+    // WKWebView fix: it lets layout settle before xterm measures the cell size
+    // and fits, which is what keeps the terminal from rendering all black.
+    function refit() {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const rect = container.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) {
+            return;
+          }
+          if (container.classList.contains('computer')) {
+            return;
+          }
+          try {
+            fitAddon.fit();
+          } catch (error) {
+            // ignore transient fit errors
+          }
+          reportPhoneProfile();
+        });
+      });
     }
 
     function measuredPhoneProfile() {
-      const cols = Math.max(Math.floor((container.clientWidth - 28) / cellWidth()), 1);
-      const rows = Math.max(Math.floor((container.clientHeight - 28) / cellHeight()), 1);
-      return { rows, cols };
+      return { rows: Math.max(term.rows, 1), cols: Math.max(term.cols, 1) };
     }
 
     function postPhoneProfile(profile) {
@@ -110,13 +166,12 @@
       if (!container.classList.contains('phone')) {
         return;
       }
-      const profile = measuredPhoneProfile();
-      postPhoneProfile(profile);
+      postPhoneProfile(measuredPhoneProfile());
     }
 
     function schedulePhoneProfileReport() {
       clearTimeout(resizeReportHandle);
-      resizeReportHandle = setTimeout(reportPhoneProfile, 120);
+      resizeReportHandle = setTimeout(refit, 120);
     }
 
     function syncTerminalSize(widthMode, rows, cols) {
@@ -129,12 +184,7 @@
         term.resize(safeCols, safeRows);
       } else {
         container.style.removeProperty('--terminal-width');
-        term.resize(safeCols, safeRows);
-        requestAnimationFrame(() => {
-          const profile = measuredPhoneProfile();
-          term.resize(profile.cols, profile.rows);
-          postPhoneProfile(profile);
-        });
+        refit();
       }
     }
 
@@ -192,6 +242,7 @@
       writeBytes(new Uint8Array(replayBuffer));
       writeBytes(new Uint8Array(liveBuffer));
       followCursor(snapshotState.widthMode);
+      refit();
     }
 
     window.nudgeTerminal = {
@@ -218,11 +269,22 @@
         appendBounded(liveBuffer, bytes);
         writeBytes(bytes);
         followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
+      },
+      setFontSize(px) {
+        const size = Math.max(8, Math.min(28, Number(px) || 13));
+        if (term.options.fontSize === size) {
+          return;
+        }
+        term.options.fontSize = size;
+        refit();
       }
     };
 
     term.onData(postTerminalInput);
     new ResizeObserver(schedulePhoneProfileReport).observe(container);
+
+    // Initial paint once the WKWebView has laid out.
+    refit();
   </script>
 </body>
 </html>
