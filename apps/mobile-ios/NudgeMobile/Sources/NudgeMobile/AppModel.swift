@@ -695,6 +695,14 @@ final class AppModel {
         for tab in state.tabs where tab.widthMode == .computer {
             computerProfilesByTabKey[tabProfileKey(machineID: machineID, tabID: tab.id)] = tab.profile
         }
+        // Adopt the computer's hostname as the machine name once the daemon reports it.
+        if let hostname = state.hostname,
+           !hostname.isEmpty,
+           let index = machines.firstIndex(where: { $0.id == machineID }),
+           machines[index].name != hostname {
+            machines[index].name = hostname
+            persistStableState()
+        }
     }
 
     private func tabProfileKey(machineID: String, tabID: String) -> String {

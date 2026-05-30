@@ -444,6 +444,7 @@ struct BindingClaim: Equatable, Sendable {
 
 struct RemoteSessionState: Equatable, Sendable {
     var tabs: [TerminalTab]
+    var hostname: String? = nil
 }
 
 struct TerminalSnapshot: Equatable, Sendable {
@@ -1186,10 +1187,11 @@ private struct RelayDaemonDataResponse: Decodable {
     var agentStatus: RelayAgentStatusResponse?
     var accepted: Bool?
     var error: String?
+    var hostname: String?
 
     func toRemoteSessionState() throws -> RemoteSessionState {
         let tabs = try (tabs ?? []).map { try $0.toTerminalTab() }
-        return RemoteSessionState(tabs: tabs)
+        return RemoteSessionState(tabs: tabs, hostname: hostname)
     }
 
     var snapshot: RelayTerminalSnapshotResponse? {

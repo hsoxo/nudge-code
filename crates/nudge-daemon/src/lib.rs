@@ -2958,6 +2958,27 @@ fn base64_encode(data: &[u8]) -> String {
     encoded
 }
 
+fn daemon_hostname() -> String {
+    use std::sync::OnceLock;
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME
+        .get_or_init(|| {
+            let raw = std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+            let trimmed = raw.strip_suffix(".local").unwrap_or(raw.as_str()).trim();
+            if trimmed.is_empty() {
+                "Computer".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .clone()
+}
+
 fn session_state_json(state: v1::SessionState) -> Value {
     let tabs: Vec<Value> = state
         .tabs
@@ -2983,6 +3004,7 @@ fn session_state_json(state: v1::SessionState) -> Value {
         .collect();
     json!({
         "tabs": tabs,
+        "hostname": daemon_hostname(),
         "entitlement": state.entitlement.map(|entitlement| {
             json!({
                 "plan": entitlement.plan,

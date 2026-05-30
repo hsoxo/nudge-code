@@ -11,9 +11,6 @@ struct TerminalWorkspaceView: View {
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
-            TabStripView()
-            Divider()
-                .background(Color.border)
             if model.selectedMachine?.lastSeenText == "relay session reconnecting" {
                 RelayReconnectBanner()
                 Divider()
@@ -31,10 +28,6 @@ struct TerminalWorkspaceView: View {
                 )
                 Divider()
                     .background(Color.border)
-                FontSizeStepper()
-                    .background(Color.surface)
-                Divider()
-                    .background(Color.border)
                 TerminalKeyboardView(onEditLayout: {
                     showingKeyboardEditor = true
                 })
@@ -46,12 +39,16 @@ struct TerminalWorkspaceView: View {
             }
         }
         .background(Color.appBg)
-        .navigationTitle(model.selectedMachine?.name ?? "Nudge")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 TabActionsMenu(
-                    canCloseTab: model.selectedTabs.count > 1,
+                    tabs: model.selectedTabs,
+                    selectedTabID: model.selectedTab?.id,
+                    onSelectTab: { tab in
+                        model.selectTab(tab)
+                    },
                     onNewTab: {
                         Task {
                             await model.createRemoteTab()
@@ -68,27 +65,17 @@ struct TerminalWorkspaceView: View {
                     },
                     onCloseTab: {
                         showingCloseTab = true
+                    },
+                    onRefresh: {
+                        Task {
+                            await model.refreshSelectedTabSnapshot()
+                        }
                     }
                 )
                 .disabled(model.selectedMachine == nil)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingKeyboardEditor = true
-                } label: {
-                    Image(systemName: "keyboard")
-                }
-                .accessibilityLabel("Edit keyboard")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task {
-                        await model.refreshSelectedTabSnapshot()
-                    }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .accessibilityLabel("Refresh terminal")
+                TerminalSettingsButton()
             }
         }
         .sheet(isPresented: $showingKeyboardEditor) {
@@ -140,31 +127,55 @@ struct TerminalWorkspaceView: View {
 }
 
 struct TabActionsMenu: View {
-    var canCloseTab: Bool
+    var tabs: [TerminalTab]
+    var selectedTabID: String?
+    var onSelectTab: (TerminalTab) -> Void
     var onNewTab: () -> Void
     var onRenameTab: () -> Void
     var onRestartTab: () -> Void
     var onCloseTab: () -> Void
+    var onRefresh: () -> Void
 
     var body: some View {
         Menu {
-            Button(action: onNewTab) {
-                Label("New Tab", systemImage: "plus")
+            if tabs.count > 1 {
+                Section("Tabs") {
+                    ForEach(tabs) { tab in
+                        Button {
+                            onSelectTab(tab)
+                        } label: {
+                            Label(
+                                tab.title,
+                                systemImage: tab.id == selectedTabID ? "checkmark" : "terminal"
+                            )
+                        }
+                    }
+                }
             }
-            Button(action: onRenameTab) {
-                Label("Rename Tab", systemImage: "pencil")
+            Section {
+                Button(action: onNewTab) {
+                    Label("New Tab", systemImage: "plus")
+                }
+                Button(action: onRenameTab) {
+                    Label("Rename Tab", systemImage: "pencil")
+                }
+                Button(action: onRestartTab) {
+                    Label("Restart Tab", systemImage: "arrow.triangle.2.circlepath")
+                }
+                Button(role: .destructive, action: onCloseTab) {
+                    Label("Close Tab", systemImage: "xmark")
+                }
+                .disabled(tabs.count <= 1)
             }
-            Button(action: onRestartTab) {
-                Label("Restart Tab", systemImage: "arrow.triangle.2.circlepath")
+            Section {
+                Button(action: onRefresh) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
             }
-            Button(role: .destructive, action: onCloseTab) {
-                Label("Close Tab", systemImage: "xmark")
-            }
-            .disabled(!canCloseTab)
         } label: {
             Image(systemName: "ellipsis.circle")
         }
-        .accessibilityLabel("Tab actions")
+        .accessibilityLabel("Tab management")
     }
 }
 
@@ -497,46 +508,76 @@ struct AgentBadge: View {
     }
 }
 
-struct FontSizeStepper: View {
+struct TerminalSettingsButton: View {
     @Environment(AppModel.self) private var model
+    @State private var showing = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "textformat.size")
-                .foregroundStyle(Color.textMuted)
-                .font(.subheadline)
-            Text("Font")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(Color.textMuted)
-            Spacer()
-            Button {
-                model.updateFontSize(model.terminalFontSize - 1)
-            } label: {
-                Image(systemName: "minus")
-                    .frame(width: 32, height: 28)
-            }
-            .buttonStyle(StepperCapStyle())
-            .disabled(model.terminalFontSize <= AppModel.minFontSize)
-            .accessibilityLabel("Decrease font size")
-
-            Text("\(model.terminalFontSize)")
-                .font(.system(.body, design: .monospaced).weight(.semibold))
-                .foregroundStyle(Color.textPrimary)
-                .frame(minWidth: 28)
-                .accessibilityLabel("Font size \(model.terminalFontSize)")
-
-            Button {
-                model.updateFontSize(model.terminalFontSize + 1)
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 32, height: 28)
-            }
-            .buttonStyle(StepperCapStyle())
-            .disabled(model.terminalFontSize >= AppModel.maxFontSize)
-            .accessibilityLabel("Increase font size")
+        @Bindable var model = model
+        Button {
+            showing = true
+        } label: {
+            Image(systemName: "gearshape")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .accessibilityLabel("Settings")
+        .popover(isPresented: $showing) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("SETTINGS")
+                    .font(.system(.caption2, design: .monospaced))
+                    .tracking(1.5)
+                    .foregroundStyle(Color.textSubtle)
+
+                HStack(spacing: 12) {
+                    Image(systemName: "textformat.size")
+                        .foregroundStyle(Color.textMuted)
+                    Text("Font")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(Color.textMuted)
+                    Spacer(minLength: 16)
+                    Button {
+                        model.updateFontSize(model.terminalFontSize - 1)
+                    } label: {
+                        Image(systemName: "minus").frame(width: 32, height: 28)
+                    }
+                    .buttonStyle(StepperCapStyle())
+                    .disabled(model.terminalFontSize <= AppModel.minFontSize)
+                    .accessibilityLabel("Decrease font size")
+
+                    Text("\(model.terminalFontSize)")
+                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(Color.textPrimary)
+                        .frame(minWidth: 26)
+                        .accessibilityLabel("Font size \(model.terminalFontSize)")
+
+                    Button {
+                        model.updateFontSize(model.terminalFontSize + 1)
+                    } label: {
+                        Image(systemName: "plus").frame(width: 32, height: 28)
+                    }
+                    .buttonStyle(StepperCapStyle())
+                    .disabled(model.terminalFontSize >= AppModel.maxFontSize)
+                    .accessibilityLabel("Increase font size")
+                }
+
+                Toggle(isOn: Binding(
+                    get: { model.keyboardSoundEnabled },
+                    set: { model.setKeyboardSoundEnabled($0) }
+                )) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "speaker.wave.2")
+                            .foregroundStyle(Color.textMuted)
+                        Text("Key sound")
+                            .font(.system(.subheadline, design: .monospaced))
+                            .foregroundStyle(Color.textMuted)
+                    }
+                }
+                .tint(Color.accent)
+            }
+            .padding(18)
+            .frame(minWidth: 264)
+            .background(Color.surface)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }
 
