@@ -317,6 +317,12 @@ enum RelayControlRequest {
         #[serde(rename = "requestId")]
         request_id: String,
         title: String,
+        /// Optional working directory the new tab's shell should start in.
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Optional agent to auto-launch: "shell" | "claude" | "codex".
+        #[serde(default)]
+        launch: Option<String>,
     },
     RenameTab {
         #[serde(rename = "requestId")]
@@ -425,7 +431,10 @@ impl StateStore {
                 .with_context(|| format!("failed to read {}", self.path.display()))?;
             let mut session: MachineSession = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", self.path.display()))?;
-            if session.ensure_device_identity()? {
+            let identity_changed = session.ensure_device_identity()?;
+            let mut dirty = identity_changed;
+            dirty |= session.apply_entitlement_override_if_changed();
+            if dirty {
                 self.save(&session)?;
             } else {
                 self.secure_file_permissions()?;
@@ -435,6 +444,7 @@ impl StateStore {
 
         let mut session = MachineSession::new_default();
         session.ensure_device_identity()?;
+        session.apply_entitlement_override();
         self.save(&session)?;
         Ok(session)
     }
@@ -445,7 +455,10 @@ impl StateStore {
                 .with_context(|| format!("failed to read {}", self.path.display()))?;
             let mut session: MachineSession = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", self.path.display()))?;
-            if session.ensure_device_identity()? {
+            let identity_changed = session.ensure_device_identity()?;
+            let mut dirty = identity_changed;
+            dirty |= session.apply_entitlement_override_if_changed();
+            if dirty {
                 self.save(&session)?;
             } else {
                 self.secure_file_permissions()?;
@@ -455,6 +468,7 @@ impl StateStore {
 
         let mut session = MachineSession::new_default();
         session.ensure_device_identity()?;
+        session.apply_entitlement_override();
         self.save(&session)?;
         Ok((session, false))
     }
@@ -660,7 +674,16 @@ impl MachineSession {
             cols,
             updated_at: now_string(),
         });
-        self.updated_at = now_string();
+        // Phone-first: once the phone reports its size, size every tab to it so
+        // tabs default to (and stay at) the phone's width instead of computer width.
+        let now = now_string();
+        for tab in self.tabs.iter_mut() {
+            tab.width_mode = WidthMode::Phone;
+            tab.rows = rows;
+            tab.cols = cols;
+            tab.last_activity_at = now.clone();
+        }
+        self.updated_at = now;
     }
 
     pub fn set_width_mode(
@@ -702,7 +725,37 @@ impl MachineSession {
         self.updated_at = now_string();
     }
 
-    pub fn set_entitlement(&mut self, entitlement: Entitlement) -> Vec<String> {
+    /// Apply the local/dev paid override (env `NUDGE_DAEMON_PLAN`) to this
+    /// session if it is set, so a dev daemon is paid even before the relay
+    /// reports an entitlement. No-op in production (variable unset).
+    pub fn apply_entitlement_override(&mut self) {
+        let _ = self.apply_entitlement_override_if_changed();
+    }
+
+    /// Like [`Self::apply_entitlement_override`] but returns `true` only when
+    /// the override actually raised the entitlement, so callers can avoid an
+    /// unnecessary state-file write on load.
+    pub fn apply_entitlement_override_if_changed(&mut self) -> bool {
+        let Some(entitlement) = entitlement_override() else {
+            return false;
+        };
+        if self.entitlement.plan == entitlement.plan
+            && self.entitlement.max_tabs_per_computer == entitlement.max_tabs_per_computer
+            && self.entitlement.max_bound_computers == entitlement.max_bound_computers
+        {
+            return false;
+        }
+        self.entitlement = entitlement;
+        self.updated_at = now_string();
+        true
+    }
+
+    pub fn set_entitlement(&mut self, mut entitlement: Entitlement) -> Vec<String> {
+        // Dev override wins: never downgrade a locally-paid daemon below the
+        // override when the relay reports a smaller (e.g. FREE) entitlement.
+        if let Some(override_entitlement) = entitlement_override() {
+            entitlement = override_entitlement;
+        }
         let allowed_tabs = entitlement.max_tabs_per_computer.max(1) as usize;
         let now = now_string();
         let mut suspended_tab_ids = Vec::new();
@@ -1057,6 +1110,15 @@ impl Entitlement {
         }
     }
 
+    fn pro() -> Self {
+        Self {
+            plan: "pro".to_string(),
+            max_bound_computers: 8,
+            max_tabs_per_computer: 16,
+            updated_at: now_string(),
+        }
+    }
+
     pub fn to_proto(&self) -> v1::Entitlement {
         v1::Entitlement {
             plan: self.plan.clone(),
@@ -1072,6 +1134,18 @@ fn entitlement_from_proto(entitlement: v1::Entitlement) -> Entitlement {
         max_bound_computers: entitlement.max_bound_computers,
         max_tabs_per_computer: entitlement.max_tabs_per_computer,
         updated_at: now_string(),
+    }
+}
+
+/// Local/dev escape hatch: when `NUDGE_DAEMON_PLAN` names a paid plan
+/// (`pro`/`paid`/`max`, case-insensitive), the daemon behaves as paid
+/// regardless of the entitlement the relay reports. Production leaves the
+/// variable unset and stays on the FREE entitlement.
+fn entitlement_override() -> Option<Entitlement> {
+    let plan = std::env::var("NUDGE_DAEMON_PLAN").ok()?;
+    match plan.trim().to_ascii_lowercase().as_str() {
+        "pro" | "paid" | "max" => Some(Entitlement::pro()),
+        _ => None,
     }
 }
 
@@ -1618,17 +1692,40 @@ impl DaemonRuntime {
     }
 
     async fn create_tab(&self, title: String) -> Result<v1::SessionState> {
-        {
+        self.create_tab_with(title, None, None).await
+    }
+
+    async fn create_tab_with(
+        &self,
+        title: String,
+        cwd: Option<String>,
+        launch: Option<String>,
+    ) -> Result<v1::SessionState> {
+        let launch_kind = TabLaunch::parse(launch.as_deref());
+        let new_tab_id = {
             let mut session = self.session.lock().await;
-            let tab = session.create_tab(title)?;
+            let tab = session.create_tab(launch_kind.tab_title(&title))?;
+            let tab_id = tab.id.clone();
             self.ptys.lock().await.push(RuntimeTab {
-                tab_id: tab.id.clone(),
+                tab_id: tab_id.clone(),
                 pty: None,
                 grid: Arc::new(std::sync::Mutex::new(TerminalGrid::default())),
             });
             self.state_store.save(&session)?;
-        }
+            tab_id
+        };
         self.ensure_ptys().await?;
+        // Pre-trust the folder so the agent does not show its first-run
+        // directory-trust dialog (the user explicitly chose this folder when
+        // launching the agent).
+        match launch_kind {
+            TabLaunch::Claude => pretrust_claude_folder(cwd.as_deref()),
+            TabLaunch::Codex => pretrust_codex_folder(cwd.as_deref()),
+            TabLaunch::Shell => {}
+        }
+        if let Some(command) = launch_kind.initial_command(cwd.as_deref()) {
+            self.write_input(&new_tab_id, command.into_bytes()).await?;
+        }
         Ok(self.session_state().await)
     }
 
@@ -1759,12 +1856,20 @@ impl DaemonRuntime {
 
     async fn output_tail(&self, tab_id: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let ptys = self.ptys.lock().await;
-        let pty = ptys
+        let tab = ptys
             .iter()
             .find(|tab| tab.tab_id == tab_id)
-            .and_then(|tab| tab.pty.as_ref())
-            .with_context(|| format!("tab {tab_id} does not have a pty"))?;
-        Ok(pty.output_tail(max_bytes))
+            .with_context(|| format!("tab {tab_id} was not found"))?;
+        // A tab whose process has exited (needs_restart) has no live PTY. That
+        // is a valid state, not an error: return an empty tail so the phone's
+        // per-tab output request still succeeds. Erroring here made the daemon
+        // reply ok=false, which the phone treats as fatal — wedging it in a
+        // relay-reconnect loop after a daemon restart left every tab dead.
+        Ok(tab
+            .pty
+            .as_ref()
+            .map(|pty| pty.output_tail(max_bytes))
+            .unwrap_or_default())
     }
 
     async fn terminal_snapshot(&self, tab_id: &str) -> Result<v1::TerminalSnapshot> {
@@ -1960,10 +2065,16 @@ impl DaemonRuntime {
     }
 
     async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
-        {
+        let tab_ids: Vec<String> = {
             let mut session = self.session.lock().await;
             session.set_phone_profile(rows, cols);
             self.state_store.save(&session)?;
+            session.tabs.iter().map(|tab| tab.id.clone()).collect()
+        };
+        // Resize each tab's PTY to the phone so running programs reflow to fit.
+        let size = TerminalSize { rows, cols };
+        for tab_id in tab_ids {
+            let _ = self.resize_tab(&tab_id, size).await;
         }
         Ok(self.session_state().await)
     }
@@ -2177,6 +2288,196 @@ struct RuntimeTab {
     tab_id: String,
     pty: Option<PtyTab>,
     grid: Arc<std::sync::Mutex<TerminalGrid>>,
+}
+
+/// Agent the phone asked us to launch in a freshly created tab. The command
+/// run in the PTY is always constructed on the daemon side; the phone only
+/// chooses which agent and which directory, never an arbitrary command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabLaunch {
+    Shell,
+    Claude,
+    Codex,
+}
+
+impl TabLaunch {
+    fn parse(value: Option<&str>) -> Self {
+        match value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref() {
+            Some("claude") => Self::Claude,
+            Some("codex") => Self::Codex,
+            _ => Self::Shell,
+        }
+    }
+
+    /// Tab title to use when this launch is requested. `requested_title`
+    /// is the title the phone sent (used only for the plain shell).
+    fn tab_title(self, requested_title: &str) -> String {
+        match self {
+            Self::Claude => "claude".to_string(),
+            Self::Codex => "codex".to_string(),
+            Self::Shell => {
+                let trimmed = requested_title.trim();
+                if trimmed.is_empty() {
+                    "shell".to_string()
+                } else {
+                    requested_title.to_string()
+                }
+            }
+        }
+    }
+
+    /// Initial command to feed the new tab's shell, or `None` when nothing
+    /// needs to run (a plain shell without a starting directory).
+    fn initial_command(self, cwd: Option<&str>) -> Option<String> {
+        let cwd = cwd
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(shell_single_quote);
+        match self {
+            Self::Shell => cwd.map(|dir| format!("cd {dir}\n")),
+            Self::Claude => Some(match cwd {
+                Some(dir) => format!("cd {dir} && claude --dangerously-skip-permissions\n"),
+                None => "claude --dangerously-skip-permissions\n".to_string(),
+            }),
+            Self::Codex => Some(match cwd {
+                Some(dir) => {
+                    format!("cd {dir} && codex --dangerously-bypass-approvals-and-sandbox\n")
+                }
+                None => "codex --dangerously-bypass-approvals-and-sandbox\n".to_string(),
+            }),
+        }
+    }
+}
+
+/// Wrap `value` in single quotes for safe use in a POSIX shell command,
+/// escaping any embedded single quotes via the `'\''` idiom.
+/// Best-effort: mark the folder as trusted in ~/.claude.json so Claude skips
+/// its workspace-trust dialog. Writes atomically (temp + rename) so a concurrent
+/// Claude process can never read a torn file. Silently no-ops on any error.
+/// Resolve a launch directory to the canonical, symlink-free absolute path that
+/// Claude and Codex compute for their own directory-trust lookups (e.g. on macOS
+/// `/tmp` resolves to `/private/tmp`). The trust entry must be keyed by this
+/// resolved path or the agent's runtime lookup misses it and still prompts.
+/// Falls back to the path as-given when it cannot be resolved (e.g. it does not
+/// exist yet), preserving best-effort behavior.
+fn canonical_launch_dir(dir: std::path::PathBuf) -> std::path::PathBuf {
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
+fn pretrust_claude_folder(cwd: Option<&str>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let dir = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let dir = canonical_launch_dir(dir);
+    let key = dir.to_string_lossy().to_string();
+    let config_path = home.join(".claude.json");
+    let mut root: serde_json::Value = std::fs::read(&config_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(root_obj) = root.as_object_mut() else {
+        return;
+    };
+    let projects = root_obj
+        .entry("projects".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(projects_obj) = projects.as_object_mut() else {
+        return;
+    };
+    let project = projects_obj
+        .entry(key)
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(project_obj) = project.as_object_mut() else {
+        return;
+    };
+    project_obj.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Ok(serialized) = serde_json::to_vec_pretty(&root) {
+        let tmp_path = home.join(".claude.json.nudge-tmp");
+        if std::fs::write(&tmp_path, serialized).is_ok() {
+            let _ = std::fs::rename(&tmp_path, &config_path);
+        }
+    }
+}
+
+/// Best-effort: mark the folder as trusted in ~/.codex/config.toml so Codex
+/// skips its first-run directory-trust prompt ("allow Codex to work here").
+/// Codex keys trust off a `[projects."<abs-path>"]` table with
+/// `trust_level = "trusted"`; the `--dangerously-bypass-approvals-and-sandbox`
+/// flag only disables per-command approval/sandboxing, not this directory gate.
+/// Writes atomically (temp + rename) so a concurrent Codex process can never
+/// read a torn file. Silently no-ops on any error.
+fn pretrust_codex_folder(cwd: Option<&str>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let dir = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let dir = canonical_launch_dir(dir);
+    let config_path = home.join(".codex").join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let Some(updated) = codex_config_with_trusted_project(&existing, &dir.to_string_lossy())
+    else {
+        return;
+    };
+    let tmp_path = home.join(".codex").join("config.toml.nudge-tmp");
+    if std::fs::write(&tmp_path, updated).is_ok() {
+        let _ = std::fs::rename(&tmp_path, &config_path);
+    }
+}
+
+/// Returns the contents of a Codex `config.toml` with a trusted-project entry
+/// for `dir`, or `None` when the directory is already trusted (so the caller
+/// can skip the write). Appends a new `[projects."<dir>"]` table rather than
+/// reparsing the whole document, preserving the user's existing formatting and
+/// comments. The path is quoted as a TOML basic string with backslashes and
+/// double quotes escaped.
+fn codex_config_with_trusted_project(existing: &str, dir: &str) -> Option<String> {
+    let escaped = dir.replace('\\', "\\\\").replace('"', "\\\"");
+    let header = format!("[projects.\"{escaped}\"]");
+    // Already declared (with any trust level / settings): leave the file alone.
+    if existing
+        .lines()
+        .any(|line| line.trim() == header.as_str())
+    {
+        return None;
+    }
+    let mut updated = String::with_capacity(existing.len() + header.len() + 32);
+    updated.push_str(existing);
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        updated.push('\n');
+    }
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated.push_str(&header);
+    updated.push('\n');
+    updated.push_str("trust_level = \"trusted\"\n");
+    Some(updated)
+}
+
+fn shell_single_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 async fn spawn_pty_for_tab(
@@ -2689,12 +2990,15 @@ async fn handle_relay_control_request(
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
         }
-        RelayControlRequest::CreateTab { request_id, title } => {
-            match runtime.create_tab(title).await {
-                Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
-                Err(error) => RelayControlResponse::error(request_id, error),
-            }
-        }
+        RelayControlRequest::CreateTab {
+            request_id,
+            title,
+            cwd,
+            launch,
+        } => match runtime.create_tab_with(title, cwd, launch).await {
+            Ok(state) => RelayControlResponse::ok(request_id, session_state_json(state)),
+            Err(error) => RelayControlResponse::error(request_id, error),
+        },
         RelayControlRequest::RenameTab {
             request_id,
             tab_id,
@@ -2928,6 +3232,9 @@ fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
         "rows": snapshot.rows,
         "cols": snapshot.cols,
         "text": snapshot.text,
+        // Alt-screen-aware ANSI dump so full-screen TUIs (Claude, Codex) can be
+        // reconstructed faithfully on the phone, not just the plain-text grid.
+        "formatted": base64_encode(&snapshot.formatted),
     })
 }
 
@@ -2955,6 +3262,27 @@ fn base64_encode(data: &[u8]) -> String {
     encoded
 }
 
+fn daemon_hostname() -> String {
+    use std::sync::OnceLock;
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME
+        .get_or_init(|| {
+            let raw = std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+            let trimmed = raw.strip_suffix(".local").unwrap_or(raw.as_str()).trim();
+            if trimmed.is_empty() {
+                "Computer".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .clone()
+}
+
 fn session_state_json(state: v1::SessionState) -> Value {
     let tabs: Vec<Value> = state
         .tabs
@@ -2980,6 +3308,7 @@ fn session_state_json(state: v1::SessionState) -> Value {
         .collect();
     json!({
         "tabs": tabs,
+        "hostname": daemon_hostname(),
         "entitlement": state.entitlement.map(|entitlement| {
             json!({
                 "plan": entitlement.plan,
@@ -3600,6 +3929,42 @@ fn default_cols() -> u16 {
 mod tests {
     use super::*;
 
+    /// Serializes every test that depends on the process-global
+    /// `NUDGE_DAEMON_PLAN` value (both the override tests and the entitlement
+    /// tests that assume it is unset), so they cannot observe each other's
+    /// mutations under cargo's parallel test runner.
+    static DAEMON_PLAN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that holds [`DAEMON_PLAN_ENV_LOCK`] and sets/clears
+    /// `NUDGE_DAEMON_PLAN` for the duration of a test, restoring (clearing) it
+    /// on drop even if the test panics.
+    struct DaemonPlanEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DaemonPlanEnvGuard {
+        fn unset() -> Self {
+            let lock = DAEMON_PLAN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: env access is serialized by the held lock.
+            unsafe { std::env::remove_var("NUDGE_DAEMON_PLAN") };
+            Self { _lock: lock }
+        }
+
+        fn set(plan: &str) -> Self {
+            let lock = DAEMON_PLAN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: env access is serialized by the held lock.
+            unsafe { std::env::set_var("NUDGE_DAEMON_PLAN", plan) };
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for DaemonPlanEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: still holding the lock until this guard is dropped.
+            unsafe { std::env::remove_var("NUDGE_DAEMON_PLAN") };
+        }
+    }
+
     #[test]
     fn free_entitlement_allows_only_one_tab() {
         let mut session = MachineSession::new_default();
@@ -3730,6 +4095,7 @@ mod tests {
 
     #[test]
     fn entitlement_update_controls_tab_limit() {
+        let _env = DaemonPlanEnvGuard::unset();
         let mut session = MachineSession::new_default();
         let suspended = session.set_entitlement(Entitlement {
             plan: "paid".to_string(),
@@ -3754,6 +4120,7 @@ mod tests {
 
     #[test]
     fn entitlement_downgrade_suspends_excess_tabs_without_deleting_metadata() {
+        let _env = DaemonPlanEnvGuard::unset();
         let mut session = MachineSession::new_default();
         session.set_entitlement(Entitlement {
             plan: "paid".to_string(),
@@ -3784,6 +4151,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_entitlement_downgrade_stops_excess_tab_ptys() {
+        let _env = DaemonPlanEnvGuard::unset();
         let root = std::env::temp_dir().join(format!(
             "nudge-entitlement-downgrade-{}-{}",
             std::process::id(),
@@ -3852,6 +4220,7 @@ mod tests {
 
     #[tokio::test]
     async fn relay_control_tab_actions_return_session_state() {
+        let _env = DaemonPlanEnvGuard::unset();
         let root = std::env::temp_dir().join(format!(
             "nudge-relay-tab-actions-{}-{}",
             std::process::id(),
@@ -3873,6 +4242,8 @@ mod tests {
             RelayControlRequest::CreateTab {
                 request_id: "create-1".to_string(),
                 title: "shell".to_string(),
+                cwd: None,
+                launch: None,
             },
         )
         .await;
@@ -3915,6 +4286,255 @@ mod tests {
         assert_eq!(response.payload["tabs"][0]["id"], "default");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tab_launch_parses_agent_keys_case_insensitively() {
+        assert_eq!(TabLaunch::parse(None), TabLaunch::Shell);
+        assert_eq!(TabLaunch::parse(Some("shell")), TabLaunch::Shell);
+        assert_eq!(TabLaunch::parse(Some(" Claude ")), TabLaunch::Claude);
+        assert_eq!(TabLaunch::parse(Some("CODEX")), TabLaunch::Codex);
+        assert_eq!(TabLaunch::parse(Some("other")), TabLaunch::Shell);
+    }
+
+    #[test]
+    fn tab_launch_builds_trust_bypass_commands() {
+        assert_eq!(
+            TabLaunch::Claude.initial_command(Some("/Users/me/Projects/app")),
+            Some(
+                "cd '/Users/me/Projects/app' && claude --dangerously-skip-permissions\n"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            TabLaunch::Codex.initial_command(Some("/Users/me/Projects/app")),
+            Some(
+                "cd '/Users/me/Projects/app' && codex --dangerously-bypass-approvals-and-sandbox\n"
+                    .to_string()
+            )
+        );
+        // Empty/blank cwd: run the agent without a cd.
+        assert_eq!(
+            TabLaunch::Claude.initial_command(Some("   ")),
+            Some("claude --dangerously-skip-permissions\n".to_string())
+        );
+        assert_eq!(
+            TabLaunch::Claude.initial_command(None),
+            Some("claude --dangerously-skip-permissions\n".to_string())
+        );
+        // Plain shell: cd only when a directory is supplied, never an agent.
+        assert_eq!(
+            TabLaunch::Shell.initial_command(Some("/tmp/work")),
+            Some("cd '/tmp/work'\n".to_string())
+        );
+        assert_eq!(TabLaunch::Shell.initial_command(None), None);
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_single_quote("/tmp/plain"), "'/tmp/plain'");
+        assert_eq!(
+            shell_single_quote("/tmp/o'brien && rm -rf /"),
+            "'/tmp/o'\\''brien && rm -rf /'"
+        );
+    }
+
+    #[test]
+    fn canonical_launch_dir_resolves_symlinks() {
+        // Regression: Codex/Claude key directory trust off the canonical,
+        // symlink-resolved path (e.g. `/tmp` -> `/private/tmp` on macOS). The
+        // pre-trust entry must be written under that resolved path or the
+        // agent still shows its first-run trust prompt.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("nudge-canon-{}", std::process::id()));
+        let real = base.join("real");
+        let link = base.join("link");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&real).expect("create real dir");
+        symlink(&real, &link).expect("create symlink");
+
+        let resolved = canonical_launch_dir(link.clone());
+        assert_eq!(resolved, std::fs::canonicalize(&real).expect("canonicalize real"));
+        assert_ne!(resolved, link, "symlink path should be resolved away");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn canonical_launch_dir_falls_back_for_missing_path() {
+        let missing = std::path::PathBuf::from("/no/such/nudge/launch/dir/xyz");
+        assert_eq!(canonical_launch_dir(missing.clone()), missing);
+    }
+
+    #[test]
+    fn codex_config_appends_trusted_project_to_empty_config() {
+        let updated = codex_config_with_trusted_project("", "/Users/me/Projects/app")
+            .expect("an empty config should gain a trusted-project entry");
+        assert_eq!(
+            updated,
+            "[projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_appends_trusted_project_preserving_existing_contents() {
+        let existing = "model = \"gpt-5.5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n";
+        let updated = codex_config_with_trusted_project(existing, "/Users/me/Projects/app")
+            .expect("a populated config should gain a trusted-project entry");
+        assert_eq!(
+            updated,
+            "model = \"gpt-5.5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n\n\
+             [projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_inserts_newline_when_existing_lacks_trailing_newline() {
+        let updated = codex_config_with_trusted_project("model = \"gpt-5.5\"", "/tmp/work")
+            .expect("config without trailing newline should still gain an entry");
+        assert_eq!(
+            updated,
+            "model = \"gpt-5.5\"\n\n[projects.\"/tmp/work\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_config_skips_write_when_project_already_declared() {
+        let existing =
+            "[projects.\"/Users/me/Projects/app\"]\ntrust_level = \"trusted\"\n";
+        assert_eq!(
+            codex_config_with_trusted_project(existing, "/Users/me/Projects/app"),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_config_escapes_quotes_and_backslashes_in_path() {
+        let updated = codex_config_with_trusted_project("", "/tmp/o\"brien\\dir")
+            .expect("a path with special characters should still produce an entry");
+        assert_eq!(
+            updated,
+            "[projects.\"/tmp/o\\\"brien\\\\dir\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn tab_launch_titles_match_agent() {
+        assert_eq!(TabLaunch::Claude.tab_title("ignored"), "claude");
+        assert_eq!(TabLaunch::Codex.tab_title("ignored"), "codex");
+        assert_eq!(TabLaunch::Shell.tab_title("my tab"), "my tab");
+        assert_eq!(TabLaunch::Shell.tab_title("   "), "shell");
+    }
+
+    #[tokio::test]
+    async fn create_tab_with_claude_launch_titles_tab_and_runs_command() {
+        let _env = DaemonPlanEnvGuard::set("pro");
+
+        let root = std::env::temp_dir().join(format!(
+            "nudge-create-tab-launch-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        session.apply_entitlement_override();
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+        runtime.ensure_ptys().await.expect("ptys should start");
+
+        let state = runtime
+            .create_tab_with(
+                "ignored".to_string(),
+                Some("/tmp/projects/app".to_string()),
+                Some("claude".to_string()),
+            )
+            .await
+            .expect("create_tab with claude launch should succeed");
+
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[1].id, "tab-2");
+        assert_eq!(state.tabs[1].title, "claude");
+
+        // The daemon-built launch command must reach the new tab's PTY.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let tail = runtime
+            .output_tail("tab-2", 8 * 1024)
+            .await
+            .expect("tab-2 should have a pty");
+        let tail = String::from_utf8_lossy(&tail);
+        assert!(
+            tail.contains("claude --dangerously-skip-permissions"),
+            "expected trust-bypass command in pty output, got: {tail}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn output_tail_is_empty_for_a_tab_without_a_live_pty() {
+        // A tab restored from state after a daemon restart has no live PTY
+        // (status needs_restart). The phone requests each tab's output on
+        // sessionState; output_tail must yield empty here, NOT an error —
+        // erroring made the daemon reply ok=false, which the phone treated as
+        // fatal and wedged it in a relay-reconnect loop.
+        let root = std::env::temp_dir().join(format!(
+            "nudge-output-tail-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let session = MachineSession::new_default();
+        // No ensure_ptys(): the default tab keeps pty: None, mimicking a
+        // needs_restart tab whose process has exited.
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+
+        let tail = runtime
+            .output_tail("default", 8 * 1024)
+            .await
+            .expect("a tab without a live PTY should yield an empty tail, not an error");
+        assert!(tail.is_empty());
+
+        // A tab that does not exist at all is still a genuine error.
+        assert!(runtime.output_tail("no-such-tab", 8 * 1024).await.is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entitlement_override_yields_pro_and_allows_extra_tabs() {
+        let _env = DaemonPlanEnvGuard::set("PAID");
+
+        let mut session = MachineSession::new_default();
+        session.apply_entitlement_override();
+        assert_eq!(session.entitlement.plan, "pro");
+        assert_eq!(session.entitlement.max_tabs_per_computer, 16);
+        assert_eq!(session.entitlement.max_bound_computers, 8);
+
+        session
+            .create_tab("second".to_string())
+            .expect("override should allow a second tab");
+        assert_eq!(session.tabs.len(), 2);
+    }
+
+    #[test]
+    fn set_entitlement_does_not_downgrade_under_override() {
+        let _env = DaemonPlanEnvGuard::set("max");
+
+        let mut session = MachineSession::new_default();
+        session.apply_entitlement_override();
+        session
+            .create_tab("second".to_string())
+            .expect("override should allow a second tab");
+
+        // The relay reports FREE, but the dev override must keep us paid and
+        // must not suspend the extra tab.
+        let suspended = session.set_entitlement(Entitlement::free());
+        assert!(suspended.is_empty());
+        assert_eq!(session.entitlement.plan, "pro");
+        assert_eq!(session.entitlement.max_tabs_per_computer, 16);
+        assert_eq!(session.tabs.len(), 2);
+        assert!(matches!(session.tabs[1].status, TabStatus::Running));
     }
 
     #[test]

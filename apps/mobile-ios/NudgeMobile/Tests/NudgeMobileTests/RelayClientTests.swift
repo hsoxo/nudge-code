@@ -831,6 +831,9 @@ struct RelayClientTests {
         #expect(sent.count == 4)
         #expect(sent[0].contains(#""type":"create_tab""#))
         #expect(sent[0].contains(#""title":"shell""#))
+        // Plain-shell create-tab omits the optional cwd/launch fields entirely.
+        #expect(!sent[0].contains("cwd"))
+        #expect(!sent[0].contains("launch"))
         #expect(sent[1].contains(#""type":"rename_tab""#))
         #expect(sent[1].contains(#""tabId":"default""#))
         #expect(sent[1].contains(#""title":"Claude""#))
@@ -843,6 +846,40 @@ struct RelayClientTests {
         #expect(restartState.tabs.first?.state == .running)
         #expect(closeState.tabs.map(\.id) == ["default"])
         #expect(sockets.allSatisfy { $0.closed })
+    }
+
+    @Test func createTabWithAgentLaunchIncludesCwdAndLaunch() async throws {
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"create-1","ok":true,"data":{"tabs":[{"id":"default","title":"shell","status":"running","widthMode":"phone","rows":32,"cols":48},{"id":"tab-2","title":"claude","status":"running","widthMode":"phone","rows":32,"cols":48}]}}}}"#
+        ])
+        let factory = QueueingWebSocketFactory(sockets: [socket])
+        let requestIDs = RequestIDSequence(["create-1"])
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { requestIDs.next() }
+        )
+
+        let state = try await client.createTab(
+            machine: activeMachine,
+            title: "Claude Code",
+            cwd: "/Users/you/Projects/app",
+            launch: "claude"
+        )
+
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""type":"create_tab""#))
+        #expect(socket.sent[0].contains(#""cwd":"\/Users\/you\/Projects\/app""#))
+        #expect(socket.sent[0].contains(#""launch":"claude""#))
+        #expect(state.tabs.map(\.id) == ["default", "tab-2"])
+        #expect(state.tabs.last?.title == "claude")
+        #expect(socket.closed)
     }
 
     private var activeMachine: Machine {

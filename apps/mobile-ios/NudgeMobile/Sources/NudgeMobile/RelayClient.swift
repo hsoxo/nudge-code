@@ -9,7 +9,7 @@ protocol RelayClient: Sendable {
     func fetchTerminalSnapshot(machine: Machine, tabID: String) async throws -> TerminalSnapshot
     func sendTerminalInput(machine: Machine, tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(machine: Machine, profile: TerminalProfile) async throws -> RemoteSessionState
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState
     func renameTab(machine: Machine, tabID: String, title: String) async throws -> RemoteSessionState
     func closeTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
     func restartTab(machine: Machine, tabID: String) async throws -> RemoteSessionState
@@ -21,6 +21,13 @@ protocol RelayClient: Sendable {
     ) async throws -> RemoteSessionState
     func openSession(machine: Machine) async throws -> any RelaySession
     func connect(machine: Machine) async throws
+}
+
+extension RelayClient {
+    /// Convenience for the common plain-shell create-tab (no cwd/agent).
+    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+        try await createTab(machine: machine, title: title, cwd: nil, launch: nil)
+    }
 }
 
 struct HTTPRelayClient: RelayClient {
@@ -159,7 +166,8 @@ struct HTTPRelayClient: RelayClient {
         return TerminalSnapshot(
             tabID: snapshot.tabId,
             profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-            text: snapshot.text
+            text: snapshot.text,
+            formattedBase64: (snapshot.formatted ?? "")
         )
     }
 
@@ -190,11 +198,11 @@ struct HTTPRelayClient: RelayClient {
         return try data.toRemoteSessionState()
     }
 
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState {
         let requestID = requestIDGenerator()
         let payload = try await sendDaemonRequest(
             machine: machine,
-            payload: RelayCreateTabPayload(requestId: requestID, title: title),
+            payload: RelayCreateTabPayload(requestId: requestID, title: title, cwd: cwd, launch: launch),
             requestID: requestID
         )
         guard let data = payload.data else {
@@ -443,12 +451,16 @@ struct BindingClaim: Equatable, Sendable {
 
 struct RemoteSessionState: Equatable, Sendable {
     var tabs: [TerminalTab]
+    var hostname: String? = nil
 }
 
 struct TerminalSnapshot: Equatable, Sendable {
     var tabID: String
     var profile: TerminalProfile
     var text: String
+    // Alt-screen-aware ANSI dump of the current screen (vt100 contents_formatted).
+    // Rendering this reconstructs full-screen TUIs (Claude, Codex); plain `text` loses positioning.
+    var formattedBase64: String = ""
 }
 
 struct TerminalOutput: Equatable, Sendable {
@@ -495,13 +507,20 @@ protocol RelaySession: Sendable {
     func requestTerminalOutput(tabID: String, maxBytes: Int) async throws
     func sendTerminalInput(tabID: String, text: String, enter: Bool) async throws
     func setPhoneProfile(_ profile: TerminalProfile) async throws
-    func createTab(title: String) async throws
+    func createTab(title: String, cwd: String?, launch: String?) async throws
     func renameTab(tabID: String, title: String) async throws
     func closeTab(tabID: String) async throws
     func restartTab(tabID: String) async throws
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
     func receiveEvent() async throws -> RelaySessionEvent
     func close()
+}
+
+extension RelaySession {
+    /// Convenience for the common plain-shell create-tab (no cwd/agent).
+    func createTab(title: String) async throws {
+        try await createTab(title: title, cwd: nil, launch: nil)
+    }
 }
 
 protocol RelayWebSocketTransport: Sendable {
@@ -632,12 +651,12 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
         )
     }
 
-    func createTab(title: String) async throws {
+    func createTab(title: String, cwd: String?, launch: String?) async throws {
         let requestID = requestIDGenerator()
         try await rememberAndSend(
             kind: .sessionState,
             requestID: requestID,
-            payload: RelayCreateTabPayload(requestId: requestID, title: title)
+            payload: RelayCreateTabPayload(requestId: requestID, title: title, cwd: cwd, launch: launch)
         )
     }
 
@@ -763,7 +782,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             return .terminalSnapshot(TerminalSnapshot(
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-                text: snapshot.text
+                text: snapshot.text,
+                formattedBase64: (snapshot.formatted ?? "")
             ))
         case .terminalOutput:
             guard let output = payload.data?.output else {
@@ -792,7 +812,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             return .terminalSnapshot(TerminalSnapshot(
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-                text: snapshot.text
+                text: snapshot.text,
+                formattedBase64: (snapshot.formatted ?? "")
             ))
         }
         if let output = data.output {
@@ -1047,6 +1068,24 @@ private struct RelayCreateTabPayload: Encodable {
     let type = "create_tab"
     var requestId: String
     var title: String
+    /// Optional working directory the new tab should start in.
+    var cwd: String?
+    /// Optional agent to auto-launch in the new tab: "shell" | "claude" | "codex".
+    var launch: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, requestId, title, cwd, launch
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(title, forKey: .title)
+        // Omit cwd/launch when unset so the plain-shell wire payload is unchanged.
+        try container.encodeIfPresent(cwd, forKey: .cwd)
+        try container.encodeIfPresent(launch, forKey: .launch)
+    }
 }
 
 private struct RelayRenameTabPayload: Encodable {
@@ -1175,21 +1214,23 @@ private struct RelayDaemonDataResponse: Decodable {
     var rows: Int?
     var cols: Int?
     var text: String?
+    var formatted: String?
     var bytesBase64: String?
     var agentStatus: RelayAgentStatusResponse?
     var accepted: Bool?
     var error: String?
+    var hostname: String?
 
     func toRemoteSessionState() throws -> RemoteSessionState {
         let tabs = try (tabs ?? []).map { try $0.toTerminalTab() }
-        return RemoteSessionState(tabs: tabs)
+        return RemoteSessionState(tabs: tabs, hostname: hostname)
     }
 
     var snapshot: RelayTerminalSnapshotResponse? {
         guard let tabId, let rows, let cols, let text else {
             return nil
         }
-        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text)
+        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text, formatted: formatted)
     }
 
     var output: RelayTerminalOutputResponse? {
@@ -1217,6 +1258,7 @@ private struct RelayTerminalSnapshotResponse: Decodable {
     var rows: Int
     var cols: Int
     var text: String
+    var formatted: String?
 }
 
 private struct RelayTerminalOutputResponse: Decodable {

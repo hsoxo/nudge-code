@@ -62,4 +62,8 @@ fi
 
 echo "waiting for phone claim; paste or scan the app_pairing_url printed below"
 export NUDGE_RELAY_URL="$RELAY_URL"
+# Local/dev daemon runs as paid so the multi-tab new-tab flow is usable
+# (the relay still issues FREE; the daemon override keeps it paid). Override
+# by exporting NUDGE_DAEMON_PLAN before invoking this script.
+export NUDGE_DAEMON_PLAN="${NUDGE_DAEMON_PLAN:-pro}"
 exec "$NUDGE_BIN" bind phone --wait "$@"

@@ -1031,6 +1031,34 @@ struct BindingClaimTests {
         #expect(model.workspaceNoticeText == nil)
     }
 
+    @Test func appModelKeepsActionFallbackNoticeWhenTabErrorIsNotFreeLimit() async throws {
+        let machine = activeMachine()
+        let tab = TerminalTab(
+            id: "default",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        // A non-limit daemon rejection that still contains the word "tab" must not be
+        // mislabeled as the free-plan limit notice (regression: rename/close/restart).
+        let client = RecordingRelayClient(error: RelayClientError.daemonRejected("tab default was not found"))
+        let model = AppModel(
+            machines: [machine],
+            tabsByMachine: [machine.id: [tab]],
+            selectedMachineID: machine.id,
+            selectedTabID: tab.id,
+            relayClient: client
+        )
+
+        await model.renameSelectedTab(to: "Claude")
+
+        #expect(model.workspaceNoticeText == "Unable to rename tab")
+        #expect(model.workspaceNoticeText != "Free version is limited to one tab on this computer.")
+    }
+
     @Test func appModelUpdatesWidthThroughOneShotRelayWhenSessionIsClosed() async throws {
         let machine = activeMachine()
         let tab = TerminalTab(
@@ -1185,6 +1213,8 @@ private struct WidthModeRequest: Equatable {
 private struct CreateTabClientRequest: Equatable {
     var machine: Machine
     var title: String
+    var cwd: String? = nil
+    var launch: String? = nil
 }
 
 private struct RenameTabClientRequest: Equatable {
@@ -1378,11 +1408,11 @@ private final class RecordingRelayClient: RelayClient, @unchecked Sendable {
         return phoneProfileState
     }
 
-    func createTab(machine: Machine, title: String) async throws -> RemoteSessionState {
+    func createTab(machine: Machine, title: String, cwd: String?, launch: String?) async throws -> RemoteSessionState {
         if let error {
             throw error
         }
-        createTabRequests.append(CreateTabClientRequest(machine: machine, title: title))
+        createTabRequests.append(CreateTabClientRequest(machine: machine, title: title, cwd: cwd, launch: launch))
         return nextTabActionState()
     }
 
@@ -1502,8 +1532,10 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
         phoneProfiles.append(profile)
     }
 
-    func createTab(title: String) async throws {
+    func createTab(title: String, cwd: String?, launch: String?) async throws {
         _ = title
+        _ = cwd
+        _ = launch
     }
 
     func renameTab(tabID: String, title: String) async throws {

@@ -797,6 +797,53 @@ async fn claim_binding(relay_url: &str, code: &str, phone_public_key: &str) -> R
     Ok(())
 }
 
+/// Parse an RFC3339 UTC timestamp like `2026-05-29T23:38:55.198Z` (the format the relay
+/// emits via `Date.toISOString()`) into Unix seconds. Returns `None` when the value cannot
+/// be parsed, so callers fall back to the CLI timeout alone rather than failing.
+fn parse_rfc3339_utc_to_unix_seconds(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.as_bytes().get(10)? != &b'T' {
+        return None;
+    }
+    let date = value.get(0..10)?;
+    let time = value.get(11..19)?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// How long until the relay pairing code at `expires_at` expires, clamped at zero.
+/// Returns `None` when the timestamp can't be parsed or the system clock is unavailable.
+fn pairing_code_remaining(expires_at: &str) -> Option<Duration> {
+    let expiry = parse_rfc3339_utc_to_unix_seconds(expires_at)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    Some(Duration::from_secs((expiry - now).max(0) as u64))
+}
+
 async fn wait_for_claim_and_confirm(
     client: &reqwest::Client,
     pending: BindingState,
@@ -804,7 +851,15 @@ async fn wait_for_claim_and_confirm(
     timeout_seconds: u64,
 ) -> Result<()> {
     println!("waiting for phone claim...");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let timeout_deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    // The relay pairing code expires independently of the CLI timeout, so stop waiting once
+    // the code can no longer be claimed instead of polling a forever-"pending" binding.
+    let expiry_deadline = pairing_code_remaining(&pending.expires_at)
+        .map(|remaining| tokio::time::Instant::now() + remaining);
+    let deadline = match expiry_deadline {
+        Some(expiry) => expiry.min(timeout_deadline),
+        None => timeout_deadline,
+    };
     loop {
         let binding_response = get_json::<BindingResponse>(
             client,
@@ -815,7 +870,7 @@ async fn wait_for_claim_and_confirm(
             ),
         )
         .await?;
-        match binding_response.binding.status.as_str() {
+        match binding_response.binding.status.clone().as_str() {
             "claimed" => {
                 let phone_id = binding_response
                     .binding
@@ -831,13 +886,23 @@ async fn wait_for_claim_and_confirm(
                 return Ok(());
             }
             "active" => {
-                confirm_binding_with_pending(client, pending).await?;
+                // The relay already activated this binding (e.g. a prior poll confirmed it,
+                // or a reconnect raced). Re-POSTing /api/bind/confirm would fail with 404
+                // `claimed_binding_not_found`, so persist directly from the status response.
+                let relay_url = pending.relay_url.clone();
+                persist_confirmed_binding(pending, &relay_url, binding_response).await?;
                 return Ok(());
             }
             "revoked" => anyhow::bail!("binding was revoked before confirmation"),
             _ => {}
         }
         if tokio::time::Instant::now() >= deadline {
+            if expiry_deadline.is_some_and(|expiry| tokio::time::Instant::now() >= expiry) {
+                anyhow::bail!(
+                    "pairing code expired at {} before the phone claimed it; run `nudge bind phone` again to generate a new code",
+                    pending.expires_at
+                );
+            }
             anyhow::bail!("timed out waiting for phone claim");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -888,6 +953,16 @@ async fn confirm_binding_with_client(
         },
     )
     .await?;
+    persist_confirmed_binding(pending, relay_url, binding_response).await
+}
+
+/// Persist an active binding locally from a relay binding response. Used both after an
+/// explicit `/api/bind/confirm` and when a status poll reports the binding already active.
+async fn persist_confirmed_binding(
+    pending: BindingState,
+    relay_url: &str,
+    binding_response: BindingResponse,
+) -> Result<()> {
     let entitlement = binding_response.entitlement;
     let phone_id = binding_response
         .binding
@@ -2421,6 +2496,40 @@ mod tests {
 
         assert!(line.contains("r rename"));
         assert!(line.contains("R restart"));
+    }
+
+    #[test]
+    fn parses_relay_rfc3339_timestamps_to_unix_seconds() {
+        assert_eq!(parse_rfc3339_utc_to_unix_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_utc_to_unix_seconds("2000-01-01T00:00:00.000Z"),
+            Some(946_684_800)
+        );
+        assert_eq!(
+            parse_rfc3339_utc_to_unix_seconds("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200)
+        );
+        assert_eq!(
+            parse_rfc3339_utc_to_unix_seconds("2026-05-29T23:38:55.198Z"),
+            Some(1_780_097_935)
+        );
+    }
+
+    #[test]
+    fn rejects_unparseable_pairing_timestamps() {
+        assert_eq!(parse_rfc3339_utc_to_unix_seconds(""), None);
+        assert_eq!(parse_rfc3339_utc_to_unix_seconds("not-a-date"), None);
+        assert_eq!(parse_rfc3339_utc_to_unix_seconds("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_utc_to_unix_seconds("2026-05-29 23:38:55Z"), None);
+    }
+
+    #[test]
+    fn pairing_code_remaining_is_zero_for_past_timestamps() {
+        assert_eq!(
+            pairing_code_remaining("1970-01-01T00:00:00Z"),
+            Some(Duration::from_secs(0))
+        );
+        assert_eq!(pairing_code_remaining("bogus"), None);
     }
 
     #[test]

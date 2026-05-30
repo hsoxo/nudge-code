@@ -24,8 +24,23 @@ final class AppModel {
     var bindingDraft: BindingDraft?
     var bindingClaimState: BindingClaimState = .idle
     var phoneProfile: TerminalProfile
+    var terminalFontSize: Int
+    var keyboardLayout: KeyboardLayout
+    var keyboardSoundEnabled: Bool
     var workspaceNoticeText: String?
     var commandComposer = ""
+
+    /// Folders the user recently launched a tab in, most-recent first. Surfaced
+    /// as quick-fill chips in the New Tab sheet. Capped at `maxRecentFolders`.
+    private(set) var recentFolders: [String]
+    /// Wire value (`shell`/`claude`/`codex`) of the agent the user last launched,
+    /// used to preselect the New Tab sheet. `nil` until the first launch.
+    private(set) var lastLaunchAgent: String?
+
+    static let minFontSize = TerminalFontSize.min
+    static let maxFontSize = TerminalFontSize.max
+    static let defaultFontSize = TerminalFontSize.default
+    static let maxRecentFolders = 5
     private(set) var relaySyncGeneration = 0
     private let relayClient: any RelayClient
     private let persistence: (any AppModelPersistence)?
@@ -42,6 +57,11 @@ final class AppModel {
         selectedTabID: String? = nil,
         bindingDraft: BindingDraft? = nil,
         phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48),
+        terminalFontSize: Int = TerminalFontSize.default,
+        keyboardLayout: KeyboardLayout = .default,
+        keyboardSoundEnabled: Bool = false,
+        recentFolders: [String] = [],
+        lastLaunchAgent: String? = nil,
         relayClient: any RelayClient = HTTPRelayClient(),
         persistence: (any AppModelPersistence)? = nil,
         sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
@@ -55,6 +75,11 @@ final class AppModel {
         self.selectedTabID = initialTabID
         self.bindingDraft = bindingDraft
         self.phoneProfile = phoneProfile
+        self.terminalFontSize = TerminalFontSize.clamp(terminalFontSize)
+        self.keyboardLayout = keyboardLayout
+        self.keyboardSoundEnabled = keyboardSoundEnabled
+        self.recentFolders = Self.sanitizedRecentFolders(recentFolders)
+        self.lastLaunchAgent = lastLaunchAgent
         self.relayClient = relayClient
         self.persistence = persistence
         self.sessionReconnectDelayNanoseconds = sessionReconnectDelayNanoseconds
@@ -86,10 +111,38 @@ final class AppModel {
             tabsByMachine: [:],
             selectedMachineID: selectedMachineID,
             phoneProfile: storedState?.phoneProfile ?? TerminalProfile(rows: 32, cols: 48),
+            terminalFontSize: storedState?.terminalFontSize ?? TerminalFontSize.default,
+            keyboardLayout: storedState?.keyboardLayout ?? .default,
+            keyboardSoundEnabled: storedState?.keyboardSoundEnabled ?? false,
+            recentFolders: storedState?.recentFolders ?? [],
+            lastLaunchAgent: storedState?.lastLaunchAgent,
             relayClient: relayClient,
             persistence: persistence,
             sessionReconnectDelayNanoseconds: sessionReconnectDelayNanoseconds
         )
+    }
+
+    static func clampFontSize(_ value: Int) -> Int {
+        TerminalFontSize.clamp(value)
+    }
+
+    /// Trim, drop blanks, de-duplicate (keeping first occurrence), and cap the
+    /// recent-folders list. Shared by the initializer and the record path so a
+    /// restored list is always normalized.
+    static func sanitizedRecentFolders(_ folders: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for folder in folders {
+            let trimmed = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else {
+                continue
+            }
+            result.append(trimmed)
+            if result.count == maxRecentFolders {
+                break
+            }
+        }
+        return result
     }
 
     var selectedMachine: Machine? {
@@ -190,6 +243,35 @@ final class AppModel {
                 machines[machineIndex].lastSeenText = "Unable to update width"
             }
         }
+    }
+
+    func updateFontSize(_ size: Int) {
+        let clamped = Self.clampFontSize(size)
+        guard clamped != terminalFontSize else {
+            return
+        }
+        terminalFontSize = clamped
+        persistStableState()
+    }
+
+    func updateKeyboardLayout(_ layout: KeyboardLayout) {
+        guard layout != keyboardLayout else {
+            return
+        }
+        keyboardLayout = layout
+        persistStableState()
+    }
+
+    func restoreDefaultKeyboardLayout() {
+        updateKeyboardLayout(.default)
+    }
+
+    func setKeyboardSoundEnabled(_ enabled: Bool) {
+        guard enabled != keyboardSoundEnabled else {
+            return
+        }
+        keyboardSoundEnabled = enabled
+        persistStableState()
     }
 
     func refreshSelectedMachineBinding() async {
@@ -363,8 +445,15 @@ final class AppModel {
                 await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
             }
         } catch {
-            if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
-                machines[machineIndex].lastSeenText = "Unable to send input"
+            // The long-lived session may be stale (e.g. mid-reconnect after a
+            // drop); fall back to a one-shot send so input still reaches the tab.
+            do {
+                try await relayClient.sendTerminalInput(machine: machine, tabID: tab.id, text: text, enter: enter)
+                await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
+            } catch {
+                if let machineIndex = machines.firstIndex(where: { $0.id == machine.id }) {
+                    machines[machineIndex].lastSeenText = "Unable to send input"
+                }
             }
         }
     }
@@ -386,12 +475,46 @@ final class AppModel {
         await refreshTabSnapshot(machineID: machine.id, tabID: tab.id)
     }
 
-    func createRemoteTab(title: String = "shell") async {
+    func createRemoteTab(title: String = "shell", cwd: String? = nil, launch: String? = nil) async {
         guard let machine = selectedMachine else {
             return
         }
         await applyTabAction(machineID: machine.id, fallbackErrorText: "Unable to create tab", fallbackNoticeText: "Free version is limited to one tab on this computer.") {
-            try await relayClient.createTab(machine: machine, title: title)
+            try await relayClient.createTab(machine: machine, title: title, cwd: cwd, launch: launch)
+        }
+        // Switch to the newly created tab (it is appended last).
+        if let newTab = selectedTabs.last {
+            selectTab(newTab)
+        }
+        // The live relay session only streams output for the tabs that were
+        // present when it attached, so a freshly created tab would otherwise
+        // stay blank until the next natural re-sync. Bump the sync generation to
+        // re-run the session task: it re-attaches and re-subscribes every current
+        // tab (including the new one) so the tab renders its live output.
+        relaySyncGeneration &+= 1
+    }
+
+    /// Persist the user's New Tab choices so the sheet can preselect the
+    /// last-used agent and offer recent folders next time. `agent` is the wire
+    /// launch value (`shell`/`claude`/`codex`); `folder` is the chosen path or
+    /// `nil`/blank when launching in the home directory (not recorded).
+    func recordLaunch(agent: String, folder: String?) {
+        var changed = false
+        if agent != lastLaunchAgent {
+            lastLaunchAgent = agent
+            changed = true
+        }
+        if let folder,
+           case let trimmed = folder.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            let updated = Self.sanitizedRecentFolders([trimmed] + recentFolders)
+            if updated != recentFolders {
+                recentFolders = updated
+                changed = true
+            }
+        }
+        if changed {
+            persistStableState()
         }
     }
 
@@ -593,7 +716,11 @@ final class AppModel {
                 machines[index].lastSeenText = "relay session synced"
             }
             for tab in state.tabs {
-                try await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
+                // Best-effort per tab: a tab that cannot currently stream (e.g. a
+                // restored tab awaiting restart after a computer-side daemon
+                // bounce) must not throw and tear down the whole session, which
+                // would otherwise wedge the phone in a relay reconnect loop.
+                try? await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
             }
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)
@@ -628,7 +755,7 @@ final class AppModel {
         guard case RelayClientError.daemonRejected(let message) = error else {
             return fallback
         }
-        if message.contains("free entitlement") || message.contains("max_tabs") || message.contains("tab") {
+        if message.contains("free entitlement") || message.contains("max_tabs") {
             return "Free version is limited to one tab on this computer."
         }
         return fallback
@@ -645,6 +772,14 @@ final class AppModel {
         }
         for tab in state.tabs where tab.widthMode == .computer {
             computerProfilesByTabKey[tabProfileKey(machineID: machineID, tabID: tab.id)] = tab.profile
+        }
+        // Adopt the computer's hostname as the machine name once the daemon reports it.
+        if let hostname = state.hostname,
+           !hostname.isEmpty,
+           let index = machines.firstIndex(where: { $0.id == machineID }),
+           machines[index].name != hostname {
+            machines[index].name = hostname
+            persistStableState()
         }
     }
 
@@ -671,8 +806,15 @@ final class AppModel {
     private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
         updateTab(machineID: machineID, tabID: snapshot.tabID) { tab in
             tab.profile = snapshot.profile
-            tab.previewText = snapshot.text
-            tab.replayOutputBase64 = ""
+            if snapshot.formattedBase64.isEmpty {
+                tab.previewText = snapshot.text
+                tab.replayOutputBase64 = ""
+            } else {
+                // Render the alt-screen-aware ANSI dump so full-screen TUIs
+                // (Claude, Codex) reconstruct correctly instead of plain text.
+                tab.previewText = ""
+                tab.replayOutputBase64 = snapshot.formattedBase64
+            }
             tab.replayOutputSequence += 1
             tab.pendingOutputBase64 = ""
         }
@@ -760,7 +902,12 @@ final class AppModel {
         persistence.save(AppModelStoredState(
             machines: machines.map(Self.restoredMachine),
             selectedMachineID: selectedMachineID,
-            phoneProfile: phoneProfile
+            phoneProfile: phoneProfile,
+            terminalFontSize: terminalFontSize,
+            keyboardLayout: keyboardLayout,
+            keyboardSoundEnabled: keyboardSoundEnabled,
+            recentFolders: recentFolders,
+            lastLaunchAgent: lastLaunchAgent
         ))
     }
 
@@ -838,17 +985,50 @@ struct AppModelStoredState: Codable, Equatable {
     var machines: [Machine]
     var selectedMachineID: String?
     var phoneProfile: TerminalProfile
+    var terminalFontSize: Int
+    var keyboardLayout: KeyboardLayout
+    var keyboardSoundEnabled: Bool
+    var recentFolders: [String]
+    var lastLaunchAgent: String?
 
     init(
-        version: Int = 1,
+        version: Int = 2,
         machines: [Machine],
         selectedMachineID: String?,
-        phoneProfile: TerminalProfile
+        phoneProfile: TerminalProfile,
+        terminalFontSize: Int = TerminalFontSize.default,
+        keyboardLayout: KeyboardLayout = .default,
+        keyboardSoundEnabled: Bool = false,
+        recentFolders: [String] = [],
+        lastLaunchAgent: String? = nil
     ) {
         self.version = version
         self.machines = machines
         self.selectedMachineID = selectedMachineID
         self.phoneProfile = phoneProfile
+        self.terminalFontSize = terminalFontSize
+        self.keyboardLayout = keyboardLayout
+        self.keyboardSoundEnabled = keyboardSoundEnabled
+        self.recentFolders = recentFolders
+        self.lastLaunchAgent = lastLaunchAgent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        machines = try container.decodeIfPresent([Machine].self, forKey: .machines) ?? []
+        selectedMachineID = try container.decodeIfPresent(String.self, forKey: .selectedMachineID)
+        phoneProfile = try container.decodeIfPresent(TerminalProfile.self, forKey: .phoneProfile)
+            ?? TerminalProfile(rows: 32, cols: 48)
+        terminalFontSize = try container.decodeIfPresent(Int.self, forKey: .terminalFontSize)
+            ?? TerminalFontSize.default
+        keyboardLayout = try container.decodeIfPresent(KeyboardLayout.self, forKey: .keyboardLayout)
+            ?? .default
+        keyboardSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .keyboardSoundEnabled)
+            ?? false
+        recentFolders = try container.decodeIfPresent([String].self, forKey: .recentFolders)
+            ?? []
+        lastLaunchAgent = try container.decodeIfPresent(String.self, forKey: .lastLaunchAgent)
     }
 }
 
