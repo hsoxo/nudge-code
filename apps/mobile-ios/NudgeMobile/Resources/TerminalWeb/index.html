@@ -118,6 +118,10 @@
       return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
     }
 
+    function cellHeight() {
+      return term._core?._renderService?.dimensions?.css?.cell?.height || 17;
+    }
+
     // Force a paint+measure pass. The double requestAnimationFrame is the key
     // WKWebView fix: it lets layout settle before xterm measures the cell size
     // and fits, which is what keeps the terminal from rendering all black.
@@ -282,6 +286,39 @@
 
     term.onData(postTerminalInput);
     new ResizeObserver(schedulePhoneProfileReport).observe(container);
+
+    // Finger-drag scrolling: xterm inside WKWebView does not scroll the
+    // scrollback on a touch drag (only the scrollbar reacts), so translate a
+    // vertical drag into terminal scroll.
+    let touchLastY = null;
+    let touchScrollAccum = 0;
+    container.addEventListener('touchstart', (event) => {
+      if (event.touches.length === 1) {
+        touchLastY = event.touches[0].clientY;
+        touchScrollAccum = 0;
+      } else {
+        touchLastY = null;
+      }
+    }, { passive: true });
+    container.addEventListener('touchmove', (event) => {
+      if (touchLastY === null || event.touches.length !== 1) {
+        return;
+      }
+      const currentY = event.touches[0].clientY;
+      touchScrollAccum += touchLastY - currentY;
+      touchLastY = currentY;
+      const height = cellHeight();
+      if (height > 0) {
+        const lines = Math.trunc(touchScrollAccum / height);
+        if (lines !== 0) {
+          touchScrollAccum -= lines * height;
+          term.scrollLines(lines);
+        }
+      }
+    }, { passive: true });
+    container.addEventListener('touchend', () => {
+      touchLastY = null;
+    }, { passive: true });
 
     // Initial paint once the WKWebView has laid out.
     refit();
