@@ -24,8 +24,15 @@ final class AppModel {
     var bindingDraft: BindingDraft?
     var bindingClaimState: BindingClaimState = .idle
     var phoneProfile: TerminalProfile
+    var terminalFontSize: Int
+    var keyboardLayout: KeyboardLayout
+    var keyboardSoundEnabled: Bool
     var workspaceNoticeText: String?
     var commandComposer = ""
+
+    static let minFontSize = TerminalFontSize.min
+    static let maxFontSize = TerminalFontSize.max
+    static let defaultFontSize = TerminalFontSize.default
     private(set) var relaySyncGeneration = 0
     private let relayClient: any RelayClient
     private let persistence: (any AppModelPersistence)?
@@ -42,6 +49,9 @@ final class AppModel {
         selectedTabID: String? = nil,
         bindingDraft: BindingDraft? = nil,
         phoneProfile: TerminalProfile = TerminalProfile(rows: 32, cols: 48),
+        terminalFontSize: Int = TerminalFontSize.default,
+        keyboardLayout: KeyboardLayout = .default,
+        keyboardSoundEnabled: Bool = false,
         relayClient: any RelayClient = HTTPRelayClient(),
         persistence: (any AppModelPersistence)? = nil,
         sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
@@ -55,6 +65,9 @@ final class AppModel {
         self.selectedTabID = initialTabID
         self.bindingDraft = bindingDraft
         self.phoneProfile = phoneProfile
+        self.terminalFontSize = TerminalFontSize.clamp(terminalFontSize)
+        self.keyboardLayout = keyboardLayout
+        self.keyboardSoundEnabled = keyboardSoundEnabled
         self.relayClient = relayClient
         self.persistence = persistence
         self.sessionReconnectDelayNanoseconds = sessionReconnectDelayNanoseconds
@@ -86,10 +99,17 @@ final class AppModel {
             tabsByMachine: [:],
             selectedMachineID: selectedMachineID,
             phoneProfile: storedState?.phoneProfile ?? TerminalProfile(rows: 32, cols: 48),
+            terminalFontSize: storedState?.terminalFontSize ?? TerminalFontSize.default,
+            keyboardLayout: storedState?.keyboardLayout ?? .default,
+            keyboardSoundEnabled: storedState?.keyboardSoundEnabled ?? false,
             relayClient: relayClient,
             persistence: persistence,
             sessionReconnectDelayNanoseconds: sessionReconnectDelayNanoseconds
         )
+    }
+
+    static func clampFontSize(_ value: Int) -> Int {
+        TerminalFontSize.clamp(value)
     }
 
     var selectedMachine: Machine? {
@@ -190,6 +210,35 @@ final class AppModel {
                 machines[machineIndex].lastSeenText = "Unable to update width"
             }
         }
+    }
+
+    func updateFontSize(_ size: Int) {
+        let clamped = Self.clampFontSize(size)
+        guard clamped != terminalFontSize else {
+            return
+        }
+        terminalFontSize = clamped
+        persistStableState()
+    }
+
+    func updateKeyboardLayout(_ layout: KeyboardLayout) {
+        guard layout != keyboardLayout else {
+            return
+        }
+        keyboardLayout = layout
+        persistStableState()
+    }
+
+    func restoreDefaultKeyboardLayout() {
+        updateKeyboardLayout(.default)
+    }
+
+    func setKeyboardSoundEnabled(_ enabled: Bool) {
+        guard enabled != keyboardSoundEnabled else {
+            return
+        }
+        keyboardSoundEnabled = enabled
+        persistStableState()
     }
 
     func refreshSelectedMachineBinding() async {
@@ -767,7 +816,10 @@ final class AppModel {
         persistence.save(AppModelStoredState(
             machines: machines.map(Self.restoredMachine),
             selectedMachineID: selectedMachineID,
-            phoneProfile: phoneProfile
+            phoneProfile: phoneProfile,
+            terminalFontSize: terminalFontSize,
+            keyboardLayout: keyboardLayout,
+            keyboardSoundEnabled: keyboardSoundEnabled
         ))
     }
 
@@ -845,17 +897,41 @@ struct AppModelStoredState: Codable, Equatable {
     var machines: [Machine]
     var selectedMachineID: String?
     var phoneProfile: TerminalProfile
+    var terminalFontSize: Int
+    var keyboardLayout: KeyboardLayout
+    var keyboardSoundEnabled: Bool
 
     init(
         version: Int = 1,
         machines: [Machine],
         selectedMachineID: String?,
-        phoneProfile: TerminalProfile
+        phoneProfile: TerminalProfile,
+        terminalFontSize: Int = TerminalFontSize.default,
+        keyboardLayout: KeyboardLayout = .default,
+        keyboardSoundEnabled: Bool = false
     ) {
         self.version = version
         self.machines = machines
         self.selectedMachineID = selectedMachineID
         self.phoneProfile = phoneProfile
+        self.terminalFontSize = terminalFontSize
+        self.keyboardLayout = keyboardLayout
+        self.keyboardSoundEnabled = keyboardSoundEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        machines = try container.decodeIfPresent([Machine].self, forKey: .machines) ?? []
+        selectedMachineID = try container.decodeIfPresent(String.self, forKey: .selectedMachineID)
+        phoneProfile = try container.decodeIfPresent(TerminalProfile.self, forKey: .phoneProfile)
+            ?? TerminalProfile(rows: 32, cols: 48)
+        terminalFontSize = try container.decodeIfPresent(Int.self, forKey: .terminalFontSize)
+            ?? TerminalFontSize.default
+        keyboardLayout = try container.decodeIfPresent(KeyboardLayout.self, forKey: .keyboardLayout)
+            ?? .default
+        keyboardSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .keyboardSoundEnabled)
+            ?? false
     }
 }
 

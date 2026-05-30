@@ -51,6 +51,7 @@ struct MachineListView: View {
                 ForEach(model.machines) { machine in
                     MachineRow(machine: machine)
                         .tag(machine.id)
+                        .listRowBackground(Color.surface)
                         .onTapGesture {
                             model.selectMachine(machine)
                         }
@@ -68,6 +69,8 @@ struct MachineListView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.appBg)
         .navigationTitle("Nudge")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -75,6 +78,7 @@ struct MachineListView: View {
                     model.selectedMachineID = nil
                 } label: {
                     Image(systemName: "qrcode.viewfinder")
+                        .foregroundStyle(Color.accent)
                 }
                 .accessibilityLabel("Bind computer")
             }
@@ -89,13 +93,18 @@ struct MachineRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(machine.name)
                 .font(.headline)
+                .foregroundStyle(Color.textPrimary)
             HStack(spacing: 6) {
+                // Emerald dot for online, muted amber otherwise
                 Circle()
-                    .fill(machine.connectionState == .online ? Color.green : Color.orange)
+                    .fill(machine.connectionState == .online ? Color.accent : Color(hex: "#e3b341"))
                     .frame(width: 8, height: 8)
+                    .shadow(color: machine.connectionState == .online
+                            ? Color.accent.opacity(0.5) : Color.clear,
+                            radius: 4, x: 0, y: 0)
                 Text(machine.lastSeenText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Color.textMuted)
             }
         }
         .padding(.vertical, 4)

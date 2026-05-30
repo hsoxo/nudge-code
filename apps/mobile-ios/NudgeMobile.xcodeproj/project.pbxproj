@@ -7,11 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0CDC9B264B69FD50023D155C /* KeyboardLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A64C81DFA8F0101C1F6F42E7 /* KeyboardLayoutTests.swift */; };
 		0F7C0B5D76DD96DFAEB8D7C7 /* BindingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CABE48C4A03FA5502C2F6BA /* BindingView.swift */; };
+		1CC0D59ADB5B5A7C68E92D5A /* KeyboardEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45C983C7A4BCCCD170037BF6 /* KeyboardEditorView.swift */; };
 		3298BA15E16197662BBB6001 /* RelayClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89B5F92116FB1677274807C0 /* RelayClientTests.swift */; };
 		389311B858DD67E639324700 /* TerminalWebAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 955D4FC9179E299BD56F3B12 /* TerminalWebAssets.swift */; };
 		426D7DA0EE272E7339055A1E /* GeneratedProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */; };
-		431C277655C016FB209A197B /* ShortcutKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7527BD8E3C859A4111FD7906 /* ShortcutKeyboardView.swift */; };
+		449C91355A781E026BAF984F /* TerminalKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DA4BC5C21B403293850D317 /* TerminalKeyboardView.swift */; };
 		44EB40EA00CCA34658AB7B42 /* E2EEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BA8D37DC1C1FC9573920E2C /* E2EEnvelope.swift */; };
 		47EF55C59B330A80EA627F65 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07C32F7596AC4204FE7DB41B /* AppModel.swift */; };
 		4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8105D658D50E1B394E3AB00A /* RootView.swift */; };
@@ -20,13 +22,14 @@
 		5DBB4D10326790A9A5FF0855 /* nudge.pb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5021D590E9A47BEB56AD3F59 /* nudge.pb.swift */; };
 		612BE89E5B908A40931AA2B8 /* PhoneIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC367395E42690D0611FD4F /* PhoneIdentity.swift */; };
 		6758744DDCF7029C9BAFC794 /* TerminalWebAssetsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB01709288152649A72DFD88 /* TerminalWebAssetsTests.swift */; };
-		67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */; };
 		6FD47E14D5279F536578AE24 /* TerminalWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */; };
 		820FDE26D6F3F8D74FF189EE /* BindingClaimTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */; };
 		8C35BD888DAD31F6C0366AC3 /* TerminalWeb in Resources */ = {isa = PBXBuildFile; fileRef = 797737148932E9AA78D25D28 /* TerminalWeb */; };
+		8D2F7752386B10368E39FDF3 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F2796E3389136D2C7E5D1AA /* Theme.swift */; };
 		9E24FCC57E5E2A9AA8445119 /* PhoneIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */; };
-		A61EC7D01A6A54CD5C25BD4D /* KeyboardProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 477437F016264FB106BE4DD6 /* KeyboardProfile.swift */; };
+		BE81CFE143A05AFB1DB4BA6B /* KeyboardLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 358DB0D0191E14A124C10E6B /* KeyboardLayout.swift */; };
 		C4B0DFA4033C2778AA93F38E /* NudgeMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */; };
+		CF2D270FE4634E7763E0BE4B /* AppModelKeyboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC6A8CEDAE88D494044A53F /* AppModelKeyboardTests.swift */; };
 		D4A97771F116110C00BD24ED /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 790C864167909B16544404A0 /* SwiftProtobuf */; };
 		D6067C999B0ABAA0140521C7 /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */; };
 		DE490C12270A810549FF7DD5 /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6981535CC9741519F80F820 /* QRCodeScannerView.swift */; };
@@ -48,22 +51,25 @@
 		07C32F7596AC4204FE7DB41B /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NudgeMobileApp.swift; sourceTree = "<group>"; };
 		1CABE48C4A03FA5502C2F6BA /* BindingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingView.swift; sourceTree = "<group>"; };
+		1DA4BC5C21B403293850D317 /* TerminalKeyboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyboardView.swift; sourceTree = "<group>"; };
 		28E67E144FAD016DC3DC7F64 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingClaimTests.swift; sourceTree = "<group>"; };
-		477437F016264FB106BE4DD6 /* KeyboardProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardProfile.swift; sourceTree = "<group>"; };
+		358DB0D0191E14A124C10E6B /* KeyboardLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLayout.swift; sourceTree = "<group>"; };
+		45C983C7A4BCCCD170037BF6 /* KeyboardEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardEditorView.swift; sourceTree = "<group>"; };
 		4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedProtocolTests.swift; sourceTree = "<group>"; };
+		4F2796E3389136D2C7E5D1AA /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		5021D590E9A47BEB56AD3F59 /* nudge.pb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = nudge.pb.swift; sourceTree = "<group>"; };
 		5176396EFFD6E84B7038953C /* BindingDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingDraftTests.swift; sourceTree = "<group>"; };
 		6BA8D37DC1C1FC9573920E2C /* E2EEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2EEnvelope.swift; sourceTree = "<group>"; };
 		70813C9517C8F1A1F13E1C14 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardProfileTests.swift; sourceTree = "<group>"; };
 		72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneIdentityTests.swift; sourceTree = "<group>"; };
-		7527BD8E3C859A4111FD7906 /* ShortcutKeyboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutKeyboardView.swift; sourceTree = "<group>"; };
 		76FC0F6746DA7E92153CCFE2 /* NudgeMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NudgeMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		797737148932E9AA78D25D28 /* TerminalWeb */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TerminalWeb; path = NudgeMobile/Resources/TerminalWeb; sourceTree = SOURCE_ROOT; };
+		7DC6A8CEDAE88D494044A53F /* AppModelKeyboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelKeyboardTests.swift; sourceTree = "<group>"; };
 		8105D658D50E1B394E3AB00A /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		89B5F92116FB1677274807C0 /* RelayClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClientTests.swift; sourceTree = "<group>"; };
 		955D4FC9179E299BD56F3B12 /* TerminalWebAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWebAssets.swift; sourceTree = "<group>"; };
+		A64C81DFA8F0101C1F6F42E7 /* KeyboardLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLayoutTests.swift; sourceTree = "<group>"; };
 		A6981535CC9741519F80F820 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
 		AB01709288152649A72DFD88 /* TerminalWebAssetsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWebAssetsTests.swift; sourceTree = "<group>"; };
 		B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerTests.swift; sourceTree = "<group>"; };
@@ -98,11 +104,12 @@
 		0CE73D6E33CB4D348D7D09CB /* NudgeMobileTests */ = {
 			isa = PBXGroup;
 			children = (
+				7DC6A8CEDAE88D494044A53F /* AppModelKeyboardTests.swift */,
 				2BD25D30B9728BEF5E8004B5 /* BindingClaimTests.swift */,
 				5176396EFFD6E84B7038953C /* BindingDraftTests.swift */,
 				D990E73A9E6DBBEC0F8A6389 /* E2EEnvelopeTests.swift */,
 				4A526C06035CE4471C80385A /* GeneratedProtocolTests.swift */,
-				70D2FB04B7AFA6EB7D6C7BDD /* KeyboardProfileTests.swift */,
+				A64C81DFA8F0101C1F6F42E7 /* KeyboardLayoutTests.swift */,
 				72EEB4CE1133BF3C2ED7D481 /* PhoneIdentityTests.swift */,
 				B5D1B481F65C35C8D16435E8 /* QRCodeScannerTests.swift */,
 				89B5F92116FB1677274807C0 /* RelayClientTests.swift */,
@@ -138,16 +145,18 @@
 				1CABE48C4A03FA5502C2F6BA /* BindingView.swift */,
 				6BA8D37DC1C1FC9573920E2C /* E2EEnvelope.swift */,
 				28E67E144FAD016DC3DC7F64 /* Info.plist */,
-				477437F016264FB106BE4DD6 /* KeyboardProfile.swift */,
+				45C983C7A4BCCCD170037BF6 /* KeyboardEditorView.swift */,
+				358DB0D0191E14A124C10E6B /* KeyboardLayout.swift */,
 				70813C9517C8F1A1F13E1C14 /* Models.swift */,
 				11E3E50F1EBB993FC56A7E0E /* NudgeMobileApp.swift */,
 				BFC367395E42690D0611FD4F /* PhoneIdentity.swift */,
 				A6981535CC9741519F80F820 /* QRCodeScannerView.swift */,
 				D10AF18E563CC33C4E1FFBC2 /* RelayClient.swift */,
 				8105D658D50E1B394E3AB00A /* RootView.swift */,
-				7527BD8E3C859A4111FD7906 /* ShortcutKeyboardView.swift */,
+				1DA4BC5C21B403293850D317 /* TerminalKeyboardView.swift */,
 				955D4FC9179E299BD56F3B12 /* TerminalWebAssets.swift */,
 				C61A08C3A08CD7E1EF4B084A /* TerminalWorkspaceView.swift */,
+				4F2796E3389136D2C7E5D1AA /* Theme.swift */,
 			);
 			name = NudgeMobile;
 			path = NudgeMobile/Sources/NudgeMobile;
@@ -244,11 +253,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CF2D270FE4634E7763E0BE4B /* AppModelKeyboardTests.swift in Sources */,
 				820FDE26D6F3F8D74FF189EE /* BindingClaimTests.swift in Sources */,
 				EEB17C61BFA56E527F0FB30C /* BindingDraftTests.swift in Sources */,
 				DF94358231F40AEC8B848CEE /* E2EEnvelopeTests.swift in Sources */,
 				426D7DA0EE272E7339055A1E /* GeneratedProtocolTests.swift in Sources */,
-				67928CA4D5F9038261C8D001 /* KeyboardProfileTests.swift in Sources */,
+				0CDC9B264B69FD50023D155C /* KeyboardLayoutTests.swift in Sources */,
 				9E24FCC57E5E2A9AA8445119 /* PhoneIdentityTests.swift in Sources */,
 				54FF5080CE2C76FF5C623369 /* QRCodeScannerTests.swift in Sources */,
 				3298BA15E16197662BBB6001 /* RelayClientTests.swift in Sources */,
@@ -263,16 +273,18 @@
 				47EF55C59B330A80EA627F65 /* AppModel.swift in Sources */,
 				0F7C0B5D76DD96DFAEB8D7C7 /* BindingView.swift in Sources */,
 				44EB40EA00CCA34658AB7B42 /* E2EEnvelope.swift in Sources */,
-				A61EC7D01A6A54CD5C25BD4D /* KeyboardProfile.swift in Sources */,
+				1CC0D59ADB5B5A7C68E92D5A /* KeyboardEditorView.swift in Sources */,
+				BE81CFE143A05AFB1DB4BA6B /* KeyboardLayout.swift in Sources */,
 				4EB286295CD8654DB306ED98 /* Models.swift in Sources */,
 				C4B0DFA4033C2778AA93F38E /* NudgeMobileApp.swift in Sources */,
 				612BE89E5B908A40931AA2B8 /* PhoneIdentity.swift in Sources */,
 				DE490C12270A810549FF7DD5 /* QRCodeScannerView.swift in Sources */,
 				D6067C999B0ABAA0140521C7 /* RelayClient.swift in Sources */,
 				4C480F86E8BFF673CFDE4C63 /* RootView.swift in Sources */,
-				431C277655C016FB209A197B /* ShortcutKeyboardView.swift in Sources */,
+				449C91355A781E026BAF984F /* TerminalKeyboardView.swift in Sources */,
 				389311B858DD67E639324700 /* TerminalWebAssets.swift in Sources */,
 				6FD47E14D5279F536578AE24 /* TerminalWorkspaceView.swift in Sources */,
+				8D2F7752386B10368E39FDF3 /* Theme.swift in Sources */,
 				5DBB4D10326790A9A5FF0855 /* nudge.pb.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -8,6 +8,8 @@ struct NudgeMobileApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .preferredColorScheme(.dark)
+                .tint(Color.accent)
         }
     }
 }
