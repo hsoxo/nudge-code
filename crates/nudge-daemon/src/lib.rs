@@ -660,7 +660,16 @@ impl MachineSession {
             cols,
             updated_at: now_string(),
         });
-        self.updated_at = now_string();
+        // Phone-first: once the phone reports its size, size every tab to it so
+        // tabs default to (and stay at) the phone's width instead of computer width.
+        let now = now_string();
+        for tab in self.tabs.iter_mut() {
+            tab.width_mode = WidthMode::Phone;
+            tab.rows = rows;
+            tab.cols = cols;
+            tab.last_activity_at = now.clone();
+        }
+        self.updated_at = now;
     }
 
     pub fn set_width_mode(
@@ -1960,10 +1969,16 @@ impl DaemonRuntime {
     }
 
     async fn set_phone_profile(&self, rows: u16, cols: u16) -> Result<v1::SessionState> {
-        {
+        let tab_ids: Vec<String> = {
             let mut session = self.session.lock().await;
             session.set_phone_profile(rows, cols);
             self.state_store.save(&session)?;
+            session.tabs.iter().map(|tab| tab.id.clone()).collect()
+        };
+        // Resize each tab's PTY to the phone so running programs reflow to fit.
+        let size = TerminalSize { rows, cols };
+        for tab_id in tab_ids {
+            let _ = self.resize_tab(&tab_id, size).await;
         }
         Ok(self.session_state().await)
     }
