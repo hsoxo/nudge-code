@@ -121,6 +121,47 @@ Final whitespace check also passed:
 git diff --check
 ```
 
+## Simulator Validation (2026-05-30)
+
+Branch: `fix/bind-validation-quickwins`. Fix commit `c8b2f52` (pairing-code expiry detection, already-`active` binding reconfirm, free-tab notice scope).
+
+Environment: iPhone 17 simulator, iOS 26.1, macOS host. Relay and daemon run locally on the host; the smoke uses an isolated daemon state/runtime dir and an ephemeral relay port `http://127.0.0.1:<port>` with hosted-mode hardening on (`NUDGE_RELAY_REQUIRE_E2E_PAYLOAD`, `NUDGE_RELAY_REQUIRE_WS_SIGNATURE`, `NUDGE_RELAY_REQUIRE_WS_CHALLENGE`, `NUDGE_RELAY_DISABLE_HTTP_MESSAGES`).
+
+Whole-flow result: PASS. The CLI bind reached `binding active`, and the relay audit log recorded the full hardened path:
+
+```text
+device_registered x2  (daemon + phone)
+binding_started -> binding_claimed -> binding_confirmed
+socket_challenge_issued x2 -> socket_authorized x2   (signed-WS challenge handshake)
+message_routed x11    (all ephemeral E2E payloads: session-state / output-replay / input / live-output)
+```
+
+Commands run (all green):
+
+```sh
+npm run smoke:ios-launch                                              # build+install+launch fixed app; no launch crash
+scripts/smoke-ios-relay-claim.sh                                     # live hardened relay + daemon + simulator claim->session->input->output
+xcodebuild test ... -only-testing:NudgeMobileTests/RelayClientTests  # 21 passed (incl. live integration claim/session/input/output)
+xcodebuild test ... -only-testing:NudgeMobileTests/BindingClaimTests # 31 passed
+cargo test -p nudge-daemon relay_control_tab_actions                 # 1 passed
+cargo test -p nudge-cli                                              # 12 passed (incl. 3 new pairing-expiry tests)
+```
+
+Step 3 checklist coverage on the simulator:
+
+- send shell command from composer: covered. Integration smoke sends `echo <marker>` over an E2E session and verifies live daemon output.
+- width mode switch: covered (`appModelUpdatesWidthThroughOpenRelaySession`, `setWidthModeSendsRelayControlRequest`).
+- rename / restart / close default tab: covered (`appModelCreatesRenamesRestartsAndClosesTabsThroughOneShotRelay`, daemon `relay_control_tab_actions_return_session_state`).
+- create second tab shows the free-plan notice: covered (`appModelShowsNoticeWhenFreeTabLimitRejectsCreateTab`, plus `appModelKeepsActionFallbackNoticeWhenTabErrorIsNotFreeLimit` guarding the scoped-notice fix).
+- background/foreground reconnect: covered (`appModelSuspendsRelaySessionWhenAppBackgrounds`, `appModelResumesRelaySessionWhenAppReturnsForeground`, `appModelReconnectsRelaySessionAfterDrop`).
+
+Visual check: launched the installed app on the simulator and confirmed the native `Bind Computer` screen renders (Pair Computer + Phone Profile sections, default Rows 32 / Columns 48). `xcrun simctl openurl 'nudge://pair?...'` is recognized and routed to the app (iOS shows the `Open in "Nudge"?` scheme prompt).
+
+Not exercised on the simulator (still needs the physical device or a UI-automation harness):
+
+- Literal human tap-through of the live UI (tap `Claim And Wait`, type in the composer, open the tab menu, toggle width). No `idb`/XCUITest UI target is installed, and `simctl` cannot tap arbitrary SwiftUI controls. The same code paths are covered functionally by the integration smoke and the logic suites above.
+- Local Network and Camera permission prompts. The simulator + `127.0.0.1` path does not raise the Local Network prompt, and the QR scanner was not opened. Verify both on the physical iPhone 13.
+
 ## Local-First Runbook
 
 From repo root:
@@ -217,12 +258,12 @@ Result: iOS simulator launch smoke passed.
 
 Highest priority for local-first handoff:
 
-- Need real physical iPhone test on `10.10.10.xxx` LAN or Cloudflare Tunnel.
-- Need verify tab action UX under free entitlement:
-  - rename default tab should work
-  - restart default tab should work
-  - close only tab should be disabled in UI
-  - create second tab should show the new `Tab Action Failed` notice under free plan
+- Need real physical iPhone test on `10.10.10.xxx` LAN or Cloudflare Tunnel. (Simulator whole-flow validation is now done; see `Simulator Validation (2026-05-30)`.)
+- Tab action UX under free entitlement is validated on the simulator via automated tests; still confirm the live tap-through on the physical phone:
+  - rename default tab works (validated: `appModelCreatesRenamesRestartsAndClosesTabsThroughOneShotRelay`)
+  - restart default tab works (validated: same test + daemon `relay_control_tab_actions_return_session_state`)
+  - close only tab disabled in UI (close path validated in the same AppModel test; button-disabled state is a UI affordance to eyeball on device)
+  - create second tab shows the `Tab Action Failed` notice under free plan (validated: `appModelShowsNoticeWhenFreeTabLimitRejectsCreateTab`)
 
 Broader but not needed for immediate local-first validation:
 
@@ -340,7 +381,7 @@ What is already strong:
 
 What blocks a confident handoff to physical-device testing:
 
-- Run one manual iPhone 13 bind using LAN or Cloudflare Tunnel.
+- Run one manual iPhone 13 bind using LAN or Cloudflare Tunnel. The simulator whole-flow path (bind -> active -> E2E session -> output -> input, plus tab actions, free-tab notice, and background/foreground reconnect) is validated on the fixed build as of 2026-05-30; the physical-device run is the remaining manual confirmation (including Local Network and Camera prompts).
 
 Practical estimate from this point:
 

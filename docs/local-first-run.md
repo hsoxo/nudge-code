@@ -18,6 +18,8 @@ The smoke starts an isolated local relay, starts `nudge bind phone --wait --yes`
 
 `npm run smoke:ios-launch` builds, installs, and launches the native app on an available iPhone simulator, then treats an immediate app exit as a launch crash. Run it before hand-testing if you are validating an app crash report.
 
+Last validated: 2026-05-30 on the iPhone 17 simulator (iOS 26.1), branch `fix/bind-validation-quickwins`. Both smokes passed, the bind reached `binding active`, and the relay audit log showed the full E2E round-trip (signed-WS challenge handshake plus ephemeral routed payloads). See `docs/HANDOVER.md` -> `Simulator Validation (2026-05-30)` for the command list and per-checklist coverage.
+
 ## Device Compatibility
 
 The current native app targets iOS 17.0 or newer and portrait-only iPhone. An iPhone 13 is compatible when it is running iOS 17.0 or newer. iOS 16 and older are not supported by the current first-version app because the SwiftUI/Observation stack is built for the iOS 17 target.

@@ -28,6 +28,8 @@ To verify the app binary itself launches on the local simulator before manual te
 ../../scripts/smoke-ios-launch.sh
 ```
 
+Both smokes were last validated on 2026-05-30 (iPhone 17 simulator, iOS 26.1, branch `fix/bind-validation-quickwins`): launch smoke passed, the relay-claim smoke reached `binding active` with a full E2E round-trip, and the `RelayClientTests` (21) and `BindingClaimTests` (31) suites passed. See `../../docs/HANDOVER.md` -> `Simulator Validation (2026-05-30)`.
+
 For manual local-first testing, run the relay on the development computer and bind with either a simulator-local URL, a same-network LAN URL, or a temporary Cloudflare Tunnel URL. See `../../docs/local-first-run.md`.
 
 Shared protocol types are generated from the repo protobuf schema:
