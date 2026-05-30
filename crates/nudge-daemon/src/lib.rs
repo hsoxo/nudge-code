@@ -1856,12 +1856,20 @@ impl DaemonRuntime {
 
     async fn output_tail(&self, tab_id: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let ptys = self.ptys.lock().await;
-        let pty = ptys
+        let tab = ptys
             .iter()
             .find(|tab| tab.tab_id == tab_id)
-            .and_then(|tab| tab.pty.as_ref())
-            .with_context(|| format!("tab {tab_id} does not have a pty"))?;
-        Ok(pty.output_tail(max_bytes))
+            .with_context(|| format!("tab {tab_id} was not found"))?;
+        // A tab whose process has exited (needs_restart) has no live PTY. That
+        // is a valid state, not an error: return an empty tail so the phone's
+        // per-tab output request still succeeds. Erroring here made the daemon
+        // reply ok=false, which the phone treats as fatal — wedging it in a
+        // relay-reconnect loop after a daemon restart left every tab dead.
+        Ok(tab
+            .pty
+            .as_ref()
+            .map(|pty| pty.output_tail(max_bytes))
+            .unwrap_or_default())
     }
 
     async fn terminal_snapshot(&self, tab_id: &str) -> Result<v1::TerminalSnapshot> {
@@ -4458,6 +4466,37 @@ mod tests {
             tail.contains("claude --dangerously-skip-permissions"),
             "expected trust-bypass command in pty output, got: {tail}"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn output_tail_is_empty_for_a_tab_without_a_live_pty() {
+        // A tab restored from state after a daemon restart has no live PTY
+        // (status needs_restart). The phone requests each tab's output on
+        // sessionState; output_tail must yield empty here, NOT an error —
+        // erroring made the daemon reply ok=false, which the phone treated as
+        // fatal and wedged it in a relay-reconnect loop.
+        let root = std::env::temp_dir().join(format!(
+            "nudge-output-tail-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let session = MachineSession::new_default();
+        // No ensure_ptys(): the default tab keeps pty: None, mimicking a
+        // needs_restart tab whose process has exited.
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+
+        let tail = runtime
+            .output_tail("default", 8 * 1024)
+            .await
+            .expect("a tab without a live PTY should yield an empty tail, not an error");
+        assert!(tail.is_empty());
+
+        // A tab that does not exist at all is still a genuine error.
+        assert!(runtime.output_tail("no-such-tab", 8 * 1024).await.is_err());
 
         let _ = fs::remove_dir_all(&root);
     }
