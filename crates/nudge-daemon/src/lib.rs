@@ -2928,6 +2928,9 @@ fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
         "rows": snapshot.rows,
         "cols": snapshot.cols,
         "text": snapshot.text,
+        // Alt-screen-aware ANSI dump so full-screen TUIs (Claude, Codex) can be
+        // reconstructed faithfully on the phone, not just the plain-text grid.
+        "formatted": base64_encode(&snapshot.formatted),
     })
 }
 

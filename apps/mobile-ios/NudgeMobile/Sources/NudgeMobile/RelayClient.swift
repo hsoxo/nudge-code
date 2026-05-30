@@ -159,7 +159,8 @@ struct HTTPRelayClient: RelayClient {
         return TerminalSnapshot(
             tabID: snapshot.tabId,
             profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-            text: snapshot.text
+            text: snapshot.text,
+            formattedBase64: (snapshot.formatted ?? "")
         )
     }
 
@@ -449,6 +450,9 @@ struct TerminalSnapshot: Equatable, Sendable {
     var tabID: String
     var profile: TerminalProfile
     var text: String
+    // Alt-screen-aware ANSI dump of the current screen (vt100 contents_formatted).
+    // Rendering this reconstructs full-screen TUIs (Claude, Codex); plain `text` loses positioning.
+    var formattedBase64: String = ""
 }
 
 struct TerminalOutput: Equatable, Sendable {
@@ -763,7 +767,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             return .terminalSnapshot(TerminalSnapshot(
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-                text: snapshot.text
+                text: snapshot.text,
+                formattedBase64: (snapshot.formatted ?? "")
             ))
         case .terminalOutput:
             guard let output = payload.data?.output else {
@@ -792,7 +797,8 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
             return .terminalSnapshot(TerminalSnapshot(
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
-                text: snapshot.text
+                text: snapshot.text,
+                formattedBase64: (snapshot.formatted ?? "")
             ))
         }
         if let output = data.output {
@@ -1175,6 +1181,7 @@ private struct RelayDaemonDataResponse: Decodable {
     var rows: Int?
     var cols: Int?
     var text: String?
+    var formatted: String?
     var bytesBase64: String?
     var agentStatus: RelayAgentStatusResponse?
     var accepted: Bool?
@@ -1189,7 +1196,7 @@ private struct RelayDaemonDataResponse: Decodable {
         guard let tabId, let rows, let cols, let text else {
             return nil
         }
-        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text)
+        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text, formatted: formatted)
     }
 
     var output: RelayTerminalOutputResponse? {
@@ -1217,6 +1224,7 @@ private struct RelayTerminalSnapshotResponse: Decodable {
     var rows: Int
     var cols: Int
     var text: String
+    var formatted: String?
 }
 
 private struct RelayTerminalOutputResponse: Decodable {

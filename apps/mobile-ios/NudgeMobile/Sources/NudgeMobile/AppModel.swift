@@ -671,8 +671,15 @@ final class AppModel {
     private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
         updateTab(machineID: machineID, tabID: snapshot.tabID) { tab in
             tab.profile = snapshot.profile
-            tab.previewText = snapshot.text
-            tab.replayOutputBase64 = ""
+            if snapshot.formattedBase64.isEmpty {
+                tab.previewText = snapshot.text
+                tab.replayOutputBase64 = ""
+            } else {
+                // Render the alt-screen-aware ANSI dump so full-screen TUIs
+                // (Claude, Codex) reconstruct correctly instead of plain text.
+                tab.previewText = ""
+                tab.replayOutputBase64 = snapshot.formattedBase64
+            }
             tab.replayOutputSequence += 1
             tab.pendingOutputBase64 = ""
         }
