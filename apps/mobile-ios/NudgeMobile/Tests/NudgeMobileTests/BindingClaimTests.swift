@@ -751,6 +751,78 @@ struct BindingClaimTests {
         #expect(session.snapshotRequests == ["default", "default", "default"])
     }
 
+    @Test func appModelReRequestsSnapshotWhenReplyNeverArrives() async throws {
+        // M-1 regression: if a snapshot request SENDS OK but no .terminalSnapshot
+        // event ever arrives (lost ephemeral frame), the tab must not wedge — once
+        // the request goes stale the next gap re-requests. retry .zero => "stale"
+        // immediately, so the second gap re-requests.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 50)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "Y", offset: 60))
+        ], suspendWhenEmpty: true)
+        // failSnapshotRequests stays false: the request SUCCEEDS, but no snapshot
+        // event is enqueued — simulating a reply lost in flight.
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil { session.snapshotRequests.count >= 3 }
+        syncTask.cancel()
+        await syncTask.value
+
+        // sessionState (1) + first gap (2) + re-request after stale (3): not wedged.
+        #expect(session.snapshotRequests == ["default", "default", "default"])
+    }
+
+    @Test func appModelRateLimitsResyncRequestsWithinRetryWindow() async throws {
+        // Storm guard: multiple gaps inside the retry window collapse to ONE
+        // request. A trailing agent-status event is the settle point — it is
+        // applied only after every prior (dropped) gap delta.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 50)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "Y", offset: 60)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "Z", offset: 70)),
+            .agentStatus(AgentStatusUpdate(
+                tabID: "default",
+                status: AgentStatus(kind: .shell, state: .needsApproval, confidence: 0.9, source: "screen")
+            ))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session, resyncRetry: .seconds(60))
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.agentStatus.state == .needsApproval
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        // sessionState (1) + first gap (1); the 2nd/3rd gaps are rate-limited.
+        #expect(session.snapshotRequests == ["default", "default"])
+        // The in-order delta applied; the gaps were dropped (not applied).
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
+    }
+
     @Test func appModelTracksOffsetPerTabIndependently() async throws {
         let machine = activeMachine()
         func tab(_ id: String) -> TerminalTab {
@@ -1479,12 +1551,17 @@ private func offsetStreamTab() -> TerminalTab {
 }
 
 @MainActor
-private func offsetStreamModel(machine: Machine, session: RecordingRelaySession) -> AppModel {
+private func offsetStreamModel(
+    machine: Machine,
+    session: RecordingRelaySession,
+    resyncRetry: Duration = .zero
+) -> AppModel {
     AppModel(
         machines: [machine],
         tabsByMachine: [machine.id: []],
         selectedMachineID: machine.id,
-        relayClient: RecordingRelayClient(session: session)
+        relayClient: RecordingRelayClient(session: session),
+        terminalResyncRetry: resyncRetry
     )
 }
 

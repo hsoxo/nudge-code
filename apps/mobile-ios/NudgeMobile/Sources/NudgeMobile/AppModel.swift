@@ -52,10 +52,13 @@ final class AppModel {
     // set when a snapshot is adopted and advanced as deltas apply. Absent means
     // no baseline yet (no snapshot received, or a legacy daemon without offsets).
     @ObservationIgnored private var terminalNextOffsetByTabKey: [String: UInt64] = [:]
-    // Tabs that detected a gap and are awaiting a re-baseline snapshot; interim
-    // deltas are dropped so a burst of out-of-order deltas can't trigger a storm
-    // of snapshot requests.
-    @ObservationIgnored private var terminalAwaitingSnapshotTabKeys: Set<String> = []
+    // When a re-baseline snapshot was last requested, per tab. While an entry is
+    // present and fresh (< terminalResyncRetry old) interim deltas are dropped so
+    // a burst of gaps can't storm the daemon; once it goes stale the next gap
+    // re-requests, so a LOST snapshot reply self-heals instead of wedging the tab.
+    @ObservationIgnored private var terminalResyncRequestedAt: [String: ContinuousClock.Instant] = [:]
+    private let resyncClock = ContinuousClock()
+    private let terminalResyncRetry: Duration
     @ObservationIgnored private var relaySessionSuspendedForBackground = false
 
     init(
@@ -72,8 +75,10 @@ final class AppModel {
         lastLaunchAgent: String? = nil,
         relayClient: any RelayClient = HTTPRelayClient(),
         persistence: (any AppModelPersistence)? = nil,
-        sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000
+        sessionReconnectDelayNanoseconds: UInt64 = 1_000_000_000,
+        terminalResyncRetry: Duration = .seconds(2)
     ) {
+        self.terminalResyncRetry = terminalResyncRetry
         let initialMachineID = selectedMachineID ?? machines.first?.id
         let initialTabID = selectedTabID ?? tabsByMachine[initialMachineID ?? ""]?.first?.id
 
@@ -704,7 +709,7 @@ final class AppModel {
         // A fresh relay session re-syncs from scratch: drop any stale per-tab
         // stream offsets so the next snapshot re-establishes each baseline.
         terminalNextOffsetByTabKey.removeAll()
-        terminalAwaitingSnapshotTabKeys.removeAll()
+        terminalResyncRequestedAt.removeAll()
         markMachine(machineID: machineID, state: .online, text: "relay session connected")
         try await session.setPhoneProfile(phoneProfile)
         try await session.requestSessionState()
@@ -825,7 +830,7 @@ final class AppModel {
         // which case the key is cleared and we fall back to no gap detection.
         let key = tabProfileKey(machineID: machineID, tabID: snapshot.tabID)
         terminalNextOffsetByTabKey[key] = snapshot.offset
-        terminalAwaitingSnapshotTabKeys.remove(key)
+        terminalResyncRequestedAt[key] = nil
         updateTab(machineID: machineID, tabID: snapshot.tabID) { tab in
             tab.profile = snapshot.profile
             if snapshot.formattedBase64.isEmpty {
@@ -890,7 +895,10 @@ final class AppModel {
             await requestResyncSnapshot(key: key, tabID: output.tabID, session: session)
             return
         }
-        if terminalAwaitingSnapshotTabKeys.contains(key) {
+        if terminalResyncRequestedAt[key] != nil {
+            // A resync is in flight: drop this interim delta, but let
+            // requestResyncSnapshot re-request if it has gone stale (lost reply).
+            await requestResyncSnapshot(key: key, tabID: output.tabID, session: session)
             return
         }
         let length = UInt64(output.byteCount)
@@ -917,19 +925,24 @@ final class AppModel {
         tabID: String,
         session: any RelaySession
     ) async {
-        guard !terminalAwaitingSnapshotTabKeys.contains(key) else {
+        // Rate-limit so a burst of gaps can't storm the daemon, but re-request
+        // once the previous request has gone unanswered past the retry window:
+        // otherwise a snapshot reply lost in flight (request sent OK, no event
+        // back, socket still alive) would wedge the tab until the session
+        // restarts. Reconnect also clears the map (runRelaySession).
+        if let requestedAt = terminalResyncRequestedAt[key],
+           resyncClock.now - requestedAt < terminalResyncRetry {
             return
         }
-        terminalAwaitingSnapshotTabKeys.insert(key)
+        terminalResyncRequestedAt[key] = resyncClock.now
         do {
             try await session.requestTerminalSnapshot(tabID: tabID)
         } catch {
-            // The request never reached the daemon, so no snapshot will arrive to
-            // clear the guard. Drop it so the next delta re-requests rather than
-            // wedging the tab in a permanent silent drop (the throw is expected for
-            // a tab that cannot currently stream — e.g. mid-restart). Best-effort,
-            // like the sessionState handler, but without the freeze.
-            terminalAwaitingSnapshotTabKeys.remove(key)
+            // The request never reached the daemon, so no snapshot will arrive.
+            // Clear immediately so the next delta re-requests rather than waiting
+            // out the retry window (the throw is expected for a tab that cannot
+            // currently stream — e.g. mid-restart).
+            terminalResyncRequestedAt[key] = nil
         }
     }
 
