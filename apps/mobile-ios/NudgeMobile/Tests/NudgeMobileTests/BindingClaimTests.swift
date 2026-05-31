@@ -577,6 +577,9 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == "")
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputSequence == 1)
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 0)
+        // L3: the replayed tail is the whole visible state, so the leftover
+        // "Waiting for terminal snapshot..." placeholder must be cleared.
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "")
     }
 
     @Test func appModelAppliesLiveAgentStatusWithoutSnapshotRequest() async throws {

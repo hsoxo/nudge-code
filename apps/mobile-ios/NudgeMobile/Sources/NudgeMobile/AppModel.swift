@@ -823,6 +823,12 @@ final class AppModel {
     private func applyTerminalOutput(_ output: TerminalOutput, machineID: String) {
         updateTab(machineID: machineID, tabID: output.tabID) { tab in
             if output.isReplay {
+                // A replayed byte tail is the tab's entire visible state, so a
+                // leftover "connecting/waiting" placeholder must not linger
+                // beneath it (roadmap L3). The live branch deliberately keeps
+                // previewText: after a plain-text snapshot it carries the base
+                // screen that live deltas are layered on top of.
+                tab.previewText = ""
                 tab.replayOutputBase64 = output.bytesBase64
                 tab.replayOutputSequence += 1
                 tab.pendingOutputBase64 = ""
