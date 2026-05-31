@@ -881,10 +881,7 @@ final class AppModel {
                 tab.pendingOutputBase64 = ""
                 return
             }
-            tab.replayOutputBase64 = appendBase64Output(
-                tab.replayOutputBase64,
-                output.bytesBase64
-            )
+            appendReplayOutput(&tab.replayOutputData, output.bytesBase64)
             tab.pendingOutputBase64 = output.bytesBase64
             tab.outputSequence += 1
         }
@@ -1042,15 +1039,17 @@ final class AppModel {
         tabsByMachineRevision &+= 1
     }
 
-    private func appendBase64Output(_ existingBase64: String, _ newBase64: String) -> String {
-        var data = Data(base64Encoded: existingBase64) ?? Data()
+    /// Append a live delta to the cumulative replay buffer, decoding ONLY the
+    /// delta (not re-decoding + re-encoding the whole buffer each time, which was
+    /// O(n²) under sustained bursts). base64 is produced lazily by the
+    /// `replayOutputBase64` accessor when the WebView bridge reads it.
+    private func appendReplayOutput(_ buffer: inout Data, _ newBase64: String) {
         if let newData = Data(base64Encoded: newBase64) {
-            data.append(newData)
+            buffer.append(newData)
         }
-        if data.count > Self.maxReplayOutputBytes {
-            data.removeFirst(data.count - Self.maxReplayOutputBytes)
+        if buffer.count > Self.maxReplayOutputBytes {
+            buffer.removeFirst(buffer.count - Self.maxReplayOutputBytes)
         }
-        return data.base64EncodedString()
     }
 
     private func persistStableState() {

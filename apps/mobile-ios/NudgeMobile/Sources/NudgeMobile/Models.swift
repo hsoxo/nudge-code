@@ -116,7 +116,16 @@ struct TerminalTab: Identifiable, Codable, Equatable, Sendable {
     var profile: TerminalProfile
     var agentStatus: AgentStatus
     var previewText: String
-    var replayOutputBase64: String = ""
+    // Backed by raw Data so the live-delta append doesn't decode + re-encode the
+    // whole buffer each time (it appends to replayOutputData — see
+    // AppModel.applyTerminalOutput); base64 is computed lazily for the WebView
+    // bridge. Transient (never persisted/wire-encoded), so the field-type change
+    // is safe; Codable synthesizes over replayOutputData.
+    var replayOutputData: Data = Data()
+    var replayOutputBase64: String {
+        get { replayOutputData.base64EncodedString() }
+        set { replayOutputData = Data(base64Encoded: newValue) ?? Data() }
+    }
     var replayOutputSequence: Int = 0
     var pendingOutputBase64: String = ""
     var outputSequence: Int = 0
