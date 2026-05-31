@@ -844,6 +844,39 @@ struct BindingClaimTests {
         #expect(session.snapshotRequests.allSatisfy { $0 == "default" })
     }
 
+    @Test func appModelResyncWatchdogStopsAfterSnapshotArrives() async throws {
+        // The watchdog must PLATEAU once the resync snapshot lands: after the
+        // snapshot clears the stamp, the armed watchdog finds it cleared and does
+        // not re-request, so the request count stops growing.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(tabID: "default", profile: TerminalProfile(rows: 32, cols: 48), text: "", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 50)),
+            // The resync reply finally arrives, re-baselining at offset 60.
+            .terminalSnapshot(TerminalSnapshot(tabID: "default", profile: TerminalProfile(rows: 32, cols: 48), text: "", offset: 60))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session, resyncRetry: .milliseconds(20))
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        // Wait until the resync snapshot (the 2nd snapshot) has been adopted.
+        try await waitUntil {
+            (model.tabsByMachine[machine.id]?.first?.replayOutputSequence ?? 0) >= 2
+        }
+        // Let the armed watchdog (20ms) fire; it must find the stamp cleared and
+        // NOT re-request.
+        try await Task.sleep(for: .milliseconds(100))
+        syncTask.cancel()
+        await syncTask.value
+
+        // sessionState (1) + the single gap (1); no watchdog re-request after the
+        // snapshot landed.
+        #expect(session.snapshotRequests == ["default", "default"])
+    }
+
     @Test func appModelRateLimitsResyncRequestsWithinRetryWindow() async throws {
         // Storm guard: multiple gaps inside the retry window collapse to ONE
         // request. A trailing agent-status event is the settle point — it is
