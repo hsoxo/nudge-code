@@ -217,7 +217,7 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 - **(a) Daemon-authoritative render frames + diff.** The daemon's `render_frame()` (already used for the CLI client, `nudge-terminal:67`) is the source of truth; the phone applies *frames/diffs*, not raw PTY bytes. Subsumes most earlier fixes (state is always the daemon's) but changes the streaming model (mosh-style diffing to keep it cheap).
 - **(b) Guaranteed-matching xterm.** Keep raw-byte streaming but pin the phone xterm config/capabilities to match `vt100` exactly. Cheaper, but fragile to any escape-support divergence.
 
-Recommend a short spike on (a) before committing; it is the principled end-state but a meaningful re-architecture.
+**Spike done (✅ 2026-05-31 → `docs/20260531-phase5-render-model-spike.md`):** recommends **option (a)**, phased behind a capability flag, **reusing the shipped absolute-offset contract** (offset axis, gap detection, unconditional snapshot adoption, adaptive flush) — the iOS `applyTerminalDelta` reinterprets "contiguous bytes" as "diff against the held frame" and xterm.js is kept (diffs are ordinary escape sequences). The decider: the authoritative render-and-diff loop **already ships** in the CLI client (`nudge-cli` `RenderCache` over vt100 `contents_diff`), so 5(a) is relocating that loop behind the relay, not inventing it. Reject (b) — two independent parsers can't be made to agree by config (vt100's untracked origin/scroll-region/charset modes leak to xterm under raw streaming). **Recommended next step:** the 5a.0 prototype — per-tab `RenderCache` in the relay loop emitting `render_frame`/`contents_diff` behind `NUDGE_RENDER_FRAMES=1` (zero phone changes), then measure daemon CPU + bandwidth vs. the raw path on-device; that CPU number is the go/no-go.
 
 ---
 
@@ -236,7 +236,7 @@ Recommend a short spike on (a) before committing; it is the principled end-state
 2. **vt100 0.16 capabilities (Phase 2):** ✅ resolved — `vt100 0.16.2` `Screen` exposes all needed modes (`alternate_screen`/`application_cursor`/`application_keypad`/`bracketed_paste`/`hide_cursor`/`mouse_protocol_mode`/`mouse_protocol_encoding`). Scrollback rows are still not exposed (M1 stays as documented).
 3. **Scrollback depth (M1):** target rows (e.g. match xterm's 2000) vs. memory on the daemon.
 4. **Binary frames (Phase 4.1):** is changing the relay wire format acceptable, or keep base64 and only fix buffers (4.2)?
-5. **Phase 5 direction:** render-frames (a) vs. matched-emulator (b) — strategic.
+5. **Phase 5 direction:** ✅ spike done — **render-frames (a)**, phased, reusing the offset contract (`docs/20260531-phase5-render-model-spike.md`). Go/no-go gated on the 5a.0 prototype's on-device daemon-CPU measurement.
 
 ---
 
