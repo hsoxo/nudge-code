@@ -728,11 +728,14 @@ final class AppModel {
                 machines[index].lastSeenText = "relay session synced"
             }
             for tab in state.tabs {
-                // Best-effort per tab: a tab that cannot currently stream (e.g. a
-                // restored tab awaiting restart after a computer-side daemon
-                // bounce) must not throw and tear down the whole session, which
-                // would otherwise wedge the phone in a relay reconnect loop.
-                try? await session.requestTerminalOutput(tabID: tab.id, maxBytes: 32 * 1024)
+                // Initial state is a full snapshot, not a raw byte tail (R1): the
+                // snapshot is complete restorable state and carries the stream
+                // offset that re-baselines gap detection, whereas a tail starts at
+                // an arbitrary mid-stream byte. Best-effort per tab: a tab that
+                // cannot currently stream (e.g. a restored tab awaiting restart
+                // after a computer-side daemon bounce) must not throw and tear
+                // down the whole session, which would wedge a relay reconnect loop.
+                try? await session.requestTerminalSnapshot(tabID: tab.id)
             }
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)

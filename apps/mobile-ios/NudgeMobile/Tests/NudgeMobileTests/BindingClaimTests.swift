@@ -480,7 +480,7 @@ struct BindingClaimTests {
         #expect(client.openSessionRequests == [machine])
         #expect(session.sessionStateRequestCount == 1)
         #expect(session.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)])
-        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(session.snapshotRequests == ["default"])
         #expect(session.closed)
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "relay session synced")
@@ -529,7 +529,7 @@ struct BindingClaimTests {
         syncTask.cancel()
         await syncTask.value
 
-        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(session.snapshotRequests == ["default"])
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "$ ")
         #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == Data("echo hi\r\nhi\r\n".utf8).base64EncodedString())
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("echo hi\r\nhi\r\n".utf8).base64EncodedString())
@@ -572,7 +572,7 @@ struct BindingClaimTests {
         syncTask.cancel()
         await syncTask.value
 
-        #expect(session.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(session.snapshotRequests == ["default"])
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == replayBase64)
         #expect(model.tabsByMachine[machine.id]?.first?.pendingOutputBase64 == "")
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputSequence == 1)
@@ -607,7 +607,8 @@ struct BindingClaimTests {
         await syncTask.value
 
         // Contiguous deltas (offset 0 then 2) both apply; no gap, no resync.
-        #expect(session.snapshotRequests.isEmpty)
+        // sessionState requests one snapshot per tab for initial state (1.4).
+        #expect(session.snapshotRequests == ["default"])
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("abcd".utf8).base64EncodedString())
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 2)
     }
@@ -640,7 +641,9 @@ struct BindingClaimTests {
         // The contiguous delta applied; the gapped one did not.
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("ab".utf8).base64EncodedString())
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
-        #expect(session.snapshotRequests == ["default"])
+        // sessionState requests one snapshot per tab (1.4); the gap requests a
+        // second, re-baseline snapshot.
+        #expect(session.snapshotRequests == ["default", "default"])
     }
 
     @Test func appModelTrimsOverlappingDelta() async throws {
@@ -669,7 +672,8 @@ struct BindingClaimTests {
         syncTask.cancel()
         await syncTask.value
 
-        #expect(session.snapshotRequests.isEmpty)
+        // sessionState requests one snapshot per tab for initial state (1.4).
+        #expect(session.snapshotRequests == ["default"])
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("abcdef".utf8).base64EncodedString())
     }
 
@@ -717,7 +721,8 @@ struct BindingClaimTests {
             confidence: 0.84,
             source: "screen"
         ))
-        #expect(session.snapshotRequests.isEmpty)
+        // sessionState requests one snapshot per tab for initial state (1.4).
+        #expect(session.snapshotRequests == ["default"])
     }
 
     @Test func appModelMarksRelaySessionReconnectingAfterDrop() async throws {
@@ -803,8 +808,8 @@ struct BindingClaimTests {
         #expect(firstSession.closed)
         #expect(secondSession.sessionStateRequestCount == 1)
         #expect(secondSession.phoneProfiles == [TerminalProfile(rows: 32, cols: 48)])
-        #expect(firstSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
-        #expect(secondSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(firstSession.snapshotRequests == ["default"])
+        #expect(secondSession.snapshotRequests == ["default"])
         #expect(model.machines.first?.connectionState == .online)
         #expect(model.machines.first?.lastSeenText == "relay session synced")
         #expect(model.tabsByMachine[machine.id]?.first?.agentStatus.kind == .codex)
@@ -935,7 +940,7 @@ struct BindingClaimTests {
         #expect(firstSession.closed)
         #expect(secondSession.closed)
         #expect(secondSession.sessionStateRequestCount == 1)
-        #expect(secondSession.outputRequests == [TerminalOutputRequest(tabID: "default", maxBytes: 32 * 1024)])
+        #expect(secondSession.snapshotRequests == ["default"])
         #expect(model.tabsByMachine[machine.id]?.first?.id == "default")
     }
 
