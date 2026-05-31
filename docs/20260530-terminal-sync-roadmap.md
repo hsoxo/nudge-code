@@ -1,12 +1,14 @@
 # Terminal Sync Roadmap
 
 - **Date:** 2026-05-30
-- **Status:** Phases 0–2 shipped + reviewed CLEAN; Phase 3 (3.1/3.2) shipped (2026-05-31); Phases 4–5 proposed
+- **Status:** Phases 0–2 shipped + reviewed CLEAN; Phase 3 (3.1/3.2) shipped; Phase 4 (4.2 buffers, 4.3 focused-tab) shipped, 4.1 binary-frames **blocked** (relay not in this repo); Phase 5 spike done (2026-05-31)
 - **Progress:**
   - Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
   - Phase 1 complete (absolute-offset stream contract) — 1.2a delta offset `ff55d06`, 1.2b snapshot offset `240ae94`, 1.3 iOS gap detection `b7a7439`, 1.4 retire tail `9503aef`.
   - Phase 2 complete (full-state snapshots) — 2.1 `state_frame()` `d209115`, 2.2/2.3 daemon+iOS wiring `cc0c286`. Scrollback (M1) deferred: `vt100 0.16` exposes modes but not scrollback rows for the frame. **Pending on-device verification** (daemon/relay stack down this session) — the `state_frame()` round-trip is vt100-tested, not yet xterm.js-tested.
   - Phase 3 (3.1/3.2) shipped — post-resize re-baseline (phone-initiated) `95af572`; reflow (3.3) deferred. On-device visual verification pending.
+  - Phase 4 — 4.2 buffer efficiency (Data-backed replay buffer) `563925b`; 4.3 focused-tab priority `cbd6cf0`. **4.1 binary WS frames blocked**: the relay is a hosted service not in this repo (`docs/relay-hosted.md`) and can't be verified to route binary frames; the daemon currently treats inbound binary as UTF-8 text — shipping a binary wire format blind risks breaking the connection. Needs relay-side verification + on-device testing (stack down). JS-side ring buffer (part of 4.2) also deferred.
+  - Phase 5 spike done — recommends daemon render-frames (a); `docs/20260531-phase5-render-model-spike.md` `f81a95a`. Implementation gated on the 5a.0 prototype's on-device CPU measurement.
   - Code review (critic + Codex, **4 rounds → both CLEAN**) — C1 stuck-awaiting freeze `7894c48`; state_frame cursor + canonical modes `cdb505e`; flush clamp `5e18d46`; M-1 lost-reply self-heal `423e0e5`; M-2 redundant `cursor_state_formatted` removed `74df73c`; minors (`droppingFirst` clamp, `terminal_snapshot` comment) `c193948`; watchdog for lost-reply-on-silent-stream `0d0af27`. Accepted/deferred: drop-deltas flicker, per-delta base64 re-decode (Phase 4.2), origin-mode/scroll-region/charset (vt100 limitation), on-device/xterm.js verification.
 - **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
 - **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
@@ -61,9 +63,9 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 | **M1** | MED | Grid `scrollback=0`; resyncs collapse history | `nudge-terminal:36` |
 | **M2** | MED | Resize: no reflow + no post-resize snapshot → stale bytes at new geometry (✅ post-resize re-baseline Phase 3.1 `95af572`; scrollback reflow 3.3 deferred) | `nudge-terminal:49`, `lib.rs:2074` |
 | **M3** | MED | Daemon `vt100` vs phone `xterm.js` are two divergent emulators | `nudge-terminal:40`, `index.html:66` |
-| **M4** | MED | Background (non-focused) tabs flush at focused-tab cadence | `lib.rs:2644` |
+| **M4** | MED | Background (non-focused) tabs flush at focused-tab cadence (✅ fixed Phase 4.3 `cbd6cf0`: focused-tab hint; background tabs skipped, re-baseline on refocus) | `lib.rs:2644` |
 | **L1** | LOW | base64-in-JSON-in-WS, doubled under E2E | `lib.rs:3209`, `e2e.rs:184` |
-| **L2** | LOW | iOS re-base64 of 64KB/delta (O(n²)); JS per-byte buffers | `AppModel.swift:831`, `index.html:238` |
+| **L2** | LOW | iOS re-base64 of 64KB/delta (O(n²)); JS per-byte buffers (✅ iOS Data-backed buffer Phase 4.2 `563925b`; JS ring buffer deferred) | `AppModel.swift:831`, `index.html:238` |
 | **L3** | LOW | Placeholder text persists on the tail-replay path (✅ fixed `8367704`) | `AppModel.swift:825` |
 
 ---
@@ -195,14 +197,14 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 
 ---
 
-### Phase 4 — Transport + buffer efficiency (effort: M)
+### Phase 4 — Transport + buffer efficiency (effort: M) — 4.2/4.3 shipped; 4.1 blocked
 
 **Goal:** cut bandwidth/CPU under bursts and for multi-tab.
 **Findings:** L1, L2, M4.
 
-**4.1 Binary frames (L1)** — send deltas as binary WS frames (frame the E2E ciphertext as binary instead of base64-in-JSON). Touches `nudge-daemon`, the relay routing, and the iOS WS transport — confirm the relay can route binary frames; keep JSON for control messages.
-**4.2 iOS/JS buffers (L2)** — iOS: store the replay buffer as `Data` and base64 only when handing to the WebView (`AppModel.swift:831/887/895`). JS: replace per-byte `base64ToBytes`/`appendBounded` with chunked `Uint8Array` ring buffers (`index.html:226/238/244`).
-**4.3 Focused-tab priority (M4)** — phone sends a "focused tab" control hint; daemon flushes the focused tab at the fast floor and background tabs slowly (e.g. 250ms) or snapshot-only.
+**4.1 Binary frames (L1) — ⛔ BLOCKED.** Sending deltas as binary WS frames needs the *relay* to route binary; the relay is a hosted service **not in this repo** (`docs/relay-hosted.md`), and the daemon currently treats inbound binary as UTF-8 text (`lib.rs` relay recv). Shipping a binary wire format blind risks breaking the connection. Requires relay-side verification/update + on-device testing (stack down). Deferred until the relay can be confirmed/updated.
+**4.2 iOS/JS buffers (L2) — ✅ iOS shipped `563925b`.** iOS: `TerminalTab.replayOutputData: Data` backs a computed `replayOutputBase64`; the live append decodes only the delta (no whole-buffer re-encode). JS ring buffer (`index.html`) deferred (untested path; lower value).
+**4.3 Focused-tab priority (M4) — ✅ shipped `cbd6cf0`.** Phone sends a `set_focused_tab` hint on select/attach; the daemon skips background-tab output at flush (`tab_is_focus_filtered`); background tabs re-baseline on refocus via the existing gap→snapshot. Chose skip-background over slow-cadence (simpler, reuses Phase 1). Backward-compatible (no focus ⇒ stream all).
 
 **Tests / verify:** bandwidth + CPU benchmark on a burst (`cat` of a large file) before/after; background tabs idle on the wire.
 
