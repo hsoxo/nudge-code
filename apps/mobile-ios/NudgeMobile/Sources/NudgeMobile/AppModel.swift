@@ -206,6 +206,18 @@ final class AppModel {
         do {
             if let relaySession, relaySessionMachineID == machine.id {
                 try await relaySession.setPhoneProfile(profile)
+                // Phase 3: re-baseline the visible tab at the new geometry so the
+                // phone adopts the daemon's re-rendered grid instead of diverging
+                // via independent xterm reflow. Rate-limited, so rapid resizes
+                // (e.g. keyboard toggles) coalesce; interim deltas drop until the
+                // snapshot, and the watchdog covers a lost reply.
+                if let tabID = selectedTabID {
+                    await requestResyncSnapshot(
+                        key: tabProfileKey(machineID: machine.id, tabID: tabID),
+                        tabID: tabID,
+                        session: relaySession
+                    )
+                }
             } else {
                 let state = try await relayClient.setPhoneProfile(machine: machine, profile: profile)
                 applyRemoteSessionState(state, machineID: machine.id)
@@ -240,6 +252,14 @@ final class AppModel {
                     tabID: tabID,
                     widthMode: widthMode,
                     computerProfile: computerProfile
+                )
+                // Phase 3: re-baseline this tab at the new geometry (see
+                // updatePhoneProfile) so the phone adopts the daemon's re-rendered
+                // grid rather than diverging via xterm reflow.
+                await requestResyncSnapshot(
+                    key: profileKey,
+                    tabID: tabID,
+                    session: relaySession
                 )
             } else {
                 let state = try await relayClient.setWidthMode(

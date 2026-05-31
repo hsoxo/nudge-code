@@ -784,6 +784,32 @@ struct BindingClaimTests {
         #expect(session.snapshotRequests == ["default", "default", "default"])
     }
 
+    @Test func appModelReBaselinesVisibleTabAfterResize() async throws {
+        // Phase 3: a phone-profile change (resize) over a live session requests a
+        // re-baseline snapshot for the visible tab, so the phone adopts the
+        // daemon's re-rendered grid at the new geometry instead of diverging via
+        // independent xterm reflow.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab]))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil { model.selectedTabID == "default" }
+        await model.updatePhoneProfile(TerminalProfile(rows: 40, cols: 60))
+
+        // sessionState requested one snapshot; the resize requests a second one.
+        try await waitUntil { session.snapshotRequests.count >= 2 }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.snapshotRequests.allSatisfy { $0 == "default" })
+        #expect(session.phoneProfiles.contains(TerminalProfile(rows: 40, cols: 60)))
+    }
+
     @Test func appModelReRequestsSnapshotWhenStreamGoesSilentAfterLostReply() async throws {
         // M-1 (round 3): the lost-reply re-request must NOT depend on a follow-up
         // delta. After the gap's request succeeds but the reply is lost and the
