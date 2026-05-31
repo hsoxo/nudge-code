@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use nudge_protocol::v1;
 use nudge_pty::{PtyTab, TerminalSize};
 use nudge_terminal::{TerminalGrid, TerminalSize as GridSize};
@@ -2582,7 +2582,8 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     let mut terminal_changes = runtime.subscribe_terminal_changes();
     let mut agent_status_changes = runtime.subscribe_agent_status_changes();
     let mut e2e_session: Option<RelayE2ESession> = None;
-    let mut pending_terminal_outputs = BTreeMap::new();
+    let mut pending_terminal_outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut snapshot_required: HashSet<String> = HashSet::new();
     let mut terminal_flush = interval(Duration::from_millis(100));
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -2592,18 +2593,19 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
             change = terminal_changes.recv() => {
                 match change {
                     Ok(change) => {
-                        let output = pending_terminal_outputs
-                            .entry(change.tab_id)
-                            .or_insert_with(Vec::new);
-                        output.extend_from_slice(&change.data);
-                        let overflow = output.len().saturating_sub(64 * 1024);
-                        if overflow > 0 {
-                            output.drain(..overflow);
-                        }
+                        accumulate_terminal_change(
+                            &mut pending_terminal_outputs,
+                            &mut snapshot_required,
+                            change.tab_id,
+                            &change.data,
+                        );
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // We dropped broadcast items, so the per-tab byte stream
+                        // is no longer contiguous — resync every live tab with a
+                        // full snapshot rather than a delta that starts mid-stream.
                         for tab_id in runtime.running_tab_ids().await {
-                            pending_terminal_outputs.entry(tab_id).or_insert_with(Vec::new);
+                            snapshot_required.insert(tab_id);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -2640,26 +2642,17 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() => {
-                let outputs = std::mem::take(&mut pending_terminal_outputs);
-                for (tab_id, data) in outputs {
-                    let payload = if data.is_empty() {
-                        live_terminal_snapshot_payload(runtime, binding, &tab_id).await
-                    } else {
-                        let _ = runtime.refresh_agent_status_from_grid(&tab_id).await;
-                        Some(relay_live_terminal_output_payload(binding, &tab_id, &data))
-                    };
-                    if let Some(payload) = payload {
-                        let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_mut())? else {
-                            continue;
-                        };
-                        let message = relay_message_json(&bound_phone_id, None, payload);
-                        websocket
-                            .send(WebSocketMessage::Text(message.into()))
-                            .await
-                            .context("failed to send relay terminal update")?;
-                    }
-                }
+            _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() || !snapshot_required.is_empty() => {
+                flush_pending_terminal_outputs(
+                    runtime,
+                    binding,
+                    &bound_phone_id,
+                    &mut websocket,
+                    e2e_session.as_mut(),
+                    std::mem::take(&mut pending_terminal_outputs),
+                    std::mem::take(&mut snapshot_required),
+                )
+                .await?;
             }
             message = websocket.next() => {
                 match message {
@@ -3087,6 +3080,81 @@ fn relay_message_json(
         message["ephemeral"] = Value::Bool(true);
     }
     serde_json::to_string(&message).expect("relay response json should serialize")
+}
+
+/// Per-tab cap on buffered terminal bytes between flushes. Past this we can no
+/// longer ship a contiguous delta, so the tab resyncs with a full snapshot.
+const RELAY_TERMINAL_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// Buffer a terminal change for `tab_id`. If the buffer exceeds the relay cap
+/// the byte run is no longer contiguous, so we drop the buffered bytes and flag
+/// the tab for a full snapshot instead of a delta that would start mid-stream
+/// (which the phone would replay as if it were complete state — see roadmap R6).
+fn accumulate_terminal_change(
+    pending: &mut BTreeMap<String, Vec<u8>>,
+    snapshot_required: &mut HashSet<String>,
+    tab_id: String,
+    data: &[u8],
+) {
+    let output = pending.entry(tab_id.clone()).or_default();
+    output.extend_from_slice(data);
+    if output.len() > RELAY_TERMINAL_BUFFER_LIMIT {
+        output.clear();
+        snapshot_required.insert(tab_id);
+    }
+}
+
+/// A tab flushes as a full snapshot when it was explicitly flagged (overflow or
+/// broadcast lag) or when it has no buffered bytes to ship as a delta.
+fn tab_requires_snapshot(
+    snapshot_required: &HashSet<String>,
+    tab_id: &str,
+    pending: &[u8],
+) -> bool {
+    snapshot_required.contains(tab_id) || pending.is_empty()
+}
+
+/// Drain the pending terminal buffers to the phone, sending a full snapshot for
+/// any tab in `snapshot_required` (or with no buffered bytes) and an incremental
+/// delta for the rest. Shared by the coalescing timer tick and the
+/// immediate-on-idle path so both make the same snapshot-vs-delta decision.
+async fn flush_pending_terminal_outputs<S>(
+    runtime: &DaemonRuntime,
+    binding: &BindingState,
+    bound_phone_id: &str,
+    websocket: &mut S,
+    mut e2e_session: Option<&mut RelayE2ESession>,
+    mut outputs: BTreeMap<String, Vec<u8>>,
+    snapshot_required: HashSet<String>,
+) -> Result<()>
+where
+    S: Sink<WebSocketMessage> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    // Tabs flagged for a snapshot may carry no pending bytes (their buffer was
+    // cleared on overflow, or they were flagged via broadcast lag), so union
+    // them into the work set.
+    for tab_id in &snapshot_required {
+        outputs.entry(tab_id.clone()).or_default();
+    }
+    for (tab_id, data) in outputs {
+        let payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &data) {
+            live_terminal_snapshot_payload(runtime, binding, &tab_id).await
+        } else {
+            let _ = runtime.refresh_agent_status_from_grid(&tab_id).await;
+            Some(relay_live_terminal_output_payload(binding, &tab_id, &data))
+        };
+        let Some(payload) = payload else { continue };
+        let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_deref_mut())? else {
+            continue;
+        };
+        let message = relay_message_json(bound_phone_id, None, payload);
+        websocket
+            .send(WebSocketMessage::Text(message.into()))
+            .await
+            .context("failed to send relay terminal update")?;
+    }
+    Ok(())
 }
 
 async fn live_terminal_snapshot_payload(
@@ -4499,6 +4567,60 @@ mod tests {
         assert!(runtime.output_tail("no-such-tab", 8 * 1024).await.is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn small_terminal_change_stays_a_delta() {
+        let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut snapshot_required: HashSet<String> = HashSet::new();
+
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), b"hello");
+
+        assert_eq!(pending.get("tab").map(Vec::as_slice), Some(&b"hello"[..]));
+        assert!(!snapshot_required.contains("tab"));
+        assert!(!tab_requires_snapshot(
+            &snapshot_required,
+            "tab",
+            pending.get("tab").unwrap()
+        ));
+    }
+
+    #[test]
+    fn overflow_clears_buffer_and_requires_snapshot() {
+        // A burst past the relay cap must NOT ship a delta that begins at an
+        // arbitrary mid-stream byte (the phone would replay it as full state).
+        // Instead we drop the buffered bytes and force a complete snapshot.
+        let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut snapshot_required: HashSet<String> = HashSet::new();
+
+        let burst = vec![b'x'; RELAY_TERMINAL_BUFFER_LIMIT + 1];
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), &burst);
+
+        assert!(
+            pending.get("tab").map(Vec::is_empty).unwrap_or(false),
+            "buffer should be cleared on overflow, not head-dropped"
+        );
+        assert!(snapshot_required.contains("tab"));
+        assert!(tab_requires_snapshot(
+            &snapshot_required,
+            "tab",
+            pending.get("tab").unwrap()
+        ));
+    }
+
+    #[test]
+    fn lagged_or_empty_tab_requires_snapshot() {
+        // Broadcast lag flags a tab with no buffered bytes; it must still
+        // resync via a snapshot.
+        let mut flagged: HashSet<String> = HashSet::new();
+        flagged.insert("tab".to_string());
+        assert!(tab_requires_snapshot(&flagged, "tab", b""));
+
+        // No flag + no pending bytes is the legacy forced-snapshot case.
+        let empty: HashSet<String> = HashSet::new();
+        assert!(tab_requires_snapshot(&empty, "tab", b""));
+        // No flag + pending bytes is a normal delta.
+        assert!(!tab_requires_snapshot(&empty, "tab", b"data"));
     }
 
     #[test]
