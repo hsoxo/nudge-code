@@ -1,11 +1,12 @@
 # Terminal Sync Roadmap
 
 - **Date:** 2026-05-30
-- **Status:** Phases 0–2 shipped (2026-05-30/31); Phases 3–5 proposed
+- **Status:** Phases 0–2 shipped + reviewed CLEAN; Phase 3 (3.1/3.2) shipped (2026-05-31); Phases 4–5 proposed
 - **Progress:**
   - Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
   - Phase 1 complete (absolute-offset stream contract) — 1.2a delta offset `ff55d06`, 1.2b snapshot offset `240ae94`, 1.3 iOS gap detection `b7a7439`, 1.4 retire tail `9503aef`.
   - Phase 2 complete (full-state snapshots) — 2.1 `state_frame()` `d209115`, 2.2/2.3 daemon+iOS wiring `cc0c286`. Scrollback (M1) deferred: `vt100 0.16` exposes modes but not scrollback rows for the frame. **Pending on-device verification** (daemon/relay stack down this session) — the `state_frame()` round-trip is vt100-tested, not yet xterm.js-tested.
+  - Phase 3 (3.1/3.2) shipped — post-resize re-baseline (phone-initiated) `95af572`; reflow (3.3) deferred. On-device visual verification pending.
   - Code review (critic + Codex, **4 rounds → both CLEAN**) — C1 stuck-awaiting freeze `7894c48`; state_frame cursor + canonical modes `cdb505e`; flush clamp `5e18d46`; M-1 lost-reply self-heal `423e0e5`; M-2 redundant `cursor_state_formatted` removed `74df73c`; minors (`droppingFirst` clamp, `terminal_snapshot` comment) `c193948`; watchdog for lost-reply-on-silent-stream `0d0af27`. Accepted/deferred: drop-deltas flicker, per-delta base64 re-decode (Phase 4.2), origin-mode/scroll-region/charset (vt100 limitation), on-device/xterm.js verification.
 - **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
 - **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
@@ -58,7 +59,7 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 | **R6** | HIGH | Burst overflow sends a partial delta instead of a snapshot (✅ fixed Phase 0.1 `0bbb5ae`) | `lib.rs:2599-2646` |
 | **P1** | HIGH | Fixed 100ms flush = local-echo lag (✅ fixed Phase 0.3 `f3c8f1f`) | `lib.rs:2586` |
 | **M1** | MED | Grid `scrollback=0`; resyncs collapse history | `nudge-terminal:36` |
-| **M2** | MED | Resize: no reflow + no post-resize snapshot → stale bytes at new geometry | `nudge-terminal:49`, `lib.rs:2074` |
+| **M2** | MED | Resize: no reflow + no post-resize snapshot → stale bytes at new geometry (✅ post-resize re-baseline Phase 3.1 `95af572`; scrollback reflow 3.3 deferred) | `nudge-terminal:49`, `lib.rs:2074` |
 | **M3** | MED | Daemon `vt100` vs phone `xterm.js` are two divergent emulators | `nudge-terminal:40`, `index.html:66` |
 | **M4** | MED | Background (non-focused) tabs flush at focused-tab cadence | `lib.rs:2644` |
 | **L1** | LOW | base64-in-JSON-in-WS, doubled under E2E | `lib.rs:3209`, `e2e.rs:184` |
@@ -179,16 +180,16 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 
 ---
 
-### Phase 3 — Resize / reflow resync (effort: S–M)
+### Phase 3 — Resize / reflow resync (effort: S–M) — 3.1/3.2 shipped
 
 **Goal:** no stale/mis-wrapped content after rotation, font change, or width change.
 **Findings:** M2, plus A3/reflow.
 
-**3.1 Post-resize snapshot** — `nudge-daemon` `set_phone_profile` (~2074): after resizing the PTY + grid, bump the epoch and send a state-frame snapshot at the new geometry for affected tabs (the shell also redraws via `SIGWINCH`, so the snapshot reflects the redrawn state).
-**3.2 Pin cols** — the phone measures cols and reports; the daemon resizes the PTY to match so reflow is decided once, on the computer.
-**3.3 Reflow (longer-term)** — `nudge-terminal:49` rebuilds the parser from `contents_formatted` (no reflow). Evaluate a newer `vt100` with a resize API, or a reflow-aware grid, for scrollback reflow. Track as a spike; the post-resize snapshot covers the common case meanwhile.
+**3.1 Post-resize re-baseline (✅ shipped, phone-initiated)** — In the absolute-offset model the daemon's resize *control* handler can't reach the relay loop (the architecture-review seam), so the phone re-baselines instead: after a successful `setPhoneProfile`/`setWidthMode` over the live session, `updatePhoneProfile`/`updateSelectedTabWidth` call `requestResyncSnapshot` for the affected tab. The daemon resizes the PTY+grid (`total_bytes` preserved across `resize`), and the state-frame snapshot at the new geometry re-bases the phone, so it adopts the daemon's re-rendered grid rather than diverging via independent xterm reflow. Rate-limited (coalesces rapid keyboard-toggle resizes); the watchdog covers a lost reply. *On-device verification (rotate/font/width visual correctness) pending — stack down.*
+**3.2 Pin cols (✅ already in place)** — the phone measures cols and reports them via `setPhoneProfile`/`setWidthMode`; the daemon resizes the PTY to match, so wrapping is decided once, on the computer.
+**3.3 Reflow (deferred, longer-term)** — `nudge-terminal` `resize` rebuilds the parser from `contents_formatted` (no scrollback reflow). Evaluate a newer `vt100` with a resize API, or a reflow-aware grid. The post-resize re-baseline covers the common case meanwhile.
 
-**Tests / verify:** rotate / change font with a wrapped-line buffer → no duplicated or mis-wrapped lines; cursor lands correctly.
+**Tests / verify:** unit — a resize over a live session requests a re-baseline snapshot (`appModelReBaselinesVisibleTabAfterResize`). On-device — rotate / change font with a wrapped buffer → no duplicated/mis-wrapped lines; cursor lands correctly.
 
 **Risk:** low–medium.
 
