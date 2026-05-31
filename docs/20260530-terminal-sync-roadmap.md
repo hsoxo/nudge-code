@@ -162,7 +162,7 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 **Findings:** R3, M1, and the alt-screen boundary.
 
 **2.1 `nudge-terminal` — `state_frame()`** (new) producing bytes that, written into a freshly-reset xterm, reconstruct: reset → mode-setters (alt-screen `?1049h`, application cursor `?1h`, bracketed paste `?2004h`, mouse modes, charset) → SGR → screen contents (`contents_formatted`) → cursor position → cursor visibility.
-- **Spike first:** confirm `vt100::Screen` (0.16) exposes the modes (`alternate_screen()`, `application_cursor()`, `application_keypad()`, `bracketed_paste()`, `mouse_protocol_mode()`, `hide_cursor()`). If a mode isn't exposed, track it in `TerminalGrid` by sniffing the byte stream in `process()` (watch `?1049h/l`, `?1h/l`, `?2004h/l`, etc.).
+- **Spike done (✅ 2026-05-30):** `vt100 0.16.2` `Screen` exposes **all** needed modes directly — `alternate_screen()`, `application_cursor()`, `application_keypad()`, `bracketed_paste()`, `hide_cursor()`, `mouse_protocol_mode() -> MouseProtocolMode`, `mouse_protocol_encoding() -> MouseProtocolEncoding`. No stream-sniffing fallback required; `state_frame()` can read these accessors directly.
 - Bounded **scrollback** (M1): construct `vt100::Parser::new(rows, cols, N)` (e.g. 1000–2000) and include the last N rows in the state frame if vt100 exposes scrollback rows; otherwise document the cap and keep scrollback in the replay buffer only.
 
 **2.2 Daemon** — snapshot payload carries `state_frame()` instead of bare `contents_formatted`. Detect **alt-screen enter/leave** (mode flip in `process`/`refresh`) and force a snapshot (epoch bump) on transition.
@@ -173,7 +173,7 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 - `nudge-terminal`: `state_frame()` round-trips alt-screen + SGR + cursor through a second `vt100::Parser`.
 - On-device: start Claude/Codex (alt-screen), force a resync mid-session → screen + colors + cursor intact; leave alt-screen → snapshot fires, normal screen restored cleanly.
 
-**Risk:** medium — depends on the vt100 spike. Fallback (stream-sniffed modes) is well-bounded.
+**Risk:** low–medium — the vt100 spike landed (all modes exposed), so the risky stream-sniffing fallback is off the table.
 
 ---
 
@@ -230,7 +230,7 @@ Recommend a short spike on (a) before committing; it is the principled end-state
 ## 6. Open decisions (confirm before/while building)
 
 1. **Protocol evolution:** additive optional fields + capability marker (recommended) vs. a `v2` payload. Affects mixed-version daemon/phone.
-2. **vt100 0.16 capabilities (Phase 2):** does `Screen` expose all needed modes/scrollback? If not, adopt stream-sniffed mode tracking in `TerminalGrid`.
+2. **vt100 0.16 capabilities (Phase 2):** ✅ resolved — `vt100 0.16.2` `Screen` exposes all needed modes (`alternate_screen`/`application_cursor`/`application_keypad`/`bracketed_paste`/`hide_cursor`/`mouse_protocol_mode`/`mouse_protocol_encoding`). Scrollback rows are still not exposed (M1 stays as documented).
 3. **Scrollback depth (M1):** target rows (e.g. match xterm's 2000) vs. memory on the daemon.
 4. **Binary frames (Phase 4.1):** is changing the relay wire format acceptable, or keep base64 and only fix buffers (4.2)?
 5. **Phase 5 direction:** render-frames (a) vs. matched-emulator (b) — strategic.
