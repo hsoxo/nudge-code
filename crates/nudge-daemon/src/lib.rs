@@ -1901,11 +1901,15 @@ impl DaemonRuntime {
             .iter()
             .find(|tab| tab.tab_id == tab_id)
             .with_context(|| format!("tab {tab_id} was not found"))?;
-        let snapshot = runtime_tab
-            .grid
-            .lock()
-            .expect("terminal grid lock poisoned")
-            .snapshot();
+        let (snapshot, state_frame) = {
+            let grid = runtime_tab
+                .grid
+                .lock()
+                .expect("terminal grid lock poisoned");
+            // Both read under one lock so the offset, contents, and modes are a
+            // single coherent point in the stream.
+            (grid.snapshot(), grid.state_frame())
+        };
         let offset = snapshot.offset;
         Ok((
             v1::TerminalSnapshot {
@@ -1913,7 +1917,10 @@ impl DaemonRuntime {
                 rows: snapshot.rows as u32,
                 cols: snapshot.cols as u32,
                 text: snapshot.text,
-                formatted: snapshot.formatted,
+                // Full restorable state (reset + modes + contents), not just the
+                // visible cells, so a resync reconstructs alt-screen / SGR /
+                // cursor and post-resync deltas are read in the right mode (R3).
+                formatted: state_frame,
             },
             offset,
         ))

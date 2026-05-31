@@ -613,6 +613,47 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 2)
     }
 
+    @Test func appModelAppliesFormattedSnapshotAndAdoptsOffset() async throws {
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        // A Phase 2 state frame (reset + alt-screen + SGR + contents), base64'd
+        // as the snapshot's formatted dump, representing stream offset 100.
+        let stateFrame = Data("\u{1b}c\u{1b}[?1049h\u{1b}[31mhi".utf8).base64EncodedString()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                formattedBase64: stateFrame,
+                offset: 100
+            )),
+            // In-order continuation at offset 100 — applies only if the snapshot
+            // adopted offset 100 as the baseline (no gap, no resync request).
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 100))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.outputSequence == 1
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        // Formatted snapshot is applied via the replay (reset+modes+contents)
+        // path, so the placeholder is cleared and the decoded state frame leads
+        // the buffer (compare decoded bytes -- base64 of A+B != base64 A + base64 B).
+        #expect(model.tabsByMachine[machine.id]?.first?.previewText == "")
+        let replay = Data(base64Encoded: model.tabsByMachine[machine.id]?.first?.replayOutputBase64 ?? "") ?? Data()
+        let frame = Data(base64Encoded: stateFrame) ?? Data()
+        #expect(replay == frame + Data("X".utf8))
+        // Offset 100 was adopted, so the delta at 100 applied in order; no gap.
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
+        #expect(session.snapshotRequests == ["default"])
+    }
+
     @Test func appModelRequestsSnapshotOnDeltaGap() async throws {
         let machine = activeMachine()
         let remoteTab = offsetStreamTab()
