@@ -1,10 +1,11 @@
 # Terminal Sync Roadmap
 
 - **Date:** 2026-05-30
-- **Status:** Phases 0–1 shipped (2026-05-30); Phases 2–5 proposed
+- **Status:** Phases 0–2 shipped (2026-05-30/31); Phases 3–5 proposed
 - **Progress:**
   - Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
   - Phase 1 complete (absolute-offset stream contract) — 1.2a delta offset `ff55d06`, 1.2b snapshot offset `240ae94`, 1.3 iOS gap detection `b7a7439`, 1.4 retire tail `9503aef`.
+  - Phase 2 complete (full-state snapshots) — 2.1 `state_frame()` `d209115`, 2.2/2.3 daemon+iOS wiring `cc0c286`. Scrollback (M1) deferred: `vt100 0.16` exposes modes but not scrollback rows for the frame.
 - **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
 - **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
 
@@ -50,7 +51,7 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 |----|-----|-------|-------|
 | **R1** | HIGH | Unsafe resync: subscribe/reconnect replays a raw byte **tail** (arbitrary start) as if it were full state (✅ fixed Phase 1.4 `9503aef`) | `AppModel.swift:723`, `index.html:257` |
 | **R2** | HIGH | Truncation cuts mid-sequence: overflow drain / PTY tail cap / replay trims can split UTF-8/CSI/OSC/SGR/alt-screen | `lib.rs:2601`, `nudge-pty:167`, `AppModel.swift:892`, `index.html:244` |
-| **R3** | HIGH | Snapshot has no mode state: visible cells only; no alt-screen/modes/charset → post-reset deltas misread | `nudge-terminal:63`, `index.html:257` |
+| **R3** | HIGH | Snapshot has no mode state: visible cells only; no alt-screen/modes/charset → post-reset deltas misread (✅ fixed Phase 2 `state_frame()` `d209115`/`cc0c286`) | `nudge-terminal:63`, `index.html:257` |
 | **R4** | HIGH | Snapshot↔live race: independent counters (`replayOutputSequence` vs `outputSequence`), no shared offset → an old snapshot can clobber newer output (✅ fixed Phase 1: absolute offset, grid-lock-coherent, `240ae94`/`b7a7439`) | `AppModel.swift:818/836`, `TerminalWorkspaceView.swift:490` |
 | **R5** | HIGH | No gap detection: deltas carry only `tabId`+`bytes`; relay/WS loss is invisible (✅ fixed Phase 1.3 `b7a7439`) | `lib.rs:3206` |
 | **R6** | HIGH | Burst overflow sends a partial delta instead of a snapshot (✅ fixed Phase 0.1 `0bbb5ae`) | `lib.rs:2599-2646` |
