@@ -492,14 +492,18 @@ struct TerminalOutput: Equatable, Sendable {
     /// Drop the first `n` decoded bytes (used to trim an overlap the phone has
     /// already applied), advancing `offset` accordingly.
     func droppingFirst(_ n: Int) -> TerminalOutput {
-        guard n > 0, let data = Data(base64Encoded: bytesBase64), n < data.count else {
+        guard n > 0, let data = Data(base64Encoded: bytesBase64) else {
             return self
         }
+        // Clamp so dropping >= the byte count yields an empty (no-op) delta rather
+        // than silently returning the full output — correct in isolation, not just
+        // because the caller already guards `alreadyApplied >= length`.
+        let dropped = min(n, data.count)
         return TerminalOutput(
             tabID: tabID,
-            bytesBase64: data.dropFirst(n).base64EncodedString(),
+            bytesBase64: data.dropFirst(dropped).base64EncodedString(),
             isReplay: isReplay,
-            offset: offset.map { $0 + UInt64(n) }
+            offset: offset.map { $0 + UInt64(dropped) }
         )
     }
 

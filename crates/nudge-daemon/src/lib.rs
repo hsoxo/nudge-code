@@ -1881,6 +1881,9 @@ impl DaemonRuntime {
     /// the offset is coherent with the live delta stream (no snapshot↔delta
     /// race). Callers that don't need the offset (local IPC) ignore it.
     async fn terminal_snapshot(&self, tab_id: &str) -> Result<(v1::TerminalSnapshot, u64)> {
+        // First pass reads only the plain text to refresh agent status; the
+        // authoritative snapshot (contents + offset + state_frame, all coherent)
+        // is taken under a fresh lock below.
         let agent_text = {
             let ptys = self.ptys.lock().await;
             let runtime_tab = ptys
