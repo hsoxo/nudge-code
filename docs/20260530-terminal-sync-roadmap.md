@@ -1,0 +1,258 @@
+# Terminal Sync Roadmap
+
+- **Date:** 2026-05-30
+- **Status:** Proposed (planning doc — no code changed yet)
+- **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
+- **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
+
+---
+
+## 1. Current architecture
+
+```
+PTY (shell) ──bytes──▶ daemon vt100 grid (nudge-terminal)
+                         │                       │
+                         │ broadcast(TerminalChange{tab_id, bytes})
+                         ▼
+              relay loop (nudge-daemon/src/lib.rs ~2585-2663)
+                 • pending_terminal_outputs: BTreeMap<tab_id, Vec<u8>>
+                 • flush every 100ms  → send delta (raw bytes, base64-in-JSON)
+                 • on overflow >64KB  → drain head, still send a delta
+                 • on broadcast Lagged→ send a snapshot
+                         │
+                    relay (WS, ephemeral) ──▶ iOS RelaySession.receiveEvent
+                         │
+                 AppModel.applyTerminalOutput / applyTerminalSnapshot
+                 • live delta: write to xterm + append to 64KB replay buffer
+                 • snapshot:   reset xterm + replay formatted dump
+                         │
+                  TerminalWebView (WKWebView) + index.html
+                 • setSnapshot / setReplayOutputBase64 / writeOutputBase64
+```
+
+Two **resync** mechanisms exist today, both unsound:
+
+1. **Visible-cell snapshot** — `contents_formatted()` of the *visible* screen only (`nudge-terminal/src/lib.rs:63`). No scrollback, no terminal modes (alt-screen, cursor-keys, bracketed-paste), no charset.
+2. **Raw byte-tail replay** — `output_tail(max_bytes)` (`nudge-pty`/`nudge-daemon`), the primary subscribe path (`AppModel.swift:723`), which starts at an **arbitrary byte offset** and is replayed into a freshly-reset xterm as if it were complete state.
+
+Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollback = 0`, replay buffer `64KB` on both iOS (`maxReplayOutputBytes`) and JS.
+
+---
+
+## 2. Problem summary (merged findings)
+
+**Root cause:** the stream has *no per-tab contract* (no epoch/offset), and "resync" is either visible-only or a raw mid-stream tail. Bytes are truncated at several points and can be cut mid-escape-sequence. That produces 混乱 (garbling/divergence) on bursts, packet loss, reconnect, resize, and alt-screen transitions. Latency is a separate, simpler problem (the fixed 100ms flush).
+
+| ID | Sev | Issue | Where |
+|----|-----|-------|-------|
+| **R1** | HIGH | Unsafe resync: subscribe/reconnect replays a raw byte **tail** (arbitrary start) as if it were full state | `AppModel.swift:723`, `index.html:257` |
+| **R2** | HIGH | Truncation cuts mid-sequence: overflow drain / PTY tail cap / replay trims can split UTF-8/CSI/OSC/SGR/alt-screen | `lib.rs:2601`, `nudge-pty:167`, `AppModel.swift:892`, `index.html:244` |
+| **R3** | HIGH | Snapshot has no mode state: visible cells only; no alt-screen/modes/charset → post-reset deltas misread | `nudge-terminal:63`, `index.html:257` |
+| **R4** | HIGH | Snapshot↔live race: independent counters (`replayOutputSequence` vs `outputSequence`), no shared offset → an old snapshot can clobber newer output | `AppModel.swift:818/836`, `TerminalWorkspaceView.swift:490` |
+| **R5** | HIGH | No gap detection: deltas carry only `tabId`+`bytes`; relay/WS loss is invisible | `lib.rs:3206` |
+| **R6** | HIGH | Burst overflow sends a partial delta instead of a snapshot | `lib.rs:2599-2646` |
+| **P1** | HIGH | Fixed 100ms flush = local-echo lag | `lib.rs:2586` |
+| **M1** | MED | Grid `scrollback=0`; resyncs collapse history | `nudge-terminal:36` |
+| **M2** | MED | Resize: no reflow + no post-resize snapshot → stale bytes at new geometry | `nudge-terminal:49`, `lib.rs:2074` |
+| **M3** | MED | Daemon `vt100` vs phone `xterm.js` are two divergent emulators | `nudge-terminal:40`, `index.html:66` |
+| **M4** | MED | Background (non-focused) tabs flush at focused-tab cadence | `lib.rs:2644` |
+| **L1** | LOW | base64-in-JSON-in-WS, doubled under E2E | `lib.rs:3209`, `e2e.rs:184` |
+| **L2** | LOW | iOS re-base64 of 64KB/delta (O(n²)); JS per-byte buffers | `AppModel.swift:831`, `index.html:238` |
+| **L3** | LOW | Placeholder text persists on the tail-replay path | `AppModel.swift:825` |
+
+---
+
+## 3. Target model & design principles
+
+1. **Per-tab stream contract.** Every tab has a monotonic `(epoch, offset)`. Deltas are `{epoch, offset, bytes}`; snapshots declare the `(epoch, offset)` they represent. The phone tracks the next expected offset.
+2. **Truncation/gap ⇒ snapshot, never a partial delta.** Any time the daemon cannot send a contiguous byte run (overflow, broadcast lag, resize, alt-screen change) it bumps the epoch and sends a complete state frame.
+3. **Snapshots are complete, restorable state** (screen + cursor + SGR + modes + alt-screen + bounded scrollback) — not visible cells, not a raw tail.
+4. **Idempotent, ordered apply.** The phone applies a delta only if it continues the stream (`epoch` matches, `offset == next`); a snapshot resets the baseline and discards anything older.
+5. **Latency is adaptive.** Echo flushes immediately when idle; coalescing only kicks in under sustained load.
+6. **One authoritative state model** (long-term): eliminate daemon-vs-phone emulator divergence.
+
+---
+
+## 4. Iteration plan
+
+Sequenced **correctness → latency → efficiency**, with the cheap high-value wins pulled into Phase 0. Each phase ships and verifies independently.
+
+### Phase 0 — Quick wins (effort: S, ~1 day, no protocol change)
+
+**Goal:** stop the most common garbling and the worst typing lag with localized changes.
+**Findings:** R6, R2 (daemon side), L3, P1.
+
+**0.1 Overflow → snapshot (R6, R2-daemon)** — `nudge-daemon/src/lib.rs` relay loop (~2585-2663).
+- Add a per-tab dirty set alongside the pending map:
+  ```rust
+  let mut pending_terminal_outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+  let mut snapshot_required: HashSet<String> = HashSet::new();
+  ```
+- On `terminal_changes.recv()` overflow (currently `output.drain(..overflow)` at ~2599-2602): **clear** the buffer and mark the tab instead of draining the head:
+  ```rust
+  if output.len() > 64 * 1024 {
+      output.clear();
+      snapshot_required.insert(change.tab_id.clone());
+  }
+  ```
+- On flush (~2643-2662): for the union of `outputs.keys()` and `snapshot_required`, send a snapshot when the tab is in `snapshot_required` (or `data.is_empty()`), else a delta; drain `snapshot_required` as you go. Reuse `live_terminal_snapshot_payload`.
+- On `Lagged` (~2604) also insert into `snapshot_required` (it already forces an empty entry → snapshot; make it explicit).
+
+**0.2 Clear placeholder on any output (L3)** — `AppModel.swift` `applyTerminalOutput` (~823-838): set `tab.previewText = ""` in **both** the `isReplay` and live branches (today only the formatted-snapshot path clears it).
+
+**0.3 Adaptive flush (P1)** — `nudge-daemon/src/lib.rs:2586`.
+- Replace the single 100ms tick with a fast floor + immediate-on-idle:
+  ```rust
+  let min_interval = Duration::from_millis(env_or(16)); // ~60fps burst floor
+  let mut flush_timer = interval(min_interval);
+  flush_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+  let mut last_flush = Instant::now()
+      .checked_sub(min_interval).unwrap_or_else(Instant::now);
+  ```
+  In the `terminal_changes.recv()` arm, after appending: if `last_flush.elapsed() >= min_interval` and pending is non-empty, **flush now** (idle keystroke → ~0ms). Otherwise the `flush_timer` tick coalesces the burst. Set `last_flush = Instant::now()` on every flush.
+- Keep 0.1 so bursts become snapshots, not 64KB deltas at 60fps.
+- Make `min_interval` an env knob (`NUDGE_TERMINAL_FLUSH_MS`) for tuning.
+
+**Tests / verify**
+- Daemon unit test: feed >64KB in one window → assert a snapshot payload (not a delta) is produced for that tab; `Lagged` → snapshot.
+- Manual on-device: `yes`/`cat bigfile` stay coherent; typing echo feels instant (measure round-trip before/after).
+
+**Risk:** low. 0.3 timing is best validated on-device; gate `min_interval` behind an env var.
+
+---
+
+### Phase 1 — Stream contract + safe resync (effort: M–L) — *the backbone*
+
+**Goal:** give every tab a `(epoch, offset)` so loss/reorder is detectable and resync is a real snapshot, not a raw tail.
+**Findings:** R1, R4, R5, R2 (general).
+
+**1.1 Protocol (`nudge-protocol`)** — additive, backward-compatible fields:
+- Delta payload (`terminal_output_json`): add `epoch: u64`, `offset: u64` (byte position of the *first* byte in this delta within the epoch).
+- Snapshot payload (`terminal_snapshot_json`): add `epoch: u64`, `offset: u64` (the stream position the snapshot represents; deltas after it have `offset >= this`).
+- Add a daemon→phone `capabilities`/`protocolVersion` marker so an older phone that ignores the fields still works (degrades to "no gap detection").
+
+**1.2 Daemon (`nudge-daemon/src/lib.rs`)**
+- Track per-tab `(epoch: u64, sent_offset: u64)` in the relay loop (e.g. `BTreeMap<String, StreamPos>`).
+- Delta: emit `{epoch, offset: sent_offset, bytes}`; then `sent_offset += bytes.len()`.
+- Snapshot (initial / overflow / Lagged / resize / alt-screen): `epoch += 1; sent_offset = 0;` emit `{epoch, offset: 0, ...state...}`.
+- Wire 0.1's `snapshot_required` into the epoch bump.
+
+**1.3 iOS (`RelayClient.swift` decode, `AppModel.swift` apply)**
+- Decode `epoch`/`offset` on both event types.
+- Track per-tab `expected: (epoch, nextOffset)`.
+- On **delta**:
+  - `epoch == expected.epoch && offset == nextOffset` → apply, `nextOffset += len`.
+  - `offset < nextOffset` (duplicate) → drop.
+  - gap (`offset > nextOffset`) or `epoch != expected.epoch` → **request a snapshot** and ignore deltas until it arrives.
+- On **snapshot**: adopt `(epoch, offset)`; reset render; `nextOffset = offset`; discard buffered deltas with `epoch < snapshot.epoch || offset < snapshot.offset` (fixes R4).
+- This replaces the ad-hoc `replayOutputSequence`/`outputSequence` ordering with offset semantics (keep the WebView's sequence counters as a render-dedupe detail, driven by the new logic).
+
+**1.4 Retire tail-as-state (R1)** — `applyRelaySessionEvent` `.sessionState` (`AppModel.swift:712-714`): request a **snapshot** per tab (not `requestTerminalOutput`/raw tail) for the initial state. Keep the raw tail only as optional scrollback *below* the snapshot (Phase 2), never as the primary reconstruction.
+
+**Tests / verify**
+- Daemon: epoch/offset monotonic; snapshot resets offset; overflow bumps epoch.
+- iOS: gap → snapshot request; duplicate dropped; stale snapshot discarded; in-order apply.
+- Integration (relay or a mock transport): drop/reorder/dup deltas → phone self-heals to a correct frame.
+
+**Risk:** medium — protocol + both ends. Keep fields additive; feature-flag gap detection so it can be toggled if a bug appears.
+
+---
+
+### Phase 2 — Complete state frames (effort: M)
+
+**Goal:** snapshots restore *full* terminal state so post-resync deltas are interpreted correctly.
+**Findings:** R3, M1, and the alt-screen boundary.
+
+**2.1 `nudge-terminal` — `state_frame()`** (new) producing bytes that, written into a freshly-reset xterm, reconstruct: reset → mode-setters (alt-screen `?1049h`, application cursor `?1h`, bracketed paste `?2004h`, mouse modes, charset) → SGR → screen contents (`contents_formatted`) → cursor position → cursor visibility.
+- **Spike first:** confirm `vt100::Screen` (0.16) exposes the modes (`alternate_screen()`, `application_cursor()`, `application_keypad()`, `bracketed_paste()`, `mouse_protocol_mode()`, `hide_cursor()`). If a mode isn't exposed, track it in `TerminalGrid` by sniffing the byte stream in `process()` (watch `?1049h/l`, `?1h/l`, `?2004h/l`, etc.).
+- Bounded **scrollback** (M1): construct `vt100::Parser::new(rows, cols, N)` (e.g. 1000–2000) and include the last N rows in the state frame if vt100 exposes scrollback rows; otherwise document the cap and keep scrollback in the replay buffer only.
+
+**2.2 Daemon** — snapshot payload carries `state_frame()` instead of bare `contents_formatted`. Detect **alt-screen enter/leave** (mode flip in `process`/`refresh`) and force a snapshot (epoch bump) on transition.
+
+**2.3 iOS / JS** — `applyTerminalSnapshot` feeds the state frame through the replay path; `index.html` `resetAndReplay` already does `term.reset()` then writes — ensure the state frame's leading reset+mode-setters run before any live delta resumes.
+
+**Tests / verify**
+- `nudge-terminal`: `state_frame()` round-trips alt-screen + SGR + cursor through a second `vt100::Parser`.
+- On-device: start Claude/Codex (alt-screen), force a resync mid-session → screen + colors + cursor intact; leave alt-screen → snapshot fires, normal screen restored cleanly.
+
+**Risk:** medium — depends on the vt100 spike. Fallback (stream-sniffed modes) is well-bounded.
+
+---
+
+### Phase 3 — Resize / reflow resync (effort: S–M)
+
+**Goal:** no stale/mis-wrapped content after rotation, font change, or width change.
+**Findings:** M2, plus A3/reflow.
+
+**3.1 Post-resize snapshot** — `nudge-daemon` `set_phone_profile` (~2074): after resizing the PTY + grid, bump the epoch and send a state-frame snapshot at the new geometry for affected tabs (the shell also redraws via `SIGWINCH`, so the snapshot reflects the redrawn state).
+**3.2 Pin cols** — the phone measures cols and reports; the daemon resizes the PTY to match so reflow is decided once, on the computer.
+**3.3 Reflow (longer-term)** — `nudge-terminal:49` rebuilds the parser from `contents_formatted` (no reflow). Evaluate a newer `vt100` with a resize API, or a reflow-aware grid, for scrollback reflow. Track as a spike; the post-resize snapshot covers the common case meanwhile.
+
+**Tests / verify:** rotate / change font with a wrapped-line buffer → no duplicated or mis-wrapped lines; cursor lands correctly.
+
+**Risk:** low–medium.
+
+---
+
+### Phase 4 — Transport + buffer efficiency (effort: M)
+
+**Goal:** cut bandwidth/CPU under bursts and for multi-tab.
+**Findings:** L1, L2, M4.
+
+**4.1 Binary frames (L1)** — send deltas as binary WS frames (frame the E2E ciphertext as binary instead of base64-in-JSON). Touches `nudge-daemon`, the relay routing, and the iOS WS transport — confirm the relay can route binary frames; keep JSON for control messages.
+**4.2 iOS/JS buffers (L2)** — iOS: store the replay buffer as `Data` and base64 only when handing to the WebView (`AppModel.swift:831/887/895`). JS: replace per-byte `base64ToBytes`/`appendBounded` with chunked `Uint8Array` ring buffers (`index.html:226/238/244`).
+**4.3 Focused-tab priority (M4)** — phone sends a "focused tab" control hint; daemon flushes the focused tab at the fast floor and background tabs slowly (e.g. 250ms) or snapshot-only.
+
+**Tests / verify:** bandwidth + CPU benchmark on a burst (`cat` of a large file) before/after; background tabs idle on the wire.
+
+**Risk:** medium — binary framing is the riskiest part (relay protocol). Can ship 4.2/4.3 independently of 4.1.
+
+---
+
+### Phase 5 — One authoritative state model (effort: L, strategic — *decision required*)
+
+**Goal:** eliminate the daemon-`vt100`-vs-phone-`xterm` divergence class (M3) at the root.
+**Options:**
+- **(a) Daemon-authoritative render frames + diff.** The daemon's `render_frame()` (already used for the CLI client, `nudge-terminal:67`) is the source of truth; the phone applies *frames/diffs*, not raw PTY bytes. Subsumes most earlier fixes (state is always the daemon's) but changes the streaming model (mosh-style diffing to keep it cheap).
+- **(b) Guaranteed-matching xterm.** Keep raw-byte streaming but pin the phone xterm config/capabilities to match `vt100` exactly. Cheaper, but fragile to any escape-support divergence.
+
+Recommend a short spike on (a) before committing; it is the principled end-state but a meaningful re-architecture.
+
+---
+
+## 5. Testing strategy (cross-cutting)
+
+- **Unit:** daemon stream-position bookkeeping (epoch/offset, overflow→snapshot, resize→snapshot); `nudge-terminal` `state_frame()` round-trip; iOS gap-detection/discard logic.
+- **Property/fuzz:** feed random byte streams + random cut points; assert the phone never diverges after a forced resync (compare phone xterm buffer to daemon grid `contents()`).
+- **Integration (mock transport):** drop / reorder / duplicate deltas → self-heal.
+- **On-device (idb + simulator):** typing-echo latency; `yes`/`cat` coherence; alt-screen (Claude/Codex) resync; rotate/font resize. (Bring the daemon/relay back up — note the binding URL is loopback after the last env change.)
+
+---
+
+## 6. Open decisions (confirm before/while building)
+
+1. **Protocol evolution:** additive optional fields + capability marker (recommended) vs. a `v2` payload. Affects mixed-version daemon/phone.
+2. **vt100 0.16 capabilities (Phase 2):** does `Screen` expose all needed modes/scrollback? If not, adopt stream-sniffed mode tracking in `TerminalGrid`.
+3. **Scrollback depth (M1):** target rows (e.g. match xterm's 2000) vs. memory on the daemon.
+4. **Binary frames (Phase 4.1):** is changing the relay wire format acceptable, or keep base64 and only fix buffers (4.2)?
+5. **Phase 5 direction:** render-frames (a) vs. matched-emulator (b) — strategic.
+
+---
+
+## 7. Suggested cut line
+
+Phases **0–2** eliminate essentially all garbling and the worst latency — the highest-value, lowest-regret work. **3–4** are polish/scale. **5** is a strategic call to make once 0–2 are stable.
+
+## Appendix — file/function index
+
+- Daemon stream loop / flush / overflow / snapshot-vs-delta: `crates/nudge-daemon/src/lib.rs:2585-2663`
+- Snapshot/output payloads: `crates/nudge-daemon/src/lib.rs:3092-3240`
+- `set_phone_profile` (resize): `crates/nudge-daemon/src/lib.rs:~2074`
+- E2E envelope: `crates/nudge-daemon/src/e2e.rs:~184`
+- Grid (process/snapshot/render_frame/resize, scrollback arg): `crates/nudge-terminal/src/lib.rs`
+- PTY output tail: `crates/nudge-pty/src/lib.rs:~165`
+- iOS apply (snapshot/output, replay cap): `apps/mobile-ios/NudgeMobile/Sources/NudgeMobile/AppModel.swift:~806-895`
+- iOS session loop / events: `apps/mobile-ios/NudgeMobile/Sources/NudgeMobile/AppModel.swift:~682-726`
+- iOS WebView bridge (Coordinator): `apps/mobile-ios/NudgeMobile/Sources/NudgeMobile/TerminalWorkspaceView.swift:~379-560`
+- xterm JS bridge: `apps/mobile-ios/NudgeMobile/Resources/TerminalWeb/index.html`
+- Relay client decode / errors: `apps/mobile-ios/NudgeMobile/Sources/NudgeMobile/RelayClient.swift`
