@@ -2584,8 +2584,14 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     let mut e2e_session: Option<RelayE2ESession> = None;
     let mut pending_terminal_outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut snapshot_required: HashSet<String> = HashSet::new();
-    let mut terminal_flush = interval(Duration::from_millis(100));
+    let min_interval = relay_terminal_flush_interval();
+    let mut terminal_flush = interval(min_interval);
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Seed last_flush in the past so the first change after a quiet period
+    // flushes immediately (immediate-on-idle, handled in the recv arm).
+    let mut last_flush = Instant::now()
+        .checked_sub(min_interval)
+        .unwrap_or_else(Instant::now);
 
     loop {
         tokio::select! {
@@ -2599,6 +2605,23 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                             change.tab_id,
                             &change.data,
                         );
+                        // Immediate-on-idle: a lone keystroke/output that lands
+                        // after a quiet period echoes right away (~0 added
+                        // latency); sustained bursts stay buffered and coalesce
+                        // on the timer tick below.
+                        if last_flush.elapsed() >= min_interval {
+                            last_flush = Instant::now();
+                            flush_pending_terminal_outputs(
+                                runtime,
+                                binding,
+                                &bound_phone_id,
+                                &mut websocket,
+                                e2e_session.as_mut(),
+                                std::mem::take(&mut pending_terminal_outputs),
+                                std::mem::take(&mut snapshot_required),
+                            )
+                            .await?;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // We dropped broadcast items, so the per-tab byte stream
@@ -2643,6 +2666,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                 }
             }
             _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() || !snapshot_required.is_empty() => {
+                last_flush = Instant::now();
                 flush_pending_terminal_outputs(
                     runtime,
                     binding,
@@ -3085,6 +3109,21 @@ fn relay_message_json(
 /// Per-tab cap on buffered terminal bytes between flushes. Past this we can no
 /// longer ship a contiguous delta, so the tab resyncs with a full snapshot.
 const RELAY_TERMINAL_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// Coalescing floor between relay terminal flushes (~60fps burst floor),
+/// overridable via `NUDGE_TERMINAL_FLUSH_MS` for on-device latency tuning.
+fn relay_terminal_flush_interval() -> Duration {
+    parse_flush_interval(std::env::var("NUDGE_TERMINAL_FLUSH_MS").ok())
+}
+
+fn parse_flush_interval(raw: Option<String>) -> Duration {
+    const DEFAULT_MS: u64 = 16;
+    let ms = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_MS);
+    Duration::from_millis(ms)
+}
 
 /// Buffer a terminal change for `tab_id`. If the buffer exceeds the relay cap
 /// the byte run is no longer contiguous, so we drop the buffered bytes and flag
@@ -4606,6 +4645,19 @@ mod tests {
             "tab",
             pending.get("tab").unwrap()
         ));
+    }
+
+    #[test]
+    fn flush_interval_parses_and_falls_back() {
+        assert_eq!(parse_flush_interval(None), Duration::from_millis(16));
+        assert_eq!(parse_flush_interval(Some("8".into())), Duration::from_millis(8));
+        assert_eq!(
+            parse_flush_interval(Some("  33 ".into())),
+            Duration::from_millis(33)
+        );
+        // Zero and garbage fall back to the default — never a 0ms busy-loop.
+        assert_eq!(parse_flush_interval(Some("0".into())), Duration::from_millis(16));
+        assert_eq!(parse_flush_interval(Some("nope".into())), Duration::from_millis(16));
     }
 
     #[test]
