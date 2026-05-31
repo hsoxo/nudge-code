@@ -1768,6 +1768,15 @@ impl DaemonRuntime {
                 ptys.remove(index);
             }
         }
+        // Don't leave focus pointing at a closed tab: tab_is_focus_filtered would
+        // then skip EVERY surviving tab and black-hole all live output until the
+        // phone re-sends focus. Clearing reverts to stream-all, which self-heals.
+        {
+            let mut focused = self.focused_tab.lock().await;
+            if focused.as_deref() == Some(tab_id) {
+                *focused = None;
+            }
+        }
         Ok(self.session_state().await)
     }
 
@@ -2632,6 +2641,10 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     let mut e2e_session: Option<RelayE2ESession> = None;
     let mut pending_terminal_outputs: BTreeMap<String, PendingOutput> = BTreeMap::new();
     let mut snapshot_required: HashSet<String> = HashSet::new();
+    // Start each relay session streaming every tab; focus from a prior session
+    // could point at a now-closed/different tab and would background-filter the
+    // whole stream. The phone re-sends focus right after it syncs sessionState.
+    runtime.set_focused_tab(None).await;
     let min_interval = relay_terminal_flush_interval();
     let mut terminal_flush = interval(min_interval);
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -4566,6 +4579,39 @@ mod tests {
         .await;
         assert!(response.ok);
         assert_eq!(response.payload["accepted"], true);
+        assert_eq!(runtime.focused_tab().await, None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn closing_the_focused_tab_clears_focus() {
+        // Regression (Phase 3-5 review): closing the focused tab must clear focus,
+        // else tab_is_focus_filtered skips EVERY surviving tab and black-holes all
+        // live output until the phone re-sends focus.
+        let _env = DaemonPlanEnvGuard::set("PAID");
+        let root = std::env::temp_dir().join(format!(
+            "nudge-close-focus-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let mut session = MachineSession::new_default();
+        session.apply_entitlement_override();
+        session.create_tab("tab-2".to_string()).expect("second tab");
+        session.create_tab("tab-3".to_string()).expect("third tab");
+        let runtime = DaemonRuntime::new(StateStore::new(state_path), session, socket_path);
+
+        runtime.set_focused_tab(Some("default".to_string())).await;
+
+        // Closing a NON-focused tab leaves focus intact.
+        runtime.close_tab("tab-2").await.expect("close non-focused tab");
+        assert_eq!(runtime.focused_tab().await, Some("default".to_string()));
+
+        // Closing the FOCUSED tab clears focus (revert to stream-all so the
+        // surviving tabs aren't black-holed).
+        runtime.close_tab("default").await.expect("close focused tab");
         assert_eq!(runtime.focused_tab().await, None);
 
         let _ = fs::remove_dir_all(&root);
