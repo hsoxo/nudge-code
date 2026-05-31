@@ -3146,10 +3146,12 @@ fn relay_terminal_flush_interval() -> Duration {
 
 fn parse_flush_interval(raw: Option<String>) -> Duration {
     const DEFAULT_MS: u64 = 16;
+    const MAX_MS: u64 = 1000;
     let ms = raw
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
-        .unwrap_or(DEFAULT_MS);
+        .unwrap_or(DEFAULT_MS)
+        .min(MAX_MS);
     Duration::from_millis(ms)
 }
 
@@ -4760,6 +4762,8 @@ mod tests {
         // Zero and garbage fall back to the default — never a 0ms busy-loop.
         assert_eq!(parse_flush_interval(Some("0".into())), Duration::from_millis(16));
         assert_eq!(parse_flush_interval(Some("nope".into())), Duration::from_millis(16));
+        // An absurdly large value is clamped so the terminal can't be frozen.
+        assert_eq!(parse_flush_interval(Some("600000".into())), Duration::from_millis(1000));
     }
 
     #[test]
