@@ -718,6 +718,81 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("abcdef".utf8).base64EncodedString())
     }
 
+    @Test func appModelReRequestsSnapshotAfterFailedSnapshotRequest() async throws {
+        // C1 regression: a snapshot request that throws must clear the awaiting
+        // guard so the next gap re-requests, rather than silently dropping every
+        // subsequent delta and freezing the tab.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 50)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "Y", offset: 60))
+        ], suspendWhenEmpty: true)
+        session.failSnapshotRequests = true
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        // sessionState requests one snapshot (call 1), then BOTH gaps re-request
+        // because the failed send clears the awaiting guard -> 3 total. Without
+        // the fix the tab wedges after the first gap and this never reaches 3.
+        try await waitUntil { session.snapshotRequests.count >= 3 }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.snapshotRequests == ["default", "default", "default"])
+    }
+
+    @Test func appModelTracksOffsetPerTabIndependently() async throws {
+        let machine = activeMachine()
+        func tab(_ id: String) -> TerminalTab {
+            TerminalTab(
+                id: id,
+                title: id,
+                state: .running,
+                widthMode: .phone,
+                profile: TerminalProfile(rows: 32, cols: 48),
+                agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+                previewText: ""
+            )
+        }
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [tab("a"), tab("b")])),
+            .terminalSnapshot(TerminalSnapshot(tabID: "a", profile: TerminalProfile(rows: 32, cols: 48), text: "", offset: 0)),
+            .terminalSnapshot(TerminalSnapshot(tabID: "b", profile: TerminalProfile(rows: 32, cols: 48), text: "", offset: 0)),
+            // Interleaved deltas on two independent offset axes.
+            .terminalOutput(TerminalOutput(tabID: "a", text: "AA", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "b", text: "BB", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "a", text: "aa", offset: 2)),
+            .terminalOutput(TerminalOutput(tabID: "b", text: "bb", offset: 2))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first(where: { $0.id == "a" })?.outputSequence == 2
+                && model.tabsByMachine[machine.id]?.first(where: { $0.id == "b" })?.outputSequence == 2
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        let a = model.tabsByMachine[machine.id]?.first(where: { $0.id == "a" })
+        let b = model.tabsByMachine[machine.id]?.first(where: { $0.id == "b" })
+        // Each tab applied its own contiguous stream with no cross-tab false gap.
+        #expect(a?.replayOutputBase64 == Data("AAaa".utf8).base64EncodedString())
+        #expect(b?.replayOutputBase64 == Data("BBbb".utf8).base64EncodedString())
+        #expect(session.snapshotRequests.sorted() == ["a", "b"])
+    }
+
     @Test func appModelAppliesLiveAgentStatusWithoutSnapshotRequest() async throws {
         let machine = activeMachine()
         let remoteTab = TerminalTab(
@@ -1655,6 +1730,11 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
 
     var suspendWhenEmpty: Bool
     var errorWhenReceiving: Error?
+    // When true, requestTerminalSnapshot records the attempt then throws — used
+    // to verify the phone re-requests (doesn't wedge) when a snapshot send fails.
+    var failSnapshotRequests = false
+
+    struct SnapshotRequestFailure: Error {}
 
     init(events: [RelaySessionEvent] = [], suspendWhenEmpty: Bool = false, errorWhenReceiving: Error? = nil) {
         self.events = events
@@ -1668,6 +1748,9 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
 
     func requestTerminalSnapshot(tabID: String) async throws {
         snapshotRequests.append(tabID)
+        if failSnapshotRequests {
+            throw SnapshotRequestFailure()
+        }
     }
 
     func requestTerminalOutput(tabID: String, maxBytes: Int) async throws {

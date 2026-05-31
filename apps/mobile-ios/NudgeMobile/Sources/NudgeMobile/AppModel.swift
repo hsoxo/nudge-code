@@ -921,9 +921,16 @@ final class AppModel {
             return
         }
         terminalAwaitingSnapshotTabKeys.insert(key)
-        // Best-effort, matching the sessionState handler: a tab that cannot
-        // currently stream must not throw and tear down the whole relay session.
-        try? await session.requestTerminalSnapshot(tabID: tabID)
+        do {
+            try await session.requestTerminalSnapshot(tabID: tabID)
+        } catch {
+            // The request never reached the daemon, so no snapshot will arrive to
+            // clear the guard. Drop it so the next delta re-requests rather than
+            // wedging the tab in a permanent silent drop (the throw is expected for
+            // a tab that cannot currently stream — e.g. mid-restart). Best-effort,
+            // like the sessionState handler, but without the freeze.
+            terminalAwaitingSnapshotTabKeys.remove(key)
+        }
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
