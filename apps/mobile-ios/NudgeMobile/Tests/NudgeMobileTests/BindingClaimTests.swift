@@ -810,6 +810,41 @@ struct BindingClaimTests {
         #expect(session.phoneProfiles.contains(TerminalProfile(rows: 40, cols: 60)))
     }
 
+    @Test func appModelSendsFocusedTabHintWhenSelectingTab() async throws {
+        // Phase 4.3: the phone tells the daemon which tab is focused so it streams
+        // live output only for that tab. The attach reports the initial focus, and
+        // selecting another tab pushes the new focus over the live session.
+        let machine = activeMachine()
+        let defaultTab = offsetStreamTab()
+        let secondTab = TerminalTab(
+            id: "tab-2",
+            title: "shell",
+            state: .running,
+            widthMode: .phone,
+            profile: TerminalProfile(rows: 32, cols: 48),
+            agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+            previewText: "$ "
+        )
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [defaultTab, secondTab]))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        // Attaching reports the initial focus (the first/selected tab).
+        try await waitUntil { session.focusedTabRequests == ["default"] }
+
+        // Selecting a background tab pushes its id as the new focus.
+        model.selectTab(secondTab)
+        try await waitUntil { session.focusedTabRequests == ["default", "tab-2"] }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(model.selectedTabID == "tab-2")
+        #expect(session.focusedTabRequests == ["default", "tab-2"])
+    }
+
     @Test func appModelReRequestsSnapshotWhenStreamGoesSilentAfterLostReply() async throws {
         // M-1 (round 3): the lost-reply re-request must NOT depend on a follow-up
         // delta. After the gap's request succeeds but the reply is lost and the
@@ -1896,6 +1931,7 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
     var inputRequests: [TerminalInputRequest] = []
     var phoneProfiles: [TerminalProfile] = []
     var widthModeRequests: [WidthModeRequest] = []
+    var focusedTabRequests: [String?] = []
     var closed = false
 
     var suspendWhenEmpty: Bool
@@ -1972,6 +2008,10 @@ private final class RecordingRelaySession: RelaySession, @unchecked Sendable {
             widthMode: widthMode,
             computerProfile: computerProfile
         ))
+    }
+
+    func setFocusedTab(tabID: String?) async throws {
+        focusedTabRequests.append(tabID)
     }
 
     func receiveEvent() async throws -> RelaySessionEvent {

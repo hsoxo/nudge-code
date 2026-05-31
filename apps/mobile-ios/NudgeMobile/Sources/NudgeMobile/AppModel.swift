@@ -187,6 +187,13 @@ final class AppModel {
 
     func selectTab(_ tab: TerminalTab) {
         selectedTabID = tab.id
+        // Phase 4.3: tell the daemon which tab is visible so it only streams live
+        // output for the focused tab; background tabs re-baseline via the gap→
+        // snapshot path when refocused. Fire-and-forget from this sync entry point.
+        let tabID = tab.id
+        Task { @MainActor [weak self] in
+            await self?.sendFocusedTab(tabID)
+        }
     }
 
     func updatePhoneProfile(_ profile: TerminalProfile) async {
@@ -752,6 +759,11 @@ final class AppModel {
                 machines[index].connectionState = .online
                 machines[index].lastSeenText = "relay session synced"
             }
+            // Phase 4.3: applyRemoteSessionState (re)sets selectedTabID after an
+            // attach/reconnect — tell the daemon the focused tab so it streams only
+            // that tab. Best-effort: a stale/failed send just means the daemon
+            // keeps streaming all tabs (the backward-compatible default).
+            await sendFocusedTab(selectedTabID)
             for tab in state.tabs {
                 // Initial state is a full snapshot, not a raw byte tail (R1): the
                 // snapshot is complete restorable state and carries the stream
@@ -990,6 +1002,22 @@ final class AppModel {
             self.terminalResyncRequestedAt[key] = nil
             await self.requestResyncSnapshot(key: key, tabID: tabID, session: session)
         }
+    }
+
+    /// Phase 4.3: best-effort tell the live daemon session which tab is focused so
+    /// it only streams live output for that tab (background tabs re-baseline via
+    /// the gap→snapshot path on refocus). Only fires over a session that owns the
+    /// focused tab's machine, mirroring the resize re-baseline guard in
+    /// updatePhoneProfile; a send failure is harmless (the daemon keeps streaming
+    /// the previous focus, or all tabs if none was set).
+    private func sendFocusedTab(_ tabID: String?) async {
+        guard let relaySession,
+              let machineID = relaySessionMachineID,
+              selectedMachineID == machineID
+        else {
+            return
+        }
+        try? await relaySession.setFocusedTab(tabID: tabID)
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {

@@ -317,6 +317,14 @@ enum RelayControlRequest {
         #[serde(rename = "computerCols")]
         computer_cols: u32,
     },
+    SetFocusedTab {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        /// The tab the phone is currently viewing. `None` clears the focus, which
+        /// reverts to streaming every tab (legacy phones never send this).
+        #[serde(rename = "tabId", default)]
+        tab_id: Option<String>,
+    },
     CreateTab {
         #[serde(rename = "requestId")]
         request_id: String,
@@ -1643,6 +1651,11 @@ struct DaemonRuntime {
     audit_sink: Option<DaemonAuditSink>,
     started_at: Instant,
     socket_path: PathBuf,
+    // The tab the phone is currently viewing, if it told us. The relay loop only
+    // streams live terminal output for this tab; background tabs re-baseline via
+    // a snapshot when they regain focus (their phone-side offset goes stale).
+    // `None` means stream every tab (legacy phones never set it).
+    focused_tab: Arc<Mutex<Option<String>>>,
 }
 
 impl DaemonRuntime {
@@ -1668,6 +1681,7 @@ impl DaemonRuntime {
             audit_sink: DaemonAuditSink::from_env(),
             started_at: Instant::now(),
             socket_path,
+            focused_tab: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2275,6 +2289,14 @@ impl DaemonRuntime {
         *self.relay_state.lock().await = state;
     }
 
+    async fn set_focused_tab(&self, tab_id: Option<String>) {
+        *self.focused_tab.lock().await = tab_id;
+    }
+
+    async fn focused_tab(&self) -> Option<String> {
+        self.focused_tab.lock().await.clone()
+    }
+
     async fn mark_relay_message(&self) {
         let mut relay_state = self.relay_state.lock().await;
         relay_state.last_message_at = Some(now_string());
@@ -2638,6 +2660,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                         // on the timer tick below.
                         if last_flush.elapsed() >= min_interval {
                             last_flush = Instant::now();
+                            let focused = runtime.focused_tab().await;
                             flush_pending_terminal_outputs(
                                 runtime,
                                 binding,
@@ -2646,6 +2669,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                                 e2e_session.as_mut(),
                                 std::mem::take(&mut pending_terminal_outputs),
                                 std::mem::take(&mut snapshot_required),
+                                focused,
                             )
                             .await?;
                         }
@@ -2694,6 +2718,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
             }
             _ = terminal_flush.tick(), if !pending_terminal_outputs.is_empty() || !snapshot_required.is_empty() => {
                 last_flush = Instant::now();
+                let focused = runtime.focused_tab().await;
                 flush_pending_terminal_outputs(
                     runtime,
                     binding,
@@ -2702,6 +2727,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                     e2e_session.as_mut(),
                     std::mem::take(&mut pending_terminal_outputs),
                     std::mem::take(&mut snapshot_required),
+                    focused,
                 )
                 .await?;
             }
@@ -3038,6 +3064,10 @@ async fn handle_relay_control_request(
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
         }
+        RelayControlRequest::SetFocusedTab { request_id, tab_id } => {
+            runtime.set_focused_tab(tab_id).await;
+            RelayControlResponse::ok(request_id, json!({"accepted": true}))
+        }
         RelayControlRequest::CreateTab {
             request_id,
             title,
@@ -3210,10 +3240,22 @@ fn tab_requires_snapshot(
     snapshot_required.contains(tab_id) || pending.is_empty()
 }
 
+/// Whether this tab's pending output should be skipped on flush because the phone
+/// is focused on a different tab. When no focus is set (`None`) every tab streams
+/// as before; a skipped tab drops its delta AND its snapshot for this flush and
+/// re-baselines via the gap→snapshot path when it regains focus.
+fn tab_is_focus_filtered(focused: Option<&str>, tab_id: &str) -> bool {
+    focused.is_some_and(|f| f != tab_id)
+}
+
 /// Drain the pending terminal buffers to the phone, sending a full snapshot for
 /// any tab in `snapshot_required` (or with no buffered bytes) and an incremental
 /// delta for the rest. Shared by the coalescing timer tick and the
 /// immediate-on-idle path so both make the same snapshot-vs-delta decision.
+// The relay-send context (binding, phone id, socket, e2e session) plus the two
+// work sets and the focus filter is a wide-but-cohesive parameter list; bundling
+// it into a struct would not make the two call sites clearer.
+#[allow(clippy::too_many_arguments)]
 async fn flush_pending_terminal_outputs<S>(
     runtime: &DaemonRuntime,
     binding: &BindingState,
@@ -3222,6 +3264,7 @@ async fn flush_pending_terminal_outputs<S>(
     mut e2e_session: Option<&mut RelayE2ESession>,
     mut outputs: BTreeMap<String, PendingOutput>,
     snapshot_required: HashSet<String>,
+    focused: Option<String>,
 ) -> Result<()>
 where
     S: Sink<WebSocketMessage> + Unpin,
@@ -3234,6 +3277,14 @@ where
         outputs.entry(tab_id.clone()).or_default();
     }
     for (tab_id, pending) in outputs {
+        // Background (non-focused) tabs are skipped entirely: we drop both their
+        // pending delta and their snapshot for this flush. Their phone-side
+        // offset goes stale, so the first delta after they regain focus arrives
+        // with offset > nextOffset and the phone requests a fresh snapshot
+        // (the existing gap→snapshot re-baseline). With no focus set, stream all.
+        if tab_is_focus_filtered(focused.as_deref(), &tab_id) {
+            continue;
+        }
         let payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &pending.data) {
             live_terminal_snapshot_payload(runtime, binding, &tab_id).await
         } else {
@@ -4473,6 +4524,53 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn relay_control_set_focused_tab_updates_runtime() {
+        let _env = DaemonPlanEnvGuard::unset();
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-focused-tab-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let runtime = DaemonRuntime::new(
+            StateStore::new(state_path),
+            MachineSession::new_default(),
+            socket_path,
+        );
+
+        // No focus by default → every tab streams.
+        assert_eq!(runtime.focused_tab().await, None);
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::SetFocusedTab {
+                request_id: "focus-1".to_string(),
+                tab_id: Some("tab-2".to_string()),
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["accepted"], true);
+        assert_eq!(runtime.focused_tab().await, Some("tab-2".to_string()));
+
+        // A null tab_id clears the focus, reverting to streaming every tab.
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::SetFocusedTab {
+                request_id: "focus-2".to_string(),
+                tab_id: None,
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(response.payload["accepted"], true);
+        assert_eq!(runtime.focused_tab().await, None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn tab_launch_parses_agent_keys_case_insensitively() {
         assert_eq!(TabLaunch::parse(None), TabLaunch::Shell);
@@ -4782,6 +4880,16 @@ mod tests {
         assert!(tab_requires_snapshot(&empty, "tab", b""));
         // No flag + pending bytes is a normal delta.
         assert!(!tab_requires_snapshot(&empty, "tab", b"data"));
+    }
+
+    #[test]
+    fn focus_filter_skips_only_background_tabs() {
+        // No focus set (legacy phone) → never skip, stream every tab.
+        assert!(!tab_is_focus_filtered(None, "tab"));
+        // Focused on another tab → skip this background tab's flush.
+        assert!(tab_is_focus_filtered(Some("other"), "tab"));
+        // Focused on this tab → don't skip.
+        assert!(!tab_is_focus_filtered(Some("tab"), "tab"));
     }
 
     #[test]

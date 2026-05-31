@@ -548,6 +548,7 @@ protocol RelaySession: Sendable {
     func closeTab(tabID: String) async throws
     func restartTab(tabID: String) async throws
     func setWidthMode(tabID: String, widthMode: WidthMode, computerProfile: TerminalProfile) async throws
+    func setFocusedTab(tabID: String?) async throws
     func receiveEvent() async throws -> RelaySessionEvent
     func close()
 }
@@ -735,6 +736,15 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 computerRows: computerProfile.rows,
                 computerCols: computerProfile.cols
             )
+        )
+    }
+
+    func setFocusedTab(tabID: String?) async throws {
+        let requestID = requestIDGenerator()
+        try await rememberAndSend(
+            kind: .sessionState,
+            requestID: requestID,
+            payload: RelaySetFocusedTabPayload(requestId: requestID, tabId: tabID)
         )
     }
 
@@ -1156,6 +1166,25 @@ private struct RelaySetWidthModePayload: Encodable {
     var mode: String
     var computerRows: Int
     var computerCols: Int
+}
+
+private struct RelaySetFocusedTabPayload: Encodable {
+    let type = "set_focused_tab"
+    var requestId: String
+    /// The tab the phone is viewing, or nil to clear the focus (stream all tabs).
+    var tabId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, requestId, tabId
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(requestId, forKey: .requestId)
+        // Omit tabId when nil so the daemon decodes it as `None` (clear focus).
+        try container.encodeIfPresent(tabId, forKey: .tabId)
+    }
 }
 
 private struct RelaySocketIncoming: Decodable {
