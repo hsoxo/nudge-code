@@ -22,6 +22,10 @@ pub struct TerminalSnapshot {
     pub cols: u16,
     pub text: String,
     pub formatted: Vec<u8>,
+    /// Absolute stream offset this snapshot represents (`total_bytes` at capture
+    /// time). Deltas at a smaller offset are already included here; the phone
+    /// adopts this as its baseline and trims/drops anything earlier.
+    pub offset: u64,
 }
 
 pub struct TerminalGrid {
@@ -78,6 +82,7 @@ impl TerminalGrid {
             cols: self.size.cols,
             text: self.parser.screen().contents(),
             formatted: self.parser.screen().contents_formatted(),
+            offset: self.total_bytes,
         }
     }
 
@@ -205,6 +210,7 @@ mod tests {
         assert_eq!(snapshot.cols, 80);
         assert!(snapshot.text.contains("hello"));
         assert!(!snapshot.formatted.is_empty());
+        assert_eq!(snapshot.offset, 5, "snapshot offset is total_bytes at capture");
     }
 
     #[test]

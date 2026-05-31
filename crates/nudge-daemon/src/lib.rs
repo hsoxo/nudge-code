@@ -1876,7 +1876,11 @@ impl DaemonRuntime {
             .unwrap_or_default())
     }
 
-    async fn terminal_snapshot(&self, tab_id: &str) -> Result<v1::TerminalSnapshot> {
+    /// Returns the tab's grid snapshot together with the absolute stream
+    /// `offset` it represents, read under the same grid lock as the contents so
+    /// the offset is coherent with the live delta stream (no snapshot↔delta
+    /// race). Callers that don't need the offset (local IPC) ignore it.
+    async fn terminal_snapshot(&self, tab_id: &str) -> Result<(v1::TerminalSnapshot, u64)> {
         let agent_text = {
             let ptys = self.ptys.lock().await;
             let runtime_tab = ptys
@@ -1902,13 +1906,17 @@ impl DaemonRuntime {
             .lock()
             .expect("terminal grid lock poisoned")
             .snapshot();
-        Ok(v1::TerminalSnapshot {
-            tab_id: tab_id.to_string(),
-            rows: snapshot.rows as u32,
-            cols: snapshot.cols as u32,
-            text: snapshot.text,
-            formatted: snapshot.formatted,
-        })
+        let offset = snapshot.offset;
+        Ok((
+            v1::TerminalSnapshot {
+                tab_id: tab_id.to_string(),
+                rows: snapshot.rows as u32,
+                cols: snapshot.cols as u32,
+                text: snapshot.text,
+                formatted: snapshot.formatted,
+            },
+            offset,
+        ))
     }
 
     async fn terminal_render(&self, tab_id: &str) -> Result<v1::TerminalRender> {
@@ -2924,8 +2932,8 @@ async fn handle_relay_control_request(
         ),
         RelayControlRequest::TerminalSnapshot { request_id, tab_id } => {
             match runtime.terminal_snapshot(&tab_id).await {
-                Ok(snapshot) => {
-                    RelayControlResponse::ok(request_id, terminal_snapshot_json(&snapshot))
+                Ok((snapshot, offset)) => {
+                    RelayControlResponse::ok(request_id, terminal_snapshot_json(&snapshot, offset))
                 }
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
@@ -3243,8 +3251,8 @@ async fn live_terminal_snapshot_payload(
     binding: &BindingState,
     tab_id: &str,
 ) -> Option<Value> {
-    let snapshot = runtime.terminal_snapshot(tab_id).await.ok()?;
-    Some(relay_live_terminal_snapshot_payload(binding, &snapshot))
+    let (snapshot, offset) = runtime.terminal_snapshot(tab_id).await.ok()?;
+    Some(relay_live_terminal_snapshot_payload(binding, &snapshot, offset))
 }
 
 fn relay_live_payload(
@@ -3268,12 +3276,13 @@ fn relay_live_payload(
 fn relay_live_terminal_snapshot_payload(
     binding: &BindingState,
     snapshot: &v1::TerminalSnapshot,
+    offset: u64,
 ) -> Value {
     json!({
         "type": "daemon_response",
         "bindingId": binding.binding_id,
         "ok": true,
-        "data": terminal_snapshot_json(snapshot),
+        "data": terminal_snapshot_json(snapshot, offset),
     })
 }
 
@@ -3282,11 +3291,12 @@ fn relay_live_terminal_snapshot_json(
     to_device_id: &str,
     binding: &BindingState,
     snapshot: &v1::TerminalSnapshot,
+    offset: u64,
 ) -> String {
     serde_json::to_string(&json!({
         "toDeviceId": to_device_id,
         "ephemeral": true,
-        "payload": relay_live_terminal_snapshot_payload(binding, snapshot),
+        "payload": relay_live_terminal_snapshot_payload(binding, snapshot, offset),
     }))
     .expect("relay live terminal snapshot should serialize")
 }
@@ -3385,7 +3395,7 @@ fn replay_max_bytes(requested: u32) -> usize {
     }
 }
 
-fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
+fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot, offset: u64) -> Value {
     json!({
         "tabId": snapshot.tab_id,
         "rows": snapshot.rows,
@@ -3394,6 +3404,9 @@ fn terminal_snapshot_json(snapshot: &v1::TerminalSnapshot) -> Value {
         // Alt-screen-aware ANSI dump so full-screen TUIs (Claude, Codex) can be
         // reconstructed faithfully on the phone, not just the plain-text grid.
         "formatted": base64_encode(&snapshot.formatted),
+        // Absolute stream offset this snapshot represents. The phone adopts it
+        // as its baseline (nextOffset) and orders deltas against it.
+        "offset": offset,
     })
 }
 
@@ -3902,9 +3915,10 @@ async fn handle_payload(
             }))
         }
         Some(v1::envelope::Payload::TerminalSnapshotRequest(request)) => {
-            Some(v1::envelope::Payload::TerminalSnapshot(
-                runtime.terminal_snapshot(&request.tab_id).await?,
-            ))
+            // Local IPC (CLI) consumes the protobuf snapshot only; the stream
+            // offset is for the phone's JSON wire, so drop it here.
+            let (snapshot, _offset) = runtime.terminal_snapshot(&request.tab_id).await?;
+            Some(v1::envelope::Payload::TerminalSnapshot(snapshot))
         }
         Some(v1::envelope::Payload::TerminalRenderRequest(request)) => Some(
             v1::envelope::Payload::TerminalRender(runtime.terminal_render(&request.tab_id).await?),
@@ -5302,7 +5316,7 @@ mod tests {
             formatted: Vec::new(),
         };
 
-        let json = relay_live_terminal_snapshot_json("phone_1", &binding, &snapshot);
+        let json = relay_live_terminal_snapshot_json("phone_1", &binding, &snapshot, 2048);
         let value: Value = serde_json::from_str(&json).expect("live snapshot json should parse");
 
         assert_eq!(value["toDeviceId"], "phone_1");
@@ -5315,6 +5329,7 @@ mod tests {
         assert_eq!(value["payload"]["data"]["rows"], 24);
         assert_eq!(value["payload"]["data"]["cols"], 80);
         assert_eq!(value["payload"]["data"]["text"], "ready");
+        assert_eq!(value["payload"]["data"]["offset"], 2048);
     }
 
     #[test]
