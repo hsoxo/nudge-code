@@ -934,15 +934,44 @@ final class AppModel {
            resyncClock.now - requestedAt < terminalResyncRetry {
             return
         }
-        terminalResyncRequestedAt[key] = resyncClock.now
+        let stamp = resyncClock.now
+        terminalResyncRequestedAt[key] = stamp
         do {
             try await session.requestTerminalSnapshot(tabID: tabID)
+            // Arm a watchdog: if the reply is lost AND the stream then goes silent
+            // (no further delta to drive a re-request), re-fire after the window.
+            scheduleResyncWatchdog(key: key, tabID: tabID, stamp: stamp)
         } catch {
             // The request never reached the daemon, so no snapshot will arrive.
             // Clear immediately so the next delta re-requests rather than waiting
             // out the retry window (the throw is expected for a tab that cannot
             // currently stream — e.g. mid-restart).
             terminalResyncRequestedAt[key] = nil
+        }
+    }
+
+    /// Re-fire a resync request once the retry window passes with no snapshot, so
+    /// a LOST reply self-heals even if the stream goes silent (the delta-driven
+    /// re-request in applyTerminalDelta only fires when more output arrives). Each
+    /// re-request re-arms this watchdog, so it retries at the retry cadence until a
+    /// snapshot lands (clears the stamp), the session resets, or the model is gone.
+    /// Disabled when retry == .zero (tests rely on delta-driven recovery, and a
+    /// zero-length sleep would busy-loop).
+    private func scheduleResyncWatchdog(key: String, tabID: String, stamp: ContinuousClock.Instant) {
+        let retry = terminalResyncRetry
+        guard retry > .zero else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: retry)
+            guard let self,
+                  self.terminalResyncRequestedAt[key] == stamp,
+                  let session = self.relaySession
+            else {
+                return
+            }
+            // Still pending after the window — the reply was lost. Clear our stamp
+            // so we aren't rate-limited against it, then re-request.
+            self.terminalResyncRequestedAt[key] = nil
+            await self.requestResyncSnapshot(key: key, tabID: tabID, session: session)
         }
     }
 

@@ -784,6 +784,40 @@ struct BindingClaimTests {
         #expect(session.snapshotRequests == ["default", "default", "default"])
     }
 
+    @Test func appModelReRequestsSnapshotWhenStreamGoesSilentAfterLostReply() async throws {
+        // M-1 (round 3): the lost-reply re-request must NOT depend on a follow-up
+        // delta. After the gap's request succeeds but the reply is lost and the
+        // stream goes silent, the watchdog timer re-fires after the retry window.
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "X", offset: 50))
+            // No further deltas: the stream is silent after the gap.
+        ], suspendWhenEmpty: true)
+        // Successful send, no snapshot event enqueued -> lost reply. A short
+        // (non-zero) retry arms the watchdog so it fires without a driving delta.
+        let model = offsetStreamModel(machine: machine, session: session, resyncRetry: .milliseconds(20))
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        // sessionState(1) + gap(1) + at least one watchdog re-request: >= 3 proves
+        // the silent stream self-heals via the timer, with no delta to drive it.
+        try await waitUntil { session.snapshotRequests.count >= 3 }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.snapshotRequests.count >= 3)
+        #expect(session.snapshotRequests.allSatisfy { $0 == "default" })
+    }
+
     @Test func appModelRateLimitsResyncRequestsWithinRetryWindow() async throws {
         // Storm guard: multiple gaps inside the retry window collapse to ONE
         // request. A trailing agent-status event is the settle point — it is
