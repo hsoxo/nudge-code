@@ -284,7 +284,7 @@ struct TerminalView: View {
     /// terminal area is blank, so we show the connecting state instead.
     private var hasContent: Bool {
         !tab.previewText.isEmpty
-            || !tab.replayOutputBase64.isEmpty
+            || !tab.replayOutputData.isEmpty
             || !tab.pendingOutputBase64.isEmpty
             || tab.outputSequence > 0
             || tab.replayOutputSequence > 0

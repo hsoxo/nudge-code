@@ -741,8 +741,12 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
 
     func setFocusedTab(tabID: String?) async throws {
         let requestID = requestIDGenerator()
+        // Fire-and-forget (kind: nil): the daemon replies with an ack-only
+        // `{accepted:true}` payload, which must NOT be decoded as a session
+        // state. Leaving it uncorrelated routes the ack through fallbackEvent,
+        // which treats `accepted` as a benign no-op.
         try await rememberAndSend(
-            kind: .sessionState,
+            kind: nil,
             requestID: requestID,
             payload: RelaySetFocusedTabPayload(requestId: requestID, tabId: tabID)
         )
@@ -778,7 +782,7 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
     }
 
     private func rememberAndSend<Payload: Encodable>(
-        kind: RelaySessionRequestKind,
+        kind: RelaySessionRequestKind?,
         requestID: String,
         payload: Payload
     ) async throws {
@@ -789,8 +793,15 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 identityStore: identityStore
             )
         }
-        lock.withLock {
-            requestKinds[requestID] = kind
+        // A nil kind sends fire-and-forget: the daemon's ack arrives uncorrelated
+        // and is handled benignly by fallbackEvent (e.g. an `{accepted:true}` ack
+        // becomes a no-op). Correlating an ack-only request as a state-bearing
+        // kind (e.g. .sessionState) would mis-decode the ack — for set_focused_tab
+        // that turned the empty ack into an empty session state and wiped all tabs.
+        if let kind {
+            lock.withLock {
+                requestKinds[requestID] = kind
+            }
         }
         let request = RelaySocketRequest(
             toDeviceId: daemonDeviceID,

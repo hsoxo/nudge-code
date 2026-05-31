@@ -295,6 +295,39 @@ struct RelayClientTests {
         #expect(socket.sent[0].contains(#""tabId":"default""#))
         #expect(socket.sent[0].contains(#""text":"echo hi""#))
         #expect(socket.sent[0].contains(#""enter":true"#))
+    }
+
+    @Test func setFocusedTabAckDoesNotDecodeAsSessionState() async throws {
+        // Regression (Phase 4.3 review, HIGH): set_focused_tab is sent
+        // fire-and-forget; the daemon's `{accepted:true}` ack must NOT be
+        // correlated as a session state, which (with no tabs) would replace the
+        // tab list with [] and wipe the UI on every tab switch.
+        URLProtocolStub.reset()
+        URLProtocolStub.responses = [socketChallengeResponse()]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLProtocolStub.self]
+        let socket = RecordingWebSocket(messages: [
+            #"{"type":"connected","deviceId":"phone_1","bindingId":"bind_1"}"#,
+            #"{"type":"message","message":{"payload":{"type":"daemon_response","requestId":"ios-focus","ok":true,"data":{"accepted":true}}}}"#
+        ])
+        let factory = RecordingWebSocketFactory(socket: socket)
+        let client = HTTPRelayClient(
+            urlSession: URLSession(configuration: configuration),
+            identityStore: MemoryPhoneIdentityStore(publicKey: "phone-public-key"),
+            webSocketFactory: factory,
+            requestIDGenerator: { "ios-focus" }
+        )
+
+        let session = try await client.openSession(machine: activeMachine)
+        try await session.setFocusedTab(tabID: "default")
+        let event = try await session.receiveEvent()
+        session.close()
+
+        #expect(socket.sent.count == 1)
+        #expect(socket.sent[0].contains(#""type":"set_focused_tab""#))
+        #expect(socket.sent[0].contains(#""tabId":"default""#))
+        // The ack is a benign no-op, NOT a session state (which would wipe tabs).
+        #expect(event == .terminalInputAccepted(tabID: nil))
         #expect(socket.closed)
     }
 

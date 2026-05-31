@@ -192,7 +192,7 @@ final class AppModel {
         // snapshot path when refocused. Fire-and-forget from this sync entry point.
         let tabID = tab.id
         Task { @MainActor [weak self] in
-            await self?.sendFocusedTab(tabID)
+            await self?.sendFocusedTab(tabID, reBaseline: true)
         }
     }
 
@@ -763,7 +763,9 @@ final class AppModel {
             // attach/reconnect — tell the daemon the focused tab so it streams only
             // that tab. Best-effort: a stale/failed send just means the daemon
             // keeps streaming all tabs (the backward-compatible default).
-            await sendFocusedTab(selectedTabID)
+            // Attach/reconnect: just send the focus hint — the per-tab snapshot
+            // loop above already re-baselines, so no re-baseline here.
+            await sendFocusedTab(selectedTabID, reBaseline: false)
             for tab in state.tabs {
                 // Initial state is a full snapshot, not a raw byte tail (R1): the
                 // snapshot is complete restorable state and carries the stream
@@ -1010,14 +1012,30 @@ final class AppModel {
     /// focused tab's machine, mirroring the resize re-baseline guard in
     /// updatePhoneProfile; a send failure is harmless (the daemon keeps streaming
     /// the previous focus, or all tabs if none was set).
-    private func sendFocusedTab(_ tabID: String?) async {
+    private func sendFocusedTab(_ tabID: String?, reBaseline: Bool) async {
         guard let relaySession,
               let machineID = relaySessionMachineID,
-              selectedMachineID == machineID
+              selectedMachineID == machineID,
+              // Ordering guard: selectTab fires this from a detached Task, so a
+              // newer selection may have superseded this one — only the
+              // still-current selection sends focus (avoids out-of-order hints).
+              tabID == selectedTabID
         else {
             return
         }
         try? await relaySession.setFocusedTab(tabID: tabID)
+        // Re-baseline only on an explicit SWITCH (selectTab): the tab may have
+        // been a quiet background tab the daemon stopped streaming (Phase 4.3), so
+        // it would otherwise show pre-switch content until its next delta. On
+        // attach/reconnect the sessionState handler already snapshots every tab,
+        // so re-baselining there would be a redundant duplicate request.
+        if reBaseline, let tabID {
+            await requestResyncSnapshot(
+                key: tabProfileKey(machineID: machineID, tabID: tabID),
+                tabID: tabID,
+                session: relaySession
+            )
+        }
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
