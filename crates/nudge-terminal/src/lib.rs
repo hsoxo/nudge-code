@@ -113,12 +113,12 @@ impl TerminalGrid {
         // than hand-rolled escape sequences keeps us in lock-step with the
         // emulator and won't silently drift if vt100 adds tracked modes.
         frame.extend_from_slice(&screen.input_mode_formatted());
-        // Visible cells + SGR.
+        // Visible cells + SGR, AND the final cursor position + visibility:
+        // contents_formatted() promises "the same visual output", and its grid
+        // path ends with a cursor-position move (verified in vt100 0.16), so the
+        // cursor is restored without a separate cursor_state_formatted() call.
+        // The round-trip test asserts the cursor lands correctly, guarding this.
         frame.extend_from_slice(&screen.contents_formatted());
-        // Cursor visibility + FINAL cursor position. contents_formatted() leaves
-        // the cursor in an unspecified spot, so this lands it where the real
-        // terminal has it — emitted last.
-        frame.extend_from_slice(&screen.cursor_state_formatted());
         frame
     }
 
