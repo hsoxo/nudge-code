@@ -86,6 +86,43 @@ impl TerminalGrid {
         }
     }
 
+    /// Bytes that reconstruct the FULL terminal state when written into a freshly
+    /// reset emulator: a hard reset, the active modes (alt-screen, application
+    /// cursor/keypad, bracketed paste, mouse protocol + encoding), then the
+    /// formatted visible contents (cursor visibility + SGR + cells + cursor
+    /// position). Unlike `snapshot().formatted` — which is contents only — this
+    /// restores the modes, so deltas that resume after a resync are interpreted
+    /// in the right mode (e.g. while inside the alternate screen).
+    pub fn state_frame(&self) -> Vec<u8> {
+        let screen = self.parser.screen();
+        let mut frame = Vec::new();
+        // Hard reset (RIS) so the target starts from a known baseline.
+        frame.extend_from_slice(b"\x1bc");
+        // DEC private / ANSI modes — `contents_formatted` does NOT emit these,
+        // only cell contents, SGR, and cursor visibility.
+        if screen.alternate_screen() {
+            frame.extend_from_slice(b"\x1b[?1049h");
+        }
+        if screen.application_cursor() {
+            frame.extend_from_slice(b"\x1b[?1h");
+        }
+        if screen.application_keypad() {
+            frame.extend_from_slice(b"\x1b=");
+        }
+        if screen.bracketed_paste() {
+            frame.extend_from_slice(b"\x1b[?2004h");
+        }
+        push_mouse_protocol(
+            &mut frame,
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+        );
+        // Formatted visible contents (alt-screen-aware), emitted after the
+        // mode-setters so it draws into the restored screen and modes.
+        frame.extend_from_slice(&screen.contents_formatted());
+        frame
+    }
+
     pub fn render_frame(&self, row_offset: u16) -> Vec<u8> {
         let screen = self.parser.screen();
         let mut frame = Vec::new();
@@ -106,6 +143,25 @@ impl TerminalGrid {
         );
         push_cursor_visibility(&mut frame, screen.hide_cursor());
         frame
+    }
+}
+
+fn push_mouse_protocol(
+    buffer: &mut Vec<u8>,
+    mode: vt100::MouseProtocolMode,
+    encoding: vt100::MouseProtocolEncoding,
+) {
+    match mode {
+        vt100::MouseProtocolMode::None => {}
+        vt100::MouseProtocolMode::Press => buffer.extend_from_slice(b"\x1b[?9h"),
+        vt100::MouseProtocolMode::PressRelease => buffer.extend_from_slice(b"\x1b[?1000h"),
+        vt100::MouseProtocolMode::ButtonMotion => buffer.extend_from_slice(b"\x1b[?1002h"),
+        vt100::MouseProtocolMode::AnyMotion => buffer.extend_from_slice(b"\x1b[?1003h"),
+    }
+    match encoding {
+        vt100::MouseProtocolEncoding::Default => {}
+        vt100::MouseProtocolEncoding::Utf8 => buffer.extend_from_slice(b"\x1b[?1005h"),
+        vt100::MouseProtocolEncoding::Sgr => buffer.extend_from_slice(b"\x1b[?1006h"),
     }
 }
 
@@ -220,6 +276,30 @@ mod tests {
         assert_eq!(grid.total_bytes(), 5);
         assert_eq!(grid.process(b" world"), 5);
         assert_eq!(grid.total_bytes(), 11);
+    }
+
+    #[test]
+    fn state_frame_round_trips_alt_screen_and_modes() {
+        let mut grid = TerminalGrid::default();
+        // Enter alt-screen + application cursor + bracketed paste + mouse
+        // (press/release, SGR encoding), then draw red text.
+        grid.process(b"\x1b[?1049h\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[31mhello");
+        let original = grid.snapshot();
+        assert!(grid.parser.screen().alternate_screen());
+
+        // Reconstruct in a fresh emulator from the state frame alone.
+        let mut rebuilt = TerminalGrid::default();
+        rebuilt.process(&grid.state_frame());
+
+        let screen = rebuilt.parser.screen();
+        assert!(screen.alternate_screen(), "alt-screen restored");
+        assert!(screen.application_cursor(), "application cursor restored");
+        assert!(screen.bracketed_paste(), "bracketed paste restored");
+        assert_eq!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::PressRelease);
+        assert_eq!(screen.mouse_protocol_encoding(), vt100::MouseProtocolEncoding::Sgr);
+        // Visible contents (text + SGR formatting) match the original.
+        assert_eq!(rebuilt.snapshot().text, original.text);
+        assert_eq!(rebuilt.snapshot().formatted, original.formatted);
     }
 
     #[test]
