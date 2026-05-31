@@ -65,10 +65,10 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 
 ## 3. Target model & design principles
 
-1. **Per-tab stream contract.** Every tab has a monotonic `(epoch, offset)`. Deltas are `{epoch, offset, bytes}`; snapshots declare the `(epoch, offset)` they represent. The phone tracks the next expected offset.
+1. **Per-tab stream contract.** Every tab has a single monotonic **absolute byte offset** owned by the daemon's grid (`total_bytes`, incremented in `process()`). Deltas are `{offset, bytes}`; snapshots declare the `offset` they represent, read **atomically with the grid contents under the grid lock**. The phone tracks the next expected offset and trims/drops anything it already has. *No epoch:* an absolute offset is monotonic per tab and lets the phone dedupe snapshot↔delta overlap arithmetically (`delta.offset < nextOffset` ⇒ already have it), which a per-epoch *relative* offset cannot — it's the only representation that closes the R4 micro-race, because the offset shares one axis with the snapshot.
 2. **Truncation/gap ⇒ snapshot, never a partial delta.** Any time the daemon cannot send a contiguous byte run (overflow, broadcast lag, resize, alt-screen change) it bumps the epoch and sends a complete state frame.
 3. **Snapshots are complete, restorable state** (screen + cursor + SGR + modes + alt-screen + bounded scrollback) — not visible cells, not a raw tail.
-4. **Idempotent, ordered apply.** The phone applies a delta only if it continues the stream (`epoch` matches, `offset == next`); a snapshot resets the baseline and discards anything older.
+4. **Idempotent, ordered apply.** The phone applies a delta only if `offset == nextOffset`; an earlier-offset delta is trimmed/dropped (already applied), a later-offset delta is a gap → request a snapshot. A snapshot resets the baseline to its `offset` **unconditionally** (restart and daemon-restart reset the byte axis, so adoption must not be gated on `offset >= nextOffset`).
 5. **Latency is adaptive.** Echo flushes immediately when idle; coalescing only kicks in under sustained load.
 6. **One authoritative state model** (long-term): eliminate daemon-vs-phone emulator divergence.
 
@@ -124,38 +124,33 @@ Sequenced **correctness → latency → efficiency**, with the cheap high-value 
 
 ### Phase 1 — Stream contract + safe resync (effort: M–L) — *the backbone*
 
-**Goal:** give every tab a `(epoch, offset)` so loss/reorder is detectable and resync is a real snapshot, not a raw tail.
+**Goal:** give every tab a single monotonic **absolute byte offset** so loss/reorder is detectable and resync is a real snapshot (not a raw tail). Validated by an architecture review: the offset must be the *grid's* byte position, captured atomically with the snapshot under the grid lock — that is what closes the R4 snapshot↔live race with **no residual window**. (A relative/epoch offset cannot: a chunk that enters the grid just after a snapshot is taken gets a fresh epoch, and the phone can't tell it overlaps the snapshot → double-render. With one absolute axis, overlap is detectable arithmetically.)
 **Findings:** R1, R4, R5, R2 (general).
 
-**1.1 Protocol (`nudge-protocol`)** — additive, backward-compatible fields:
-- Delta payload (`terminal_output_json`): add `epoch: u64`, `offset: u64` (byte position of the *first* byte in this delta within the epoch).
-- Snapshot payload (`terminal_snapshot_json`): add `epoch: u64`, `offset: u64` (the stream position the snapshot represents; deltas after it have `offset >= this`).
-- Add a daemon→phone `capabilities`/`protocolVersion` marker so an older phone that ignores the fields still works (degrades to "no gap detection").
+**1.2a Grid byte counter + delta offset (`nudge-terminal`, `nudge-daemon`)**
+- `TerminalGrid`: add `total_bytes: u64`; change `process(&mut self, bytes) -> u64` to return the **start** offset, then advance `total_bytes`. Keep `total_bytes` across `resize` (resize re-renders geometry; it does not discontinue the byte axis).
+- PTY callback (`lib.rs:~2493`): stamp the offset **inside** the grid-lock guard — `let offset = grid.lock().process(bytes);` then `terminal_changes.send(TerminalChange { offset, data })`. Sending after unlock is fine; the offset is already pinned to the grid position. This atomicity is the linchpin.
+- `TerminalChange`: add `offset: u64`.
+- Relay loop: `pending` becomes `(first_offset, Vec<u8>)` per tab. `accumulate_terminal_change` records `first_offset` when the entry is (re)created empty and **asserts contiguity** on each append (`change.offset == first_offset + buf.len()`); a mismatch (impossible absent `Lagged`, but cheap) → `snapshot_required` + reset. Delta JSON (`terminal_output_json`) gains `offset`.
 
-**1.2 Daemon (`nudge-daemon/src/lib.rs`)**
-- Track per-tab `(epoch: u64, sent_offset: u64)` in the relay loop (e.g. `BTreeMap<String, StreamPos>`).
-- Delta: emit `{epoch, offset: sent_offset, bytes}`; then `sent_offset += bytes.len()`.
-- Snapshot (initial / overflow / Lagged / resize / alt-screen): `epoch += 1; sent_offset = 0;` emit `{epoch, offset: 0, ...state...}`.
-- Wire 0.1's `snapshot_required` into the epoch bump.
+**1.2b Snapshot offset + re-baseline (`nudge-daemon`)**
+- `terminal_snapshot` returns the grid's `total_bytes` as the snapshot `offset`, read **under the same grid-lock acquisition** as `contents`/`formatted`. Snapshot JSON (`terminal_snapshot_json`) gains `offset`.
+- `Lagged`/overflow already route through `snapshot_required` (Phase 0.1) and re-baseline (the snapshot offset is the new high-water mark). The solicited `requestTerminalSnapshot` (`handle_relay_control_request`) is **automatically coherent** — it reads the same counter under the grid lock — so it stays a synchronous reply (no deferred-action seam, no `refreshTabSnapshot` change).
+- *Invariant:* every tab-id stream opens with a snapshot (guaranteed by `tab_requires_snapshot` returning true on an empty buffer). This protects new/recycled tab ids from a small-offset delta being trimmed as a false duplicate.
 
-**1.3 iOS (`RelayClient.swift` decode, `AppModel.swift` apply)**
-- Decode `epoch`/`offset` on both event types.
-- Track per-tab `expected: (epoch, nextOffset)`.
-- On **delta**:
-  - `epoch == expected.epoch && offset == nextOffset` → apply, `nextOffset += len`.
-  - `offset < nextOffset` (duplicate) → drop.
-  - gap (`offset > nextOffset`) or `epoch != expected.epoch` → **request a snapshot** and ignore deltas until it arrives.
-- On **snapshot**: adopt `(epoch, offset)`; reset render; `nextOffset = offset`; discard buffered deltas with `epoch < snapshot.epoch || offset < snapshot.offset` (fixes R4).
-- This replaces the ad-hoc `replayOutputSequence`/`outputSequence` ordering with offset semantics (keep the WebView's sequence counters as a render-dedupe detail, driven by the new logic).
+**1.3 iOS gap detection (`RelayClient.swift` decode, `AppModel.swift` apply)**
+- Decode optional `offset` on delta + snapshot (absent ⇒ legacy daemon ⇒ apply-as-before, no gap detection).
+- Track per-tab `nextOffset`. On **delta**: `offset == nextOffset` → apply, `nextOffset += len`; `offset < nextOffset` → trim the overlap (drop if fully behind); `offset > nextOffset` → gap → **request a snapshot**, ignore deltas until it arrives. On **snapshot**: adopt `nextOffset = offset` **unconditionally**, reset render, discard buffered deltas with `offset < snapshot.offset`. (Keep the WebView `replayOutputSequence`/`outputSequence` as a render-dedupe detail driven by the new logic.)
 
-**1.4 Retire tail-as-state (R1)** — `applyRelaySessionEvent` `.sessionState` (`AppModel.swift:712-714`): request a **snapshot** per tab (not `requestTerminalOutput`/raw tail) for the initial state. Keep the raw tail only as optional scrollback *below* the snapshot (Phase 2), never as the primary reconstruction.
+**1.4 Retire tail-as-state (R1)** — `applyRelaySessionEvent` `.sessionState` (`AppModel.swift:712-724`): request a **snapshot** per tab (not `requestTerminalOutput`/raw tail) for the initial state. `refreshTabSnapshot` stays a synchronous `fetchTerminalSnapshot` (now trivially coherent). Keep the raw tail only as optional scrollback *below* the snapshot (Phase 2), never as the primary reconstruction.
 
 **Tests / verify**
-- Daemon: epoch/offset monotonic; snapshot resets offset; overflow bumps epoch.
-- iOS: gap → snapshot request; duplicate dropped; stale snapshot discarded; in-order apply.
-- Integration (relay or a mock transport): drop/reorder/dup deltas → phone self-heals to a correct frame.
+- `nudge-terminal`: `process` returns contiguous start offsets; `total_bytes` survives `resize`.
+- Daemon: offsets contiguous across deltas; snapshot carries the grid offset; **the micro-window test** — a chunk that enters the grid between the prior `recv` and the snapshot read is trimmed by offset on the phone, not double-applied (the test the epoch model cannot pass); `Lagged`/overflow re-baseline.
+- iOS: gap → snapshot request; earlier-offset delta trimmed; snapshot adopted unconditionally (restart/daemon-restart); in-order apply.
+- Integration (relay or mock transport): drop/reorder/dup deltas → phone self-heals.
 
-**Risk:** medium — protocol + both ends. Keep fields additive; feature-flag gap detection so it can be toggled if a bug appears.
+**Risk:** medium — touches `nudge-terminal` + `TerminalChange` + both ends, but removes epoch/deferred-action/drain. Fields additive; gap detection degrades gracefully when the daemon omits `offset`.
 
 ---
 
