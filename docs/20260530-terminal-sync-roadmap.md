@@ -1,8 +1,10 @@
 # Terminal Sync Roadmap
 
 - **Date:** 2026-05-30
-- **Status:** Phase 0 shipped (2026-05-30); Phases 1–5 proposed
-- **Progress:** Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
+- **Status:** Phases 0–1 shipped (2026-05-30); Phases 2–5 proposed
+- **Progress:**
+  - Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
+  - Phase 1 complete (absolute-offset stream contract) — 1.2a delta offset `ff55d06`, 1.2b snapshot offset `240ae94`, 1.3 iOS gap detection `b7a7439`, 1.4 retire tail `9503aef`.
 - **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
 - **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
 
@@ -46,13 +48,13 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 
 | ID | Sev | Issue | Where |
 |----|-----|-------|-------|
-| **R1** | HIGH | Unsafe resync: subscribe/reconnect replays a raw byte **tail** (arbitrary start) as if it were full state | `AppModel.swift:723`, `index.html:257` |
+| **R1** | HIGH | Unsafe resync: subscribe/reconnect replays a raw byte **tail** (arbitrary start) as if it were full state (✅ fixed Phase 1.4 `9503aef`) | `AppModel.swift:723`, `index.html:257` |
 | **R2** | HIGH | Truncation cuts mid-sequence: overflow drain / PTY tail cap / replay trims can split UTF-8/CSI/OSC/SGR/alt-screen | `lib.rs:2601`, `nudge-pty:167`, `AppModel.swift:892`, `index.html:244` |
 | **R3** | HIGH | Snapshot has no mode state: visible cells only; no alt-screen/modes/charset → post-reset deltas misread | `nudge-terminal:63`, `index.html:257` |
-| **R4** | HIGH | Snapshot↔live race: independent counters (`replayOutputSequence` vs `outputSequence`), no shared offset → an old snapshot can clobber newer output | `AppModel.swift:818/836`, `TerminalWorkspaceView.swift:490` |
-| **R5** | HIGH | No gap detection: deltas carry only `tabId`+`bytes`; relay/WS loss is invisible | `lib.rs:3206` |
-| **R6** | HIGH | Burst overflow sends a partial delta instead of a snapshot | `lib.rs:2599-2646` |
-| **P1** | HIGH | Fixed 100ms flush = local-echo lag | `lib.rs:2586` |
+| **R4** | HIGH | Snapshot↔live race: independent counters (`replayOutputSequence` vs `outputSequence`), no shared offset → an old snapshot can clobber newer output (✅ fixed Phase 1: absolute offset, grid-lock-coherent, `240ae94`/`b7a7439`) | `AppModel.swift:818/836`, `TerminalWorkspaceView.swift:490` |
+| **R5** | HIGH | No gap detection: deltas carry only `tabId`+`bytes`; relay/WS loss is invisible (✅ fixed Phase 1.3 `b7a7439`) | `lib.rs:3206` |
+| **R6** | HIGH | Burst overflow sends a partial delta instead of a snapshot (✅ fixed Phase 0.1 `0bbb5ae`) | `lib.rs:2599-2646` |
+| **P1** | HIGH | Fixed 100ms flush = local-echo lag (✅ fixed Phase 0.3 `f3c8f1f`) | `lib.rs:2586` |
 | **M1** | MED | Grid `scrollback=0`; resyncs collapse history | `nudge-terminal:36` |
 | **M2** | MED | Resize: no reflow + no post-resize snapshot → stale bytes at new geometry | `nudge-terminal:49`, `lib.rs:2074` |
 | **M3** | MED | Daemon `vt100` vs phone `xterm.js` are two divergent emulators | `nudge-terminal:40`, `index.html:66` |
