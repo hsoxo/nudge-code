@@ -98,7 +98,7 @@ No phase regresses 0–3: each is additive and flag-gated.
 | Item | Effort | Risk / note |
 |---|---|---|
 | Daemon `RenderCache` (lift from CLI) | **S** | Logic already proven in-tree (`main.rs:1334`). Per-tab state in the relay loop. |
-| Flag-gated frame emission (5a.0) | **S** | Daemon-only; reversible; on-device-measurable. Must stamp frame deltas on a sent-byte offset axis (or ship as snapshots) so the phone's offset arithmetic doesn't gap every frame — see 5a.0 caveat. |
+| Flag-gated frame emission (5a.0) | **S** | Daemon-only; reversible; on-device-measurable. Must stamp frame deltas **and snapshots** on one sent-byte offset axis (or ship every frame as a snapshot) so the phone's offset arithmetic doesn't gap every frame — see 5a.0 caveat. |
 | Frame-aware payload + capability negotiation (5a.1) | **M** | Mixed-version fallback is the main correctness surface. |
 | iOS gap-state reinterpretation (offset→frame) | **M** | Reuses `applyTerminalDelta`; risk is the diff-base bookkeeping. |
 | Retire phone-side mode restoration (5a.2) | **S** | Pure simplification once 5a.1 lands. |
