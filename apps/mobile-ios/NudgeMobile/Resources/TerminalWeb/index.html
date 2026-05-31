@@ -124,8 +124,8 @@
       rows: 24,
       cols: 80
     };
-    let replayBuffer = [];
-    let liveBuffer = [];
+    let replayBuffer = createByteRing(replayBufferLimit);
+    let liveBuffer = createByteRing(replayBufferLimit);
 
     function cellWidth() {
       return term._core?._renderService?.dimensions?.css?.cell?.width || 8;
@@ -235,14 +235,60 @@
       return bytes;
     }
 
-    function appendBounded(buffer, bytes) {
-      for (const byte of bytes) {
-        buffer.push(byte);
+    // Bounded FIFO byte buffer keeping at most `limit` most-recent bytes, used
+    // only to re-feed xterm.js on snapshot/resize replay. Backed by a single
+    // Uint8Array with headroom so appends are amortized O(1): we compact (shift
+    // the live region to the front) at most once per `limit` bytes written,
+    // instead of the old Array#splice(0, …) that shifted the whole buffer on
+    // every delta once full (O(n) per delta → O(n²) over a session).
+    function createByteRing(limit) {
+      const cap = Math.max(limit, 1);
+      const capacity = cap * 2;
+      let data = new Uint8Array(capacity);
+      let start = 0; // index of the oldest live byte
+      let end = 0; // one past the newest live byte
+
+      function append(bytes) {
+        if (!bytes || bytes.length === 0) {
+          return;
+        }
+        if (bytes.length >= cap) {
+          // The new chunk alone fills/overflows the cap: keep only its tail.
+          data.set(bytes.subarray(bytes.length - cap), 0);
+          start = 0;
+          end = cap;
+          return;
+        }
+        if (end + bytes.length > capacity) {
+          // Out of tail room — slide the live region back to the front.
+          data.copyWithin(0, start, end);
+          end -= start;
+          start = 0;
+        }
+        data.set(bytes, end);
+        end += bytes.length;
+        if (end - start > cap) {
+          start = end - cap; // drop oldest beyond the cap
+        }
       }
-      const overflow = buffer.length - replayBufferLimit;
-      if (overflow > 0) {
-        buffer.splice(0, overflow);
-      }
+
+      return {
+        append,
+        replace(bytes) {
+          start = 0;
+          end = 0;
+          append(bytes);
+        },
+        clear() {
+          start = 0;
+          end = 0;
+        },
+        // A fresh copy (not a view): xterm's write() retains the buffer for
+        // async processing, so it must not alias our mutable backing store.
+        bytes() {
+          return data.slice(start, end);
+        }
+      };
     }
 
     function writeBytes(bytes) {
@@ -256,8 +302,8 @@
       syncTerminalSize(snapshotState.widthMode, snapshotState.rows, snapshotState.cols);
       term.reset();
       term.write(snapshotState.text || '');
-      writeBytes(new Uint8Array(replayBuffer));
-      writeBytes(new Uint8Array(liveBuffer));
+      writeBytes(replayBuffer.bytes());
+      writeBytes(liveBuffer.bytes());
       followCursor(snapshotState.widthMode);
       refit();
     }
@@ -271,19 +317,19 @@
         resetAndReplay();
       },
       setReplayOutputBase64(base64) {
-        replayBuffer.splice(0, replayBuffer.length, ...base64ToBytes(base64));
-        liveBuffer.splice(0, liveBuffer.length);
+        replayBuffer.replace(base64ToBytes(base64));
+        liveBuffer.clear();
         resetAndReplay();
       },
       writeOutputBase64(base64) {
         const bytes = base64ToBytes(base64);
-        appendBounded(liveBuffer, bytes);
+        liveBuffer.append(bytes);
         writeBytes(bytes);
         followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       },
       writeOutput(text) {
         const bytes = encoder.encode(text || '');
-        appendBounded(liveBuffer, bytes);
+        liveBuffer.append(bytes);
         writeBytes(bytes);
         followCursor(container.classList.contains('computer') ? 'computer' : 'phone');
       },
