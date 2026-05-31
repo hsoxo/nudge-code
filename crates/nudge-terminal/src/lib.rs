@@ -27,6 +27,12 @@ pub struct TerminalSnapshot {
 pub struct TerminalGrid {
     size: TerminalSize,
     parser: vt100::Parser,
+    /// Total bytes ever fed through `process` for this tab. Monotonic, and
+    /// preserved across `resize`. It is the absolute axis the phone uses to
+    /// order deltas against snapshots: a snapshot captures this value under the
+    /// same lock as its contents, so any byte is unambiguously before or after
+    /// the snapshot.
+    total_bytes: u64,
 }
 
 impl TerminalGrid {
@@ -34,11 +40,22 @@ impl TerminalGrid {
         Self {
             size,
             parser: vt100::Parser::new(size.rows, size.cols, 0),
+            total_bytes: 0,
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
+    /// Feed bytes to the emulator, returning the absolute **start** offset of
+    /// this chunk (i.e. `total_bytes` before the chunk is applied).
+    pub fn process(&mut self, bytes: &[u8]) -> u64 {
+        let start = self.total_bytes;
         self.parser.process(bytes);
+        self.total_bytes += bytes.len() as u64;
+        start
+    }
+
+    /// Absolute count of bytes fed so far — the offset a snapshot represents.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
     }
 
     pub fn resize(&mut self, size: TerminalSize) {
@@ -188,6 +205,27 @@ mod tests {
         assert_eq!(snapshot.cols, 80);
         assert!(snapshot.text.contains("hello"));
         assert!(!snapshot.formatted.is_empty());
+    }
+
+    #[test]
+    fn process_returns_contiguous_start_offsets() {
+        let mut grid = TerminalGrid::default();
+        assert_eq!(grid.process(b"hello"), 0);
+        assert_eq!(grid.total_bytes(), 5);
+        assert_eq!(grid.process(b" world"), 5);
+        assert_eq!(grid.total_bytes(), 11);
+    }
+
+    #[test]
+    fn total_bytes_survives_resize() {
+        let mut grid = TerminalGrid::default();
+        grid.process(b"hello world");
+        assert_eq!(grid.total_bytes(), 11);
+        // resize re-renders geometry; it must not discontinue the byte axis.
+        grid.resize(TerminalSize::new(100, 40));
+        assert_eq!(grid.total_bytes(), 11);
+        // The next chunk continues from the preserved offset.
+        assert_eq!(grid.process(b"!"), 11);
     }
 
     #[test]

@@ -253,6 +253,10 @@ struct RelayRoutedMessage {
 #[derive(Debug, Clone)]
 struct TerminalChange {
     tab_id: String,
+    /// Absolute start offset of `data` in the tab's byte stream (the grid's
+    /// `total_bytes` before these bytes were applied), stamped under the grid
+    /// lock so it stays coherent with snapshots.
+    offset: u64,
     data: Vec<u8>,
 }
 
@@ -2490,11 +2494,15 @@ async fn spawn_pty_for_tab(
     task::spawn_blocking(move || {
         let output_tab_id = spawn_tab_id;
         PtyTab::spawn_shell_with_output_hook(TerminalSize::default(), move |bytes| {
-            grid.lock()
+            // Stamp the offset INSIDE the grid lock so it is pinned to the grid
+            // position; the broadcast send may run after the guard drops.
+            let offset = grid
+                .lock()
                 .expect("terminal grid lock poisoned")
                 .process(bytes);
             let _ = terminal_changes.send(TerminalChange {
                 tab_id: output_tab_id.clone(),
+                offset,
                 data: bytes.to_vec(),
             });
         })
@@ -2582,7 +2590,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     let mut terminal_changes = runtime.subscribe_terminal_changes();
     let mut agent_status_changes = runtime.subscribe_agent_status_changes();
     let mut e2e_session: Option<RelayE2ESession> = None;
-    let mut pending_terminal_outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut pending_terminal_outputs: BTreeMap<String, PendingOutput> = BTreeMap::new();
     let mut snapshot_required: HashSet<String> = HashSet::new();
     let min_interval = relay_terminal_flush_interval();
     let mut terminal_flush = interval(min_interval);
@@ -2603,6 +2611,7 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
                             &mut pending_terminal_outputs,
                             &mut snapshot_required,
                             change.tab_id,
+                            change.offset,
                             &change.data,
                         );
                         // Immediate-on-idle: a lone keystroke/output that lands
@@ -2929,7 +2938,11 @@ async fn handle_relay_control_request(
             let max_bytes = replay_max_bytes(max_bytes);
             match runtime.output_tail(&tab_id, max_bytes).await {
                 Ok(data) => {
-                    RelayControlResponse::ok(request_id, terminal_output_json(&tab_id, &data))
+                    // A raw byte tail has no meaningful absolute offset (it is a
+                    // separate PTY buffer, not grid-aligned) and the phone
+                    // replays it as a full replace without offset-tracking, so
+                    // 0 is fine. Phase 1.4 retires this path for initial state.
+                    RelayControlResponse::ok(request_id, terminal_output_json(&tab_id, 0, &data))
                 }
                 Err(error) => RelayControlResponse::error(request_id, error),
             }
@@ -3125,20 +3138,44 @@ fn parse_flush_interval(raw: Option<String>) -> Duration {
     Duration::from_millis(ms)
 }
 
-/// Buffer a terminal change for `tab_id`. If the buffer exceeds the relay cap
-/// the byte run is no longer contiguous, so we drop the buffered bytes and flag
-/// the tab for a full snapshot instead of a delta that would start mid-stream
-/// (which the phone would replay as if it were complete state — see roadmap R6).
+/// Buffered, not-yet-flushed terminal bytes for one tab, anchored to the
+/// absolute offset of the first buffered byte so the flush can ship a delta the
+/// phone can order against snapshots.
+#[derive(Default)]
+struct PendingOutput {
+    offset: u64,
+    data: Vec<u8>,
+}
+
+/// Buffer a terminal change for `tab_id`, anchored to its absolute `offset`.
+/// Two conditions force a full snapshot instead of a delta: the buffered run
+/// exceeding the relay cap (a delta would start mid-stream — roadmap R6), or a
+/// non-contiguous offset (we'd otherwise ship a delta with a wrong start
+/// position). Both re-baseline via [`snapshot_required`].
 fn accumulate_terminal_change(
-    pending: &mut BTreeMap<String, Vec<u8>>,
+    pending: &mut BTreeMap<String, PendingOutput>,
     snapshot_required: &mut HashSet<String>,
     tab_id: String,
+    offset: u64,
     data: &[u8],
 ) {
-    let output = pending.entry(tab_id.clone()).or_default();
-    output.extend_from_slice(data);
-    if output.len() > RELAY_TERMINAL_BUFFER_LIMIT {
-        output.clear();
+    let entry = pending.entry(tab_id.clone()).or_default();
+    if entry.data.is_empty() {
+        // Anchor a fresh run on the first byte's absolute offset. This also
+        // re-anchors after an overflow clear, so the stored offset is always
+        // accurate for the bytes currently buffered.
+        entry.offset = offset;
+    } else if offset != entry.offset + entry.data.len() as u64 {
+        // Non-contiguous run — only reachable if the broadcast dropped items
+        // (Lagged is handled separately) or after a future multi-reader
+        // refactor. Re-baseline rather than emit a delta with a wrong offset.
+        snapshot_required.insert(tab_id.clone());
+        entry.offset = offset;
+        entry.data.clear();
+    }
+    entry.data.extend_from_slice(data);
+    if entry.data.len() > RELAY_TERMINAL_BUFFER_LIMIT {
+        entry.data.clear();
         snapshot_required.insert(tab_id);
     }
 }
@@ -3163,7 +3200,7 @@ async fn flush_pending_terminal_outputs<S>(
     bound_phone_id: &str,
     websocket: &mut S,
     mut e2e_session: Option<&mut RelayE2ESession>,
-    mut outputs: BTreeMap<String, Vec<u8>>,
+    mut outputs: BTreeMap<String, PendingOutput>,
     snapshot_required: HashSet<String>,
 ) -> Result<()>
 where
@@ -3176,12 +3213,17 @@ where
     for tab_id in &snapshot_required {
         outputs.entry(tab_id.clone()).or_default();
     }
-    for (tab_id, data) in outputs {
-        let payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &data) {
+    for (tab_id, pending) in outputs {
+        let payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &pending.data) {
             live_terminal_snapshot_payload(runtime, binding, &tab_id).await
         } else {
             let _ = runtime.refresh_agent_status_from_grid(&tab_id).await;
-            Some(relay_live_terminal_output_payload(binding, &tab_id, &data))
+            Some(relay_live_terminal_output_payload(
+                binding,
+                &tab_id,
+                pending.offset,
+                &pending.data,
+            ))
         };
         let Some(payload) = payload else { continue };
         let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_deref_mut())? else {
@@ -3249,12 +3291,17 @@ fn relay_live_terminal_snapshot_json(
     .expect("relay live terminal snapshot should serialize")
 }
 
-fn relay_live_terminal_output_payload(binding: &BindingState, tab_id: &str, data: &[u8]) -> Value {
+fn relay_live_terminal_output_payload(
+    binding: &BindingState,
+    tab_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Value {
     json!({
         "type": "daemon_response",
         "bindingId": binding.binding_id,
         "ok": true,
-        "data": terminal_output_json(tab_id, data),
+        "data": terminal_output_json(tab_id, offset, data),
     })
 }
 
@@ -3263,12 +3310,13 @@ fn relay_live_terminal_output_json(
     to_device_id: &str,
     binding: &BindingState,
     tab_id: &str,
+    offset: u64,
     data: &[u8],
 ) -> String {
     serde_json::to_string(&json!({
         "toDeviceId": to_device_id,
         "ephemeral": true,
-        "payload": relay_live_terminal_output_payload(binding, tab_id, data),
+        "payload": relay_live_terminal_output_payload(binding, tab_id, offset, data),
     }))
     .expect("relay live terminal output should serialize")
 }
@@ -3310,9 +3358,13 @@ fn relay_live_agent_status_json(
     .expect("relay live agent status should serialize")
 }
 
-fn terminal_output_json(tab_id: &str, data: &[u8]) -> Value {
+fn terminal_output_json(tab_id: &str, offset: u64, data: &[u8]) -> Value {
     json!({
         "tabId": tab_id,
+        // Absolute start offset of these bytes in the tab's stream, so the phone
+        // can order this delta against snapshots and detect gaps. Snapshots
+        // carry the same axis (see terminal_snapshot_json).
+        "offset": offset,
         "bytesBase64": base64_encode(data),
     })
 }
@@ -4610,18 +4662,50 @@ mod tests {
 
     #[test]
     fn small_terminal_change_stays_a_delta() {
-        let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut pending: BTreeMap<String, PendingOutput> = BTreeMap::new();
         let mut snapshot_required: HashSet<String> = HashSet::new();
 
-        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), b"hello");
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 0, b"hello");
 
-        assert_eq!(pending.get("tab").map(Vec::as_slice), Some(&b"hello"[..]));
+        let entry = pending.get("tab").expect("tab should be buffered");
+        assert_eq!(entry.offset, 0);
+        assert_eq!(entry.data.as_slice(), b"hello");
         assert!(!snapshot_required.contains("tab"));
-        assert!(!tab_requires_snapshot(
-            &snapshot_required,
-            "tab",
-            pending.get("tab").unwrap()
-        ));
+        assert!(!tab_requires_snapshot(&snapshot_required, "tab", &entry.data));
+    }
+
+    #[test]
+    fn contiguous_changes_extend_one_delta() {
+        let mut pending: BTreeMap<String, PendingOutput> = BTreeMap::new();
+        let mut snapshot_required: HashSet<String> = HashSet::new();
+
+        // A fresh run anchors on the first byte's absolute offset...
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 100, b"ab");
+        // ...and a contiguous follow-on (offset 102 == 100 + 2) extends the same
+        // buffer without forcing a snapshot.
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 102, b"cd");
+
+        let entry = pending.get("tab").expect("tab should be buffered");
+        assert_eq!(entry.offset, 100);
+        assert_eq!(entry.data.as_slice(), b"abcd");
+        assert!(!snapshot_required.contains("tab"));
+    }
+
+    #[test]
+    fn non_contiguous_offset_forces_snapshot_and_rebaselines() {
+        let mut pending: BTreeMap<String, PendingOutput> = BTreeMap::new();
+        let mut snapshot_required: HashSet<String> = HashSet::new();
+
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 100, b"ab");
+        // A gap (expected 102, got 200 — bytes were lost) must re-baseline via a
+        // snapshot and re-anchor on the new offset, never ship a delta whose
+        // start offset is wrong.
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 200, b"zz");
+
+        assert!(snapshot_required.contains("tab"));
+        let entry = pending.get("tab").expect("tab should be buffered");
+        assert_eq!(entry.offset, 200);
+        assert_eq!(entry.data.as_slice(), b"zz");
     }
 
     #[test]
@@ -4629,22 +4713,19 @@ mod tests {
         // A burst past the relay cap must NOT ship a delta that begins at an
         // arbitrary mid-stream byte (the phone would replay it as full state).
         // Instead we drop the buffered bytes and force a complete snapshot.
-        let mut pending: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut pending: BTreeMap<String, PendingOutput> = BTreeMap::new();
         let mut snapshot_required: HashSet<String> = HashSet::new();
 
         let burst = vec![b'x'; RELAY_TERMINAL_BUFFER_LIMIT + 1];
-        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), &burst);
+        accumulate_terminal_change(&mut pending, &mut snapshot_required, "tab".into(), 0, &burst);
 
+        let entry = pending.get("tab").expect("tab should be buffered");
         assert!(
-            pending.get("tab").map(Vec::is_empty).unwrap_or(false),
+            entry.data.is_empty(),
             "buffer should be cleared on overflow, not head-dropped"
         );
         assert!(snapshot_required.contains("tab"));
-        assert!(tab_requires_snapshot(
-            &snapshot_required,
-            "tab",
-            pending.get("tab").unwrap()
-        ));
+        assert!(tab_requires_snapshot(&snapshot_required, "tab", &entry.data));
     }
 
     #[test]
@@ -5247,8 +5328,13 @@ mod tests {
         )
         .active("phone_1".to_string(), None);
 
-        let json =
-            relay_live_terminal_output_json("phone_1", &binding, "default", b"\x1b[31mred\n");
+        let json = relay_live_terminal_output_json(
+            "phone_1",
+            &binding,
+            "default",
+            4096,
+            b"\x1b[31mred\n",
+        );
         let value: Value = serde_json::from_str(&json).expect("live output json should parse");
 
         assert_eq!(value["toDeviceId"], "phone_1");
@@ -5257,6 +5343,7 @@ mod tests {
         assert_eq!(value["payload"]["bindingId"], "bind_1");
         assert_eq!(value["payload"]["ok"], true);
         assert_eq!(value["payload"]["data"]["tabId"], "default");
+        assert_eq!(value["payload"]["data"]["offset"], 4096);
         assert_eq!(value["payload"]["data"]["bytesBase64"], "G1szMW1yZWQK");
     }
 
