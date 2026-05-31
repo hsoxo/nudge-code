@@ -93,33 +93,32 @@ impl TerminalGrid {
     /// position). Unlike `snapshot().formatted` — which is contents only — this
     /// restores the modes, so deltas that resume after a resync are interpreted
     /// in the right mode (e.g. while inside the alternate screen).
+    ///
+    /// Limitation: vt100 0.16 does not track origin mode (DECOM), scroll region
+    /// (DECSTBM), or charset (SCS), so those are not restored — a TUI relying on
+    /// them re-establishes them on its next redraw. Scrollback (M1) is likewise
+    /// out of scope.
     pub fn state_frame(&self) -> Vec<u8> {
         let screen = self.parser.screen();
         let mut frame = Vec::new();
         // Hard reset (RIS) so the target starts from a known baseline.
         frame.extend_from_slice(b"\x1bc");
-        // DEC private / ANSI modes — `contents_formatted` does NOT emit these,
-        // only cell contents, SGR, and cursor visibility.
+        // Alternate-screen is the one mode vt100's input_mode_formatted() omits,
+        // so restore it first; contents_formatted() then draws into it.
         if screen.alternate_screen() {
             frame.extend_from_slice(b"\x1b[?1049h");
         }
-        if screen.application_cursor() {
-            frame.extend_from_slice(b"\x1b[?1h");
-        }
-        if screen.application_keypad() {
-            frame.extend_from_slice(b"\x1b=");
-        }
-        if screen.bracketed_paste() {
-            frame.extend_from_slice(b"\x1b[?2004h");
-        }
-        push_mouse_protocol(
-            &mut frame,
-            screen.mouse_protocol_mode(),
-            screen.mouse_protocol_encoding(),
-        );
-        // Formatted visible contents (alt-screen-aware), emitted after the
-        // mode-setters so it draws into the restored screen and modes.
+        // Canonical input-mode restoration (application keypad/cursor, bracketed
+        // paste, mouse protocol + encoding). Using vt100's own emitter rather
+        // than hand-rolled escape sequences keeps us in lock-step with the
+        // emulator and won't silently drift if vt100 adds tracked modes.
+        frame.extend_from_slice(&screen.input_mode_formatted());
+        // Visible cells + SGR.
         frame.extend_from_slice(&screen.contents_formatted());
+        // Cursor visibility + FINAL cursor position. contents_formatted() leaves
+        // the cursor in an unspecified spot, so this lands it where the real
+        // terminal has it — emitted last.
+        frame.extend_from_slice(&screen.cursor_state_formatted());
         frame
     }
 
@@ -143,25 +142,6 @@ impl TerminalGrid {
         );
         push_cursor_visibility(&mut frame, screen.hide_cursor());
         frame
-    }
-}
-
-fn push_mouse_protocol(
-    buffer: &mut Vec<u8>,
-    mode: vt100::MouseProtocolMode,
-    encoding: vt100::MouseProtocolEncoding,
-) {
-    match mode {
-        vt100::MouseProtocolMode::None => {}
-        vt100::MouseProtocolMode::Press => buffer.extend_from_slice(b"\x1b[?9h"),
-        vt100::MouseProtocolMode::PressRelease => buffer.extend_from_slice(b"\x1b[?1000h"),
-        vt100::MouseProtocolMode::ButtonMotion => buffer.extend_from_slice(b"\x1b[?1002h"),
-        vt100::MouseProtocolMode::AnyMotion => buffer.extend_from_slice(b"\x1b[?1003h"),
-    }
-    match encoding {
-        vt100::MouseProtocolEncoding::Default => {}
-        vt100::MouseProtocolEncoding::Utf8 => buffer.extend_from_slice(b"\x1b[?1005h"),
-        vt100::MouseProtocolEncoding::Sgr => buffer.extend_from_slice(b"\x1b[?1006h"),
     }
 }
 
@@ -279,12 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn state_frame_round_trips_alt_screen_and_modes() {
+    fn state_frame_round_trips_alt_screen_modes_and_cursor() {
         let mut grid = TerminalGrid::default();
         // Enter alt-screen + application cursor + bracketed paste + mouse
-        // (press/release, SGR encoding), then draw red text.
-        grid.process(b"\x1b[?1049h\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[31mhello");
+        // (press/release, SGR encoding), draw red text, then park the cursor at a
+        // non-trivial spot (row 6, col 11) that differs from where drawing ends.
+        grid.process(b"\x1b[?1049h\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[31mhello\x1b[6;11H");
         let original = grid.snapshot();
+        let original_cursor = grid.parser.screen().cursor_position();
+        assert_eq!(original_cursor, (5, 10), "cursor parked at row 6 col 11 (0-indexed)");
         assert!(grid.parser.screen().alternate_screen());
 
         // Reconstruct in a fresh emulator from the state frame alone.
@@ -297,9 +280,12 @@ mod tests {
         assert!(screen.bracketed_paste(), "bracketed paste restored");
         assert_eq!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::PressRelease);
         assert_eq!(screen.mouse_protocol_encoding(), vt100::MouseProtocolEncoding::Sgr);
-        // Visible contents (text + SGR formatting) match the original.
+        // Visible contents (text + SGR) match...
         assert_eq!(rebuilt.snapshot().text, original.text);
         assert_eq!(rebuilt.snapshot().formatted, original.formatted);
+        // ...and the FINAL cursor position is restored (what cursor_state_formatted
+        // adds; contents_formatted alone leaves it unspecified).
+        assert_eq!(screen.cursor_position(), original_cursor);
     }
 
     #[test]
