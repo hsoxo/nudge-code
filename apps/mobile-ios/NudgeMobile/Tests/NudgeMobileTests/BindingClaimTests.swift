@@ -582,6 +582,97 @@ struct BindingClaimTests {
         #expect(model.tabsByMachine[machine.id]?.first?.previewText == "")
     }
 
+    @Test func appModelAppliesOffsetOrderedDeltasInOrder() async throws {
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "cd", offset: 2))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.outputSequence == 2
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        // Contiguous deltas (offset 0 then 2) both apply; no gap, no resync.
+        #expect(session.snapshotRequests.isEmpty)
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("abcd".utf8).base64EncodedString())
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 2)
+    }
+
+    @Test func appModelRequestsSnapshotOnDeltaGap() async throws {
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "ab", offset: 0)),
+            // Gap: offset 10 != expected 2 (bytes lost) -> request a snapshot, drop this delta.
+            .terminalOutput(TerminalOutput(tabID: "default", text: "XX", offset: 10))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            session.snapshotRequests.contains("default")
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        // The contiguous delta applied; the gapped one did not.
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("ab".utf8).base64EncodedString())
+        #expect(model.tabsByMachine[machine.id]?.first?.outputSequence == 1)
+        #expect(session.snapshotRequests == ["default"])
+    }
+
+    @Test func appModelTrimsOverlappingDelta() async throws {
+        let machine = activeMachine()
+        let remoteTab = offsetStreamTab()
+        let session = RecordingRelaySession(events: [
+            .sessionState(RemoteSessionState(tabs: [remoteTab])),
+            .terminalSnapshot(TerminalSnapshot(
+                tabID: "default",
+                profile: TerminalProfile(rows: 32, cols: 48),
+                text: "",
+                offset: 0
+            )),
+            .terminalOutput(TerminalOutput(tabID: "default", text: "abcd", offset: 0)),
+            // Overlap: offset 2 < expected 4, so the first 2 bytes ("cd") are
+            // already applied -> trim them and apply only the new tail ("ef").
+            .terminalOutput(TerminalOutput(tabID: "default", text: "cdef", offset: 2))
+        ], suspendWhenEmpty: true)
+        let model = offsetStreamModel(machine: machine, session: session)
+        let syncTask = Task { await model.syncSelectedMachineSession() }
+        defer { syncTask.cancel() }
+
+        try await waitUntil {
+            model.tabsByMachine[machine.id]?.first?.outputSequence == 2
+        }
+        syncTask.cancel()
+        await syncTask.value
+
+        #expect(session.snapshotRequests.isEmpty)
+        #expect(model.tabsByMachine[machine.id]?.first?.replayOutputBase64 == Data("abcdef".utf8).base64EncodedString())
+    }
+
     @Test func appModelAppliesLiveAgentStatusWithoutSnapshotRequest() async throws {
         let machine = activeMachine()
         let remoteTab = TerminalTab(
@@ -1251,6 +1342,28 @@ private func activeMachine() -> Machine {
             status: .active,
             expiresAt: "2026-05-29T00:00:00Z"
         )
+    )
+}
+
+private func offsetStreamTab() -> TerminalTab {
+    TerminalTab(
+        id: "default",
+        title: "shell",
+        state: .running,
+        widthMode: .phone,
+        profile: TerminalProfile(rows: 32, cols: 48),
+        agentStatus: AgentStatus(kind: .shell, state: .running, confidence: 0.5, source: "screen"),
+        previewText: "Relay session attached\nWaiting for terminal snapshot..."
+    )
+}
+
+@MainActor
+private func offsetStreamModel(machine: Machine, session: RecordingRelaySession) -> AppModel {
+    AppModel(
+        machines: [machine],
+        tabsByMachine: [machine.id: []],
+        selectedMachineID: machine.id,
+        relayClient: RecordingRelayClient(session: session)
     )
 }
 

@@ -167,7 +167,8 @@ struct HTTPRelayClient: RelayClient {
             tabID: snapshot.tabId,
             profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
             text: snapshot.text,
-            formattedBase64: (snapshot.formatted ?? "")
+            formattedBase64: (snapshot.formatted ?? ""),
+            offset: snapshot.offset
         )
     }
 
@@ -461,12 +462,18 @@ struct TerminalSnapshot: Equatable, Sendable {
     // Alt-screen-aware ANSI dump of the current screen (vt100 contents_formatted).
     // Rendering this reconstructs full-screen TUIs (Claude, Codex); plain `text` loses positioning.
     var formattedBase64: String = ""
+    // Absolute stream offset this snapshot represents; the phone adopts it as
+    // its baseline. nil from a legacy daemon (no offset tracking).
+    var offset: UInt64? = nil
 }
 
 struct TerminalOutput: Equatable, Sendable {
     var tabID: String
     var bytesBase64: String
     var isReplay: Bool = false
+    // Absolute start offset of these bytes in the tab's stream; nil from a
+    // legacy daemon, or for an isReplay tail (which is a full replace).
+    var offset: UInt64?
 
     var text: String {
         guard let data = Data(base64Encoded: bytesBase64),
@@ -477,14 +484,39 @@ struct TerminalOutput: Equatable, Sendable {
         return text
     }
 
-    init(tabID: String, bytesBase64: String, isReplay: Bool = false) {
+    /// Number of decoded bytes — used to advance the expected next offset.
+    var byteCount: Int {
+        Data(base64Encoded: bytesBase64)?.count ?? 0
+    }
+
+    /// Drop the first `n` decoded bytes (used to trim an overlap the phone has
+    /// already applied), advancing `offset` accordingly.
+    func droppingFirst(_ n: Int) -> TerminalOutput {
+        guard n > 0, let data = Data(base64Encoded: bytesBase64), n < data.count else {
+            return self
+        }
+        return TerminalOutput(
+            tabID: tabID,
+            bytesBase64: data.dropFirst(n).base64EncodedString(),
+            isReplay: isReplay,
+            offset: offset.map { $0 + UInt64(n) }
+        )
+    }
+
+    init(tabID: String, bytesBase64: String, isReplay: Bool = false, offset: UInt64? = nil) {
         self.tabID = tabID
         self.bytesBase64 = bytesBase64
         self.isReplay = isReplay
+        self.offset = offset
     }
 
-    init(tabID: String, text: String, isReplay: Bool = false) {
-        self.init(tabID: tabID, bytesBase64: Data(text.utf8).base64EncodedString(), isReplay: isReplay)
+    init(tabID: String, text: String, isReplay: Bool = false, offset: UInt64? = nil) {
+        self.init(
+            tabID: tabID,
+            bytesBase64: Data(text.utf8).base64EncodedString(),
+            isReplay: isReplay,
+            offset: offset
+        )
     }
 }
 
@@ -783,16 +815,20 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
                 text: snapshot.text,
-                formattedBase64: (snapshot.formatted ?? "")
+                formattedBase64: (snapshot.formatted ?? ""),
+                offset: snapshot.offset
             ))
         case .terminalOutput:
             guard let output = payload.data?.output else {
                 throw RelayClientError.invalidWebSocketMessage
             }
+            // Solicited output is a raw replay tail (full replace); its offset is
+            // ignored by the apply path because isReplay is true.
             return .terminalOutput(TerminalOutput(
                 tabID: output.tabId,
                 bytesBase64: output.bytesBase64,
-                isReplay: true
+                isReplay: true,
+                offset: output.offset
             ))
         case .terminalInput(let tabID):
             return .terminalInputAccepted(tabID: tabID)
@@ -813,13 +849,15 @@ private final class HTTPRelaySession: RelaySession, @unchecked Sendable {
                 tabID: snapshot.tabId,
                 profile: TerminalProfile(rows: snapshot.rows, cols: snapshot.cols),
                 text: snapshot.text,
-                formattedBase64: (snapshot.formatted ?? "")
+                formattedBase64: (snapshot.formatted ?? ""),
+                offset: snapshot.offset
             ))
         }
         if let output = data.output {
             return .terminalOutput(TerminalOutput(
                 tabID: output.tabId,
-                bytesBase64: output.bytesBase64
+                bytesBase64: output.bytesBase64,
+                offset: output.offset
             ))
         }
         if let agentStatus = try data.agentStatusUpdate {
@@ -1216,6 +1254,10 @@ private struct RelayDaemonDataResponse: Decodable {
     var text: String?
     var formatted: String?
     var bytesBase64: String?
+    // Absolute stream offset carried by deltas + snapshots (Phase 1 stream
+    // contract). Optional so a legacy daemon that omits it degrades gracefully
+    // to no gap detection.
+    var offset: UInt64?
     var agentStatus: RelayAgentStatusResponse?
     var accepted: Bool?
     var error: String?
@@ -1230,7 +1272,7 @@ private struct RelayDaemonDataResponse: Decodable {
         guard let tabId, let rows, let cols, let text else {
             return nil
         }
-        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text, formatted: formatted)
+        return RelayTerminalSnapshotResponse(tabId: tabId, rows: rows, cols: cols, text: text, formatted: formatted, offset: offset)
     }
 
     var output: RelayTerminalOutputResponse? {
@@ -1240,7 +1282,7 @@ private struct RelayDaemonDataResponse: Decodable {
         else {
             return nil
         }
-        return RelayTerminalOutputResponse(tabId: tabId, bytesBase64: bytesBase64)
+        return RelayTerminalOutputResponse(tabId: tabId, bytesBase64: bytesBase64, offset: offset)
     }
 
     var agentStatusUpdate: AgentStatusUpdate? {
@@ -1259,11 +1301,13 @@ private struct RelayTerminalSnapshotResponse: Decodable {
     var cols: Int
     var text: String
     var formatted: String?
+    var offset: UInt64?
 }
 
 private struct RelayTerminalOutputResponse: Decodable {
     var tabId: String
     var bytesBase64: String
+    var offset: UInt64?
 }
 
 private struct RelayTabResponse: Decodable {

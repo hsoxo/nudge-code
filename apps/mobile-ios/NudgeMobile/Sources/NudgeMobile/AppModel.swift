@@ -48,6 +48,14 @@ final class AppModel {
     private var relaySession: (any RelaySession)?
     private var relaySessionMachineID: String?
     private var computerProfilesByTabKey: [String: TerminalProfile] = [:]
+    // Phase 1 stream contract: the expected next absolute stream offset per tab,
+    // set when a snapshot is adopted and advanced as deltas apply. Absent means
+    // no baseline yet (no snapshot received, or a legacy daemon without offsets).
+    @ObservationIgnored private var terminalNextOffsetByTabKey: [String: UInt64] = [:]
+    // Tabs that detected a gap and are awaiting a re-baseline snapshot; interim
+    // deltas are dropped so a burst of out-of-order deltas can't trigger a storm
+    // of snapshot requests.
+    @ObservationIgnored private var terminalAwaitingSnapshotTabKeys: Set<String> = []
     @ObservationIgnored private var relaySessionSuspendedForBackground = false
 
     init(
@@ -693,6 +701,10 @@ final class AppModel {
         }
         relaySession = session
         relaySessionMachineID = machineID
+        // A fresh relay session re-syncs from scratch: drop any stale per-tab
+        // stream offsets so the next snapshot re-establishes each baseline.
+        terminalNextOffsetByTabKey.removeAll()
+        terminalAwaitingSnapshotTabKeys.removeAll()
         markMachine(machineID: machineID, state: .online, text: "relay session connected")
         try await session.setPhoneProfile(phoneProfile)
         try await session.requestSessionState()
@@ -725,7 +737,7 @@ final class AppModel {
         case .terminalSnapshot(let snapshot):
             applyTerminalSnapshot(snapshot, machineID: machineID)
         case .terminalOutput(let output):
-            applyTerminalOutput(output, machineID: machineID)
+            await applyTerminalDelta(output, machineID: machineID, session: session)
         case .agentStatus(let update):
             applyAgentStatus(update, machineID: machineID)
         case .terminalInputAccepted(let tabID):
@@ -804,6 +816,13 @@ final class AppModel {
     }
 
     private func applyTerminalSnapshot(_ snapshot: TerminalSnapshot, machineID: String) {
+        // Adopt the snapshot's stream offset as the new baseline UNCONDITIONALLY:
+        // restart and daemon-restart reset the byte axis, so we must not gate on
+        // offset >= the current expected value. A legacy daemon omits offset, in
+        // which case the key is cleared and we fall back to no gap detection.
+        let key = tabProfileKey(machineID: machineID, tabID: snapshot.tabID)
+        terminalNextOffsetByTabKey[key] = snapshot.offset
+        terminalAwaitingSnapshotTabKeys.remove(key)
         updateTab(machineID: machineID, tabID: snapshot.tabID) { tab in
             tab.profile = snapshot.profile
             if snapshot.formattedBase64.isEmpty {
@@ -841,6 +860,67 @@ final class AppModel {
             tab.pendingOutputBase64 = output.bytesBase64
             tab.outputSequence += 1
         }
+    }
+
+    /// Apply a live terminal delta with Phase 1 gap detection. A replay tail is a
+    /// full replace (no offset tracking). For an offset-carrying delta we apply
+    /// only the contiguous continuation, trim an overlap we already hold, and on
+    /// a gap (or before any baseline) request a re-baseline snapshot and drop
+    /// interim deltas until it arrives. A legacy daemon (no offset) applies as-is.
+    private func applyTerminalDelta(
+        _ output: TerminalOutput,
+        machineID: String,
+        session: any RelaySession
+    ) async {
+        if output.isReplay {
+            applyTerminalOutput(output, machineID: machineID)
+            return
+        }
+        guard let offset = output.offset else {
+            // Legacy daemon without offsets — no gap detection, apply as-is.
+            applyTerminalOutput(output, machineID: machineID)
+            return
+        }
+        let key = tabProfileKey(machineID: machineID, tabID: output.tabID)
+        guard let next = terminalNextOffsetByTabKey[key] else {
+            // No baseline yet: request a snapshot once, drop deltas until it lands.
+            await requestResyncSnapshot(key: key, tabID: output.tabID, session: session)
+            return
+        }
+        if terminalAwaitingSnapshotTabKeys.contains(key) {
+            return
+        }
+        let length = UInt64(output.byteCount)
+        if offset == next {
+            applyTerminalOutput(output, machineID: machineID)
+            terminalNextOffsetByTabKey[key] = next + length
+        } else if offset > next {
+            // Gap: bytes between `next` and `offset` were lost. Re-baseline.
+            await requestResyncSnapshot(key: key, tabID: output.tabID, session: session)
+        } else {
+            // offset < next: we already applied a prefix of these bytes. Trim the
+            // overlap and apply only the new tail (drop entirely if fully old).
+            let alreadyApplied = next - offset
+            if alreadyApplied >= length {
+                return
+            }
+            applyTerminalOutput(output.droppingFirst(Int(alreadyApplied)), machineID: machineID)
+            terminalNextOffsetByTabKey[key] = offset + length
+        }
+    }
+
+    private func requestResyncSnapshot(
+        key: String,
+        tabID: String,
+        session: any RelaySession
+    ) async {
+        guard !terminalAwaitingSnapshotTabKeys.contains(key) else {
+            return
+        }
+        terminalAwaitingSnapshotTabKeys.insert(key)
+        // Best-effort, matching the sessionState handler: a tab that cannot
+        // currently stream must not throw and tear down the whole relay session.
+        try? await session.requestTerminalSnapshot(tabID: tabID)
     }
 
     private func applyAgentStatus(_ update: AgentStatusUpdate, machineID: String) {
