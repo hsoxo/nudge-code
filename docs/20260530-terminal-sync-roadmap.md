@@ -1,7 +1,8 @@
 # Terminal Sync Roadmap
 
 - **Date:** 2026-05-30
-- **Status:** Proposed (planning doc — no code changed yet)
+- **Status:** Phase 0 shipped (2026-05-30); Phases 1–5 proposed
+- **Progress:** Phase 0 complete — 0.1 overflow→snapshot `0bbb5ae`, 0.3 adaptive flush `f3c8f1f`, 0.2 placeholder clear `8367704`.
 - **Scope:** computer (daemon) ↔ phone (iOS `xterm.js`) terminal synchronization — latency, accuracy ("不出混乱"), robustness, resize/reflow, efficiency.
 - **Inputs:** independent reviews by Claude and Codex (Codex confirmed all of Claude's findings and added the deeper correctness items). Findings IDs below are the merged set.
 
@@ -58,7 +59,7 @@ Key constants: flush `100ms`, pending cap `64KB` (head-dropped), grid `scrollbac
 | **M4** | MED | Background (non-focused) tabs flush at focused-tab cadence | `lib.rs:2644` |
 | **L1** | LOW | base64-in-JSON-in-WS, doubled under E2E | `lib.rs:3209`, `e2e.rs:184` |
 | **L2** | LOW | iOS re-base64 of 64KB/delta (O(n²)); JS per-byte buffers | `AppModel.swift:831`, `index.html:238` |
-| **L3** | LOW | Placeholder text persists on the tail-replay path | `AppModel.swift:825` |
+| **L3** | LOW | Placeholder text persists on the tail-replay path (✅ fixed `8367704`) | `AppModel.swift:825` |
 
 ---
 
