@@ -305,6 +305,14 @@ enum RelayControlRequest {
         request_id: String,
         rows: u32,
         cols: u32,
+        /// Phone capability hint (Phase 4.1 Level A): when true, the daemon may
+        /// stream live terminal deltas as a binary E2E plaintext instead of
+        /// base64-in-JSON. Optional + `default` so it is backward compatible
+        /// (legacy phones never send it → JSON) and forward compatible (an older
+        /// daemon decoding a newer phone ignores the unknown field → JSON). Only
+        /// honored when an E2E session is active.
+        #[serde(rename = "supportsBinaryTerminal", default)]
+        supports_binary_terminal: bool,
     },
     SetWidthMode {
         #[serde(rename = "requestId")]
@@ -1656,6 +1664,11 @@ struct DaemonRuntime {
     // a snapshot when they regain focus (their phone-side offset goes stale).
     // `None` means stream every tab (legacy phones never set it).
     focused_tab: Arc<Mutex<Option<String>>>,
+    /// Phone-advertised capability (Phase 4.1 Level A): stream terminal deltas as
+    /// a binary E2E plaintext rather than base64-in-JSON. Negotiated via
+    /// `set_phone_profile`'s `supportsBinaryTerminal`; reset to false on each new
+    /// relay connection so a reconnect re-negotiates.
+    terminal_binary_supported: Arc<Mutex<bool>>,
 }
 
 impl DaemonRuntime {
@@ -1682,6 +1695,7 @@ impl DaemonRuntime {
             started_at: Instant::now(),
             socket_path,
             focused_tab: Arc::new(Mutex::new(None)),
+            terminal_binary_supported: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -2306,6 +2320,14 @@ impl DaemonRuntime {
         self.focused_tab.lock().await.clone()
     }
 
+    async fn set_terminal_binary_supported(&self, supported: bool) {
+        *self.terminal_binary_supported.lock().await = supported;
+    }
+
+    async fn terminal_binary_supported(&self) -> bool {
+        *self.terminal_binary_supported.lock().await
+    }
+
     async fn mark_relay_message(&self) {
         let mut relay_state = self.relay_state.lock().await;
         relay_state.last_message_at = Some(now_string());
@@ -2645,6 +2667,9 @@ async fn connect_relay_once(runtime: &DaemonRuntime, binding: &BindingState) -> 
     // could point at a now-closed/different tab and would background-filter the
     // whole stream. The phone re-sends focus right after it syncs sessionState.
     runtime.set_focused_tab(None).await;
+    // Re-negotiate the binary-terminal capability per connection: default to the
+    // JSON path until the phone re-advertises support via set_phone_profile.
+    runtime.set_terminal_binary_supported(false).await;
     let min_interval = relay_terminal_flush_interval();
     let mut terminal_flush = interval(min_interval);
     terminal_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -3029,7 +3054,11 @@ async fn handle_relay_control_request(
             request_id,
             rows,
             cols,
+            supports_binary_terminal,
         } => {
+            runtime
+                .set_terminal_binary_supported(supports_binary_terminal)
+                .await;
             let rows = match u16::try_from(rows) {
                 Ok(rows) => rows,
                 Err(error) => return RelayControlResponse::error(request_id, error),
@@ -3289,6 +3318,10 @@ where
     for tab_id in &snapshot_required {
         outputs.entry(tab_id.clone()).or_default();
     }
+    // Read the negotiated capability once per flush (connection-global, not
+    // per-tab). Phase 4.1 Level A: terminal deltas go out as a binary E2E
+    // plaintext only when the phone advertised support AND a session is active.
+    let binary_supported = runtime.terminal_binary_supported().await;
     for (tab_id, pending) in outputs {
         // Background (non-focused) tabs are skipped entirely: we drop both their
         // pending delta and their snapshot for this flush. Their phone-side
@@ -3298,22 +3331,37 @@ where
         if tab_is_focus_filtered(focused.as_deref(), &tab_id) {
             continue;
         }
-        let payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &pending.data) {
-            live_terminal_snapshot_payload(runtime, binding, &tab_id).await
+        let relay_payload = if tab_requires_snapshot(&snapshot_required, &tab_id, &pending.data) {
+            // Snapshots stay on the JSON path: infrequent, and keeping them
+            // human-readable aids debugging.
+            let Some(payload) = live_terminal_snapshot_payload(runtime, binding, &tab_id).await
+            else {
+                continue;
+            };
+            relay_live_payload(binding, payload, e2e_session.as_deref_mut())?
         } else {
             let _ = runtime.refresh_agent_status_from_grid(&tab_id).await;
-            Some(relay_live_terminal_output_payload(
-                binding,
-                &tab_id,
-                pending.offset,
-                &pending.data,
-            ))
+            if binary_supported && e2e_session.is_some() {
+                // Phase 4.1 Level A: binary delta plaintext (drops the inner
+                // base64). Encrypted under TERMINAL_BIN_MESSAGE_TYPE.
+                relay_live_terminal_delta_binary_payload(
+                    &tab_id,
+                    pending.offset,
+                    &pending.data,
+                    e2e_session.as_deref_mut(),
+                )?
+            } else {
+                let payload = relay_live_terminal_output_payload(
+                    binding,
+                    &tab_id,
+                    pending.offset,
+                    &pending.data,
+                );
+                relay_live_payload(binding, payload, e2e_session.as_deref_mut())?
+            }
         };
-        let Some(payload) = payload else { continue };
-        let Some(payload) = relay_live_payload(binding, payload, e2e_session.as_deref_mut())? else {
-            continue;
-        };
-        let message = relay_message_json(bound_phone_id, None, payload);
+        let Some(relay_payload) = relay_payload else { continue };
+        let message = relay_message_json(bound_phone_id, None, relay_payload);
         websocket
             .send(WebSocketMessage::Text(message.into()))
             .await
@@ -3347,6 +3395,70 @@ fn relay_live_payload(
         .keys
         .encrypt("daemon_live_terminal", payload.to_string().as_bytes())?;
     Ok(Some(e2e::envelope_to_relay_payload(&encrypted)))
+}
+
+/// Phase 4.1 Level A — message type + binary plaintext layout for a live
+/// terminal delta. Encrypted under this message type so the phone tells binary
+/// deltas apart from JSON payloads via the (AAD-authenticated) envelope
+/// `messageType`. The relay never sees plaintext, so this is a private
+/// daemon↔phone contract — no relay change. Layout (big-endian):
+///
+/// ```text
+/// [0]      version  u8  = TERMINAL_BIN_VERSION (1)
+/// [1]      kind     u8  = TERMINAL_BIN_KIND_DELTA (1)
+/// [2..10]  offset   u64  absolute stream offset (matches the JSON `offset`)
+/// [10..12] tab_len  u16
+/// [12..]   tab_id   UTF-8 (tab_len bytes), then the raw terminal bytes to EOF
+/// ```
+const TERMINAL_BIN_MESSAGE_TYPE: &str = "daemon_live_terminal_bin";
+const TERMINAL_BIN_VERSION: u8 = 1;
+const TERMINAL_BIN_KIND_DELTA: u8 = 1;
+
+fn terminal_delta_binary_plaintext(tab_id: &str, offset: u64, data: &[u8]) -> Vec<u8> {
+    let tab = tab_id.as_bytes();
+    let tab_len = u16::try_from(tab.len()).unwrap_or(u16::MAX);
+    let tab = &tab[..tab_len as usize];
+    let mut frame = Vec::with_capacity(12 + tab.len() + data.len());
+    frame.push(TERMINAL_BIN_VERSION);
+    frame.push(TERMINAL_BIN_KIND_DELTA);
+    frame.extend_from_slice(&offset.to_be_bytes());
+    frame.extend_from_slice(&tab_len.to_be_bytes());
+    frame.extend_from_slice(tab);
+    frame.extend_from_slice(data);
+    frame
+}
+
+/// Encrypt a binary terminal-delta plaintext into an E2E relay payload. Returns
+/// `None` when there is no E2E session (binary plaintext requires encryption);
+/// the flush path only selects this when a session is active, and falls back to
+/// the JSON payload otherwise.
+fn relay_live_terminal_delta_binary_payload(
+    tab_id: &str,
+    offset: u64,
+    data: &[u8],
+    e2e_session: Option<&mut RelayE2ESession>,
+) -> Result<Option<Value>> {
+    let Some(session) = e2e_session else {
+        return Ok(None);
+    };
+    let plaintext = terminal_delta_binary_plaintext(tab_id, offset, data);
+    let encrypted = session.keys.encrypt(TERMINAL_BIN_MESSAGE_TYPE, &plaintext)?;
+    Ok(Some(e2e::envelope_to_relay_payload(&encrypted)))
+}
+
+#[cfg(test)]
+fn parse_terminal_delta_binary_plaintext(frame: &[u8]) -> Option<(String, u64, Vec<u8>)> {
+    if frame.len() < 12 || frame[0] != TERMINAL_BIN_VERSION || frame[1] != TERMINAL_BIN_KIND_DELTA {
+        return None;
+    }
+    let offset = u64::from_be_bytes(frame[2..10].try_into().ok()?);
+    let tab_len = u16::from_be_bytes(frame[10..12].try_into().ok()?) as usize;
+    if frame.len() < 12 + tab_len {
+        return None;
+    }
+    let tab_id = String::from_utf8(frame[12..12 + tab_len].to_vec()).ok()?;
+    let data = frame[12 + tab_len..].to_vec();
+    Some((tab_id, offset, data))
 }
 
 fn relay_live_terminal_snapshot_payload(
@@ -4582,6 +4694,87 @@ mod tests {
         assert_eq!(runtime.focused_tab().await, None);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn set_phone_profile_negotiates_binary_terminal_capability() {
+        let _env = DaemonPlanEnvGuard::unset();
+        let root = std::env::temp_dir().join(format!(
+            "nudge-relay-binary-cap-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let state_path = root.join("state").join("session.json");
+        let socket_path = root.join("run").join("nudge.sock");
+        let runtime = DaemonRuntime::new(
+            StateStore::new(state_path),
+            MachineSession::new_default(),
+            socket_path,
+        );
+
+        // Default: JSON path (legacy phones never advertise binary support).
+        assert!(!runtime.terminal_binary_supported().await);
+
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::SetPhoneProfile {
+                request_id: "profile-1".to_string(),
+                rows: 24,
+                cols: 80,
+                supports_binary_terminal: true,
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert!(runtime.terminal_binary_supported().await);
+
+        // A phone that stops advertising support reverts to the JSON path.
+        let response = handle_relay_control_request(
+            &runtime,
+            RelayControlRequest::SetPhoneProfile {
+                request_id: "profile-2".to_string(),
+                rows: 30,
+                cols: 100,
+                supports_binary_terminal: false,
+            },
+        )
+        .await;
+        assert!(response.ok);
+        assert!(!runtime.terminal_binary_supported().await);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn terminal_delta_binary_plaintext_round_trips() {
+        // Raw terminal bytes include non-UTF-8 (0xff) and NUL — the binary path
+        // must carry them verbatim (the whole point vs. base64-in-JSON).
+        let data: &[u8] = b"hello\x1b[0m\xff\x00world";
+        let offset: u64 = 0x0102_0304_0506_0708;
+        let frame = terminal_delta_binary_plaintext("tab-7", offset, data);
+        assert_eq!(frame[0], TERMINAL_BIN_VERSION);
+        assert_eq!(frame[1], TERMINAL_BIN_KIND_DELTA);
+        assert_eq!(&frame[2..10], offset.to_be_bytes().as_slice());
+        assert_eq!(&frame[10..12], 5u16.to_be_bytes().as_slice());
+        let (tab_id, parsed_offset, parsed) =
+            parse_terminal_delta_binary_plaintext(&frame).expect("round-trips");
+        assert_eq!(tab_id, "tab-7");
+        assert_eq!(parsed_offset, offset);
+        assert_eq!(parsed.as_slice(), data);
+    }
+
+    #[test]
+    fn parse_terminal_delta_binary_plaintext_rejects_malformed() {
+        // Shorter than the 12-byte header.
+        assert!(parse_terminal_delta_binary_plaintext(&[1, 1, 0, 0]).is_none());
+        // Wrong version byte.
+        let mut wrong_version = terminal_delta_binary_plaintext("t", 1, b"x");
+        wrong_version[0] = 2;
+        assert!(parse_terminal_delta_binary_plaintext(&wrong_version).is_none());
+        // tab_len claims more bytes than the frame holds.
+        let mut overlong_tab = terminal_delta_binary_plaintext("tab", 1, b"");
+        overlong_tab[11] = 250;
+        assert!(parse_terminal_delta_binary_plaintext(&overlong_tab).is_none());
     }
 
     #[tokio::test]

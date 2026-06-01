@@ -5,6 +5,38 @@ import Testing
 
 @Suite("Relay client")
 struct RelayClientTests {
+    // Phase 4.1 Level A: the phone-side binary terminal-delta parser must mirror
+    // the daemon's `terminal_delta_binary_plaintext` exactly, including raw
+    // (non-UTF-8) terminal bytes.
+    @Test func binaryTerminalDeltaParsesTabOffsetAndRawBytes() throws {
+        let tabID = "tab-7"
+        let offset: UInt64 = 0x0102_0304_0506_0708
+        let raw = Data([0x1b, 0x5b, 0x30, 0x6d, 0xff, 0x00, 0x41]) // ESC[0m, 0xff, NUL, 'A'
+        var frame = Data([1, 1]) // version, kind=delta
+        frame.append(contentsOf: withUnsafeBytes(of: offset.bigEndian, Array.init))
+        frame.append(contentsOf: withUnsafeBytes(of: UInt16(tabID.utf8.count).bigEndian, Array.init))
+        frame.append(contentsOf: Array(tabID.utf8))
+        frame.append(raw)
+
+        let parsed = parseBinaryTerminalDelta(frame)
+        #expect(parsed?.tabID == tabID)
+        #expect(parsed?.offset == offset)
+        #expect(parsed?.data == raw)
+    }
+
+    @Test func binaryTerminalDeltaRejectsMalformedFrames() throws {
+        // Shorter than the 12-byte header.
+        #expect(parseBinaryTerminalDelta(Data([1, 1, 0, 0])) == nil)
+        // Wrong version byte.
+        #expect(parseBinaryTerminalDelta(Data([2, 1] + Array(repeating: UInt8(0), count: 12))) == nil)
+        // tabLen claims more bytes than the frame holds.
+        var overlong = Data([1, 1])
+        overlong.append(contentsOf: Array(repeating: UInt8(0), count: 8)) // offset
+        overlong.append(contentsOf: [0x00, 0xfa]) // tabLen = 250
+        overlong.append(contentsOf: Array("tab".utf8))
+        #expect(parseBinaryTerminalDelta(overlong) == nil)
+    }
+
     @Test func claimBindingRegistersPhoneThenClaimsCode() async throws {
         URLProtocolStub.reset()
         URLProtocolStub.responses = [

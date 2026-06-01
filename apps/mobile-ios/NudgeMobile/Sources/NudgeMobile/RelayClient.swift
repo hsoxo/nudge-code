@@ -1021,7 +1021,65 @@ private func decodeDaemonPayload(
     let envelope = try rawPayload.e2eEnvelope()
     let plaintext = try session.decrypt(envelope)
     e2eSession = session
+    // Phase 4.1 Level A: a binary terminal-delta plaintext (flagged by the
+    // AAD-authenticated envelope messageType) is decoded into the same daemon-
+    // response shape the JSON path produces, so the event path is unchanged.
+    if rawPayload.messageType == "daemon_live_terminal_bin" {
+        return try decodeBinaryTerminalDelta(plaintext)
+    }
     return try JSONDecoder().decode(RelayDaemonPayload.self, from: plaintext)
+}
+
+/// Phase 4.1 Level A — parse a binary terminal-delta plaintext into (tabID,
+/// offset, raw bytes). Mirrors the daemon's `terminal_delta_binary_plaintext`
+/// (big-endian): [0]=version(1) [1]=kind(1) [2..10]=offset u64 [10..12]=tabLen
+/// u16 [12..]=tabID UTF-8 then raw bytes. Internal (not private) for unit tests;
+/// returns nil on any malformed frame.
+func parseBinaryTerminalDelta(_ plaintext: Data) -> (tabID: String, offset: UInt64, data: Data)? {
+    let bytes = [UInt8](plaintext)
+    guard bytes.count >= 12, bytes[0] == 1, bytes[1] == 1 else {
+        return nil
+    }
+    var offset: UInt64 = 0
+    for i in 2..<10 {
+        offset = (offset << 8) | UInt64(bytes[i])
+    }
+    let tabLen = (Int(bytes[10]) << 8) | Int(bytes[11])
+    guard bytes.count >= 12 + tabLen,
+          let tabID = String(bytes: bytes[12..<(12 + tabLen)], encoding: .utf8)
+    else {
+        return nil
+    }
+    return (tabID, offset, Data(bytes[(12 + tabLen)...]))
+}
+
+private struct SyntheticBinaryDeltaPayload: Encodable {
+    let type = "daemon_response"
+    let ok = true
+    let data: Payload
+    struct Payload: Encodable {
+        let tabId: String
+        let offset: UInt64
+        let bytesBase64: String
+    }
+}
+
+/// Decode a binary terminal-delta plaintext into a RelayDaemonPayload shaped like
+/// the JSON live-output payload, so `fallbackEvent` yields a `.terminalOutput`.
+/// (The bytes are re-base64'd here to fit the existing String-backed
+/// TerminalOutput; the wire savings — no inner base64 — already stand.)
+private func decodeBinaryTerminalDelta(_ plaintext: Data) throws -> RelayDaemonPayload {
+    guard let parsed = parseBinaryTerminalDelta(plaintext) else {
+        throw RelayClientError.invalidWebSocketMessage
+    }
+    let synthetic = SyntheticBinaryDeltaPayload(
+        data: .init(
+            tabId: parsed.tabID,
+            offset: parsed.offset,
+            bytesBase64: parsed.data.base64EncodedString()
+        )
+    )
+    return try JSONDecoder().decode(RelayDaemonPayload.self, from: JSONEncoder().encode(synthetic))
 }
 
 private func openE2ESessionIfPossible(
@@ -1125,6 +1183,10 @@ private struct RelaySetPhoneProfilePayload: Encodable {
     var requestId: String
     var rows: Int
     var cols: Int
+    // Phase 4.1 Level A: advertise that this phone can decode binary terminal-
+    // delta plaintext. A daemon that doesn't understand the field ignores it and
+    // stays on the JSON path (serde ignores unknown fields).
+    var supportsBinaryTerminal = true
 }
 
 private struct RelayCreateTabPayload: Encodable {
